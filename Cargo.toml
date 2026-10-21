@@ -15,6 +15,7 @@ members = [
   "apps/hamesh-cli",
   "apps/hamesh-faults",
   "apps/hamesh-drill",
+  "apps/hamesh-mcp",
 ]
 resolver = "2"
 
