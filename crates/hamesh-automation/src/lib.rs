@@ -437,10 +437,13 @@ mod tests {
             "win",
             Component::new("composer", Role::TextInput, "composer").with_prop("h", "36"),
         );
-        let mut w = hamesh_widgets::Widgets::default();
-        w.composer_id = "composer".to_string();
-        w.feed_id = "feed".to_string();
-        w.focus = hamesh_widgets::Focus::rebuild(&app);
+        let w = hamesh_widgets::Widgets {
+            composer_id: "composer".to_string(),
+            feed_id: "feed".to_string(),
+            feed_viewport: 400.0,
+            focus: hamesh_widgets::Focus::rebuild(&app),
+            ..Default::default()
+        };
         let layout = hamesh_layout::compute(&app, 800.0, 600.0);
         (app, w, layout)
     }

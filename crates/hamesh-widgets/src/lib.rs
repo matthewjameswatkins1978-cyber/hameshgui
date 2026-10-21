@@ -434,10 +434,13 @@ mod tests {
             "win",
             Component::new("composer", Role::TextInput, "composer").with_prop("h", "36"),
         );
-        let mut w = Widgets::default();
-        w.composer_id = "composer".to_string();
-        w.feed_id = "feed".to_string();
-        w.focus = Focus::rebuild(&app);
+        let w = Widgets {
+            composer_id: "composer".to_string(),
+            feed_id: "feed".to_string(),
+            feed_viewport: 400.0,
+            focus: Focus::rebuild(&app),
+            ..Default::default()
+        };
         // Focus starts on the feed (document order); Tab reaches composer.
         (app, w)
     }

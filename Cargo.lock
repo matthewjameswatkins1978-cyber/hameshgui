@@ -835,6 +835,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "hamesh-faults"
+version = "0.1.0"
+dependencies = [
+ "hamesh-automation",
+ "hamesh-core",
+ "hamesh-diag",
+ "hamesh-inspect",
+ "hamesh-layout",
+ "hamesh-render",
+ "hamesh-scene",
+ "hamesh-widgets",
+ "serde_json",
+]
+
+[[package]]
 name = "hamesh-inspect"
 version = "0.1.0"
 dependencies = [

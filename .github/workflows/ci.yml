@@ -1,0 +1,49 @@
+name: hamesh-ci
+
+on:
+  push:
+    branches: [main, "hamesh/**"]
+  pull_request:
+    branches: [main]
+
+# Hosted runners cannot do what Hamesh most needs to prove (real GPU
+# presentation, visible desktop interaction). CI therefore gates everything
+# deterministic and headless, and explicitly does NOT fake GPU acceptance.
+# GPU/window evidence comes from local smoke runs whose traces are
+# documented in docs/decisions (see MUSE.md / decision 010).
+#
+# What CI covers:
+# - formatting, lints (with tests), unit + integration tests
+# - headless Eye/Hand drills (M1/M2 + M3 binaries must exit 0)
+# What CI deliberately does NOT cover:
+# - winit windows, wgpu/Vello presentation, OS screenshots, IME, Narrator.
+#   Those run on a real machine via --smoke-test before merge claims.
+
+jobs:
+  build-and-test:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust stable
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      - name: Format check
+        run: cargo fmt --all -- --check
+
+      - name: Clippy (all targets, warnings denied)
+        run: cargo clippy --workspace --all-targets -- -D warnings
+
+      - name: Tests
+        run: cargo test --workspace
+
+      - name: Headless Eye/Hand drills (M1+M2)
+        run: cargo run -p hamesh-demo --bin hamesh-demo
+
+      - name: Headless M3 drills (composer + feed + keyboard)
+        run: cargo run -p hamesh-demo --bin hamesh-m3
+
+      - name: Standing fault drills (diagnose, repair, verify)
+        run: cargo run -p hamesh-faults

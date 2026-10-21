@@ -143,7 +143,7 @@ pub fn proof_png(glyphs: &[RasterGlyph], path: &str) -> (usize, usize) {
 }
 
 #[cfg(test)]
-mod glue {
+mod tests {
     use super::*;
     use crate::SAMPLE;
 

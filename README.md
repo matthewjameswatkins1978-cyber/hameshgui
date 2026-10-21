@@ -37,6 +37,9 @@ the Memory (bounded diagnostic traces and replay evidence).
       the UI thread's exact handlers; stale revisions refused, wait is
       non-blocking. First independent debugging exercise done via the
       external loop (decision 013).
+- [x] Standing fault drills (3 broken controls, diagnose/repair/verify)
+      in CI, plus lightweight GitHub gates (fmt/clippy/test/headless)
+      with GPU/desktop explicitly out (decision 014).
 - [ ] Accessibility bridge (AccessKit): planned.
 
 ## Workspace
