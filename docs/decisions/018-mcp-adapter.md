@@ -52,3 +52,15 @@ Hamesh-specific tooling.
 - Open: `isError` mapping for STALE/DENIED, session-scoped discovery,
   and a standing MCP drill (today the drill covers the CLI; the MCP
   session script lives in `target/` as scratch, not yet a binary).
+
+## Addendum 2026-10-21 — standing MCP drill
+
+- New `apps/hamesh-mcp-drill` (local-only, never CI): builds both ends,
+  opens the window, and runs the full session asserted step by step —
+  handshake, 7-tool list, map (R1), type (R2), stale Enter rejected
+  in-band (`code: STALE`, rev unchanged), fresh re-map, ordered submit
+  carrying the drill text, snapshot, clean stdin-EOF shutdown, and the
+  window's own trace as the independent witness.
+- Live: `DRILL-PASS ... (revs 8->9->9->10)` first run.
+- Remaining open: `isError` mapping for STALE/DENIED, session-scoped
+  discovery.
