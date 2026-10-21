@@ -47,3 +47,20 @@ prescribes, and verify — deterministically, with no model in the loop.
   machine-checked.
 - The drill takes ~75s wall time (waits out the smoke clock for the
   trace dump); keep it out of CI and out of the default workflow.
+
+## Addendum 2026-10-21 — `wait` coverage and a real server bug
+
+- Extended the drill with `wait` in all three shapes: immediate
+  (`waited:false`), parked-then-TIMEOUT (exit 1 / `code: TIMEOUT`),
+  and parked-then-woken by a concurrent `type` from a background
+  thread (`waited:true`, rev advanced).
+- The wake step **failed first** and exposed a genuine defect: the
+  inspector server ran a single-threaded accept loop, so a parked
+  `wait` held the only server thread in `recv_timeout` — the change it
+  waited for could never arrive through the inspector. `wait` could
+  only ever observe UI-thread-side changes, never another client's.
+- Fix: one thread per connection (`Arc<Mutex<send>>`); the UI thread
+  stays the serializer (check_stale + apply run there, in send
+  order), per-connection request order preserved by each
+  connection's sequential loop. Dev-only local threat model unchanged.
+- Live after fix: `DRILL-PASS ... (revs 8->9->9->10->11)`.

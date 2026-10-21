@@ -32,17 +32,24 @@ fn step(n: usize, name: &str) {
     println!("DRILL-STEP {n}: {name}");
 }
 
-/// Run the external CLI once; return (exit code, stdout).
-fn cli(child: &mut Child, args: &[&str]) -> (i32, String) {
-    if let Ok(Some(status)) = child.try_wait() {
-        fail(format!("window exited early with {status} before CLI step"));
-    }
+/// Raw CLI run without the window-liveness guard (for background threads;
+/// `Child` can't be shared across them — a dead window surfaces here as a
+/// connect failure instead).
+fn cli_raw(args: &[&str]) -> (i32, String) {
     let out = Command::new(exe("hamesh"))
         .args(args)
         .output()
         .unwrap_or_else(|e| fail(format!("failed to run hamesh CLI: {e}")));
     let code = out.status.code().unwrap_or(1);
     (code, String::from_utf8_lossy(&out.stdout).to_string())
+}
+
+/// Run the external CLI once; return (exit code, stdout).
+fn cli(child: &mut Child, args: &[&str]) -> (i32, String) {
+    if let Ok(Some(status)) = child.try_wait() {
+        fail(format!("window exited early with {status} before CLI step"));
+    }
+    cli_raw(args)
 }
 
 fn app_rev(out: &str) -> u64 {
@@ -175,8 +182,66 @@ fn main() {
         fail("snapshot file is empty".to_string());
     }
 
+    step(9, "wait op: immediate, timeout, and wake-on-change");
+    // Already past r3: immediate Ok with waited:false.
+    let (code, out) = cli(&mut child, &["wait", &r3.to_string(), "3000"]);
+    if code != 0 {
+        fail(format!("immediate wait failed with code {code}: {out}"));
+    }
+    let wv: serde_json::Value =
+        serde_json::from_str(&out).unwrap_or_else(|_| fail(format!("wait reply not JSON: {out}")));
+    if wv
+        .get("result")
+        .and_then(|r| r.get("waited"))
+        .and_then(|w| w.as_bool())
+        != Some(false)
+    {
+        fail(format!("expected immediate waited:false: {out}"));
+    }
+    if app_rev(&out) != r4 {
+        fail(format!("wait should report current rev {r4}: {out}"));
+    }
+    // Parked with nothing changing: TIMEOUT (CLI exit 1, code TIMEOUT).
+    let (code, out) = cli(&mut child, &["wait", &r4.to_string(), "2500"]);
+    if code != 1 || !code_is(&out, "TIMEOUT") {
+        fail(format!(
+            "parked wait should time out (exit 1/TIMEOUT), got {code}: {out}"
+        ));
+    }
+    // Parked then woken: background waiter, main thread moves the rev.
+    let r4s = r4.to_string();
+    let waiter = std::thread::spawn(move || cli_raw(&["wait", r4s.as_str(), "15000"]));
+    std::thread::sleep(Duration::from_secs(1));
+    let (code, out) = cli(&mut child, &["type", "composer", "wait probe"]);
+    if code != 0 {
+        fail(format!("wake-up type failed with code {code}: {out}"));
+    }
+    let r5 = app_rev(&out);
+    if r5 <= r4 {
+        fail(format!("wake-up type did not advance rev: {r4} -> {r5}"));
+    }
+    let (code, out) = waiter
+        .join()
+        .unwrap_or_else(|_| fail("waiter thread panicked".to_string()));
+    if code != 0 {
+        fail(format!("woken wait failed with code {code}: {out}"));
+    }
+    let wv: serde_json::Value =
+        serde_json::from_str(&out).unwrap_or_else(|_| fail(format!("wait reply not JSON: {out}")));
+    if wv
+        .get("result")
+        .and_then(|r| r.get("waited"))
+        .and_then(|w| w.as_bool())
+        != Some(true)
+    {
+        fail(format!("expected waited:true after the rev moved: {out}"));
+    }
+    if app_rev(&out) != r5 {
+        fail(format!("woken wait should report rev {r5}: {out}"));
+    }
+
     step(
-        9,
+        10,
         "wait for the smoke clock, then check the window's own trace",
     );
     let status = child
@@ -204,5 +269,5 @@ fn main() {
         fail("trace has no submitted record for the drill text".to_string());
     }
 
-    println!("DRILL-PASS stale-inject -> repair -> submit verified (revs {r1}->{r2}->{r3}->{r4})");
+    println!("DRILL-PASS stale-inject -> repair -> submit -> wait verified (revs {r1}->{r2}->{r3}->{r4}->{r5})");
 }

@@ -185,10 +185,18 @@ fn parse_op(v: &serde_json::Value) -> Result<Op, String> {
 /// the UI thread; `allow` decides which peer addresses may connect
 /// (default: loopback only — pass an explicit predicate to widen it,
 /// which the dev server never does).
-pub fn serve<F>(listener: std::net::TcpListener, token: String, mut send: F)
+pub fn serve<F>(listener: std::net::TcpListener, token: String, send: F)
 where
     F: FnMut(OpRequest) -> bool + Send + 'static,
 {
+    // One thread per connection: a parked `wait` must never starve other
+    // ops — the standing drill caught exactly that (wait blocked the
+    // only server thread, so the change it waited for could never arrive
+    // through the inspector). The UI thread stays the serializer:
+    // check_stale and apply both run there, in send order, so rev
+    // discipline is unchanged. Per-connection request order is preserved
+    // because each connection keeps its own sequential loop.
+    let send = std::sync::Arc::new(std::sync::Mutex::new(send));
     for stream in listener.incoming() {
         let mut stream = match stream {
             Ok(s) => s,
@@ -198,67 +206,81 @@ where
         if !peer.map(|p| p.ip().is_loopback()).unwrap_or(false) {
             continue;
         }
-        // One TcpStream per direction; try_clone on a fresh accept does
-        // not fail in practice, but a failed split must drop the
-        // connection rather than mangle framing.
-        let reader_stream = match stream.try_clone() {
-            Ok(s) => s,
-            Err(_) => continue,
-        };
-        let mut reader = BufReader::new(reader_stream);
-        let mut line = String::new();
-        // One request per line; the connection stays open for a session.
-        loop {
-            line.clear();
-            let n = match reader.read_line(&mut line) {
-                Ok(n) => n,
-                Err(_) => break,
+        let token = token.clone();
+        let send = std::sync::Arc::clone(&send);
+        std::thread::spawn(move || {
+            // One TcpStream per direction; try_clone on a fresh accept does
+            // not fail in practice, but a failed split must drop the
+            // connection rather than mangle framing.
+            let reader_stream = match stream.try_clone() {
+                Ok(s) => s,
+                Err(_) => return,
             };
-            if n == 0 {
-                break;
-            }
-            let req: serde_json::Value = match serde_json::from_str(line.trim()) {
-                Ok(v) => v,
-                Err(e) => {
-                    let _ =
-                        respond_err(&mut stream, 0, "PROTOCOL", &format!("bad json: {e}"), 0, 0);
+            let mut reader = BufReader::new(reader_stream);
+            let mut line = String::new();
+            // One request per line; the connection stays open for a session.
+            loop {
+                line.clear();
+                let n = match reader.read_line(&mut line) {
+                    Ok(n) => n,
+                    Err(_) => break,
+                };
+                if n == 0 {
+                    break;
+                }
+                let req: serde_json::Value = match serde_json::from_str(line.trim()) {
+                    Ok(v) => v,
+                    Err(e) => {
+                        let _ = respond_err(
+                            &mut stream,
+                            0,
+                            "PROTOCOL",
+                            &format!("bad json: {e}"),
+                            0,
+                            0,
+                        );
+                        continue;
+                    }
+                };
+                let id = req.get("id").and_then(|i| i.as_u64()).unwrap_or(0);
+                if req.get("token").and_then(|t| t.as_str()) != Some(token.as_str()) {
+                    let _ = respond_err(&mut stream, id, "DENIED", "bad token", 0, 0);
                     continue;
                 }
-            };
-            let id = req.get("id").and_then(|i| i.as_u64()).unwrap_or(0);
-            if req.get("token").and_then(|t| t.as_str()) != Some(token.as_str()) {
-                let _ = respond_err(&mut stream, id, "DENIED", "bad token", 0, 0);
-                continue;
+                let op = match parse_op(&req) {
+                    Ok(o) => o,
+                    Err(e) => {
+                        let _ = respond_err(&mut stream, id, "BAD_OP", &e, 0, 0);
+                        continue;
+                    }
+                };
+                let (tx, rx) = mpsc::channel::<OpOutcome>();
+                let sent = send
+                    .lock()
+                    .map(|mut g| g(OpRequest { op, respond: tx }))
+                    .unwrap_or(false);
+                if !sent {
+                    let _ = respond_err(&mut stream, id, "BUSY", "ui thread gone", 0, 0);
+                    break;
+                }
+                match rx.recv_timeout(Duration::from_secs(30)) {
+                    Ok(OpOutcome::Ok(result)) => {
+                        let _ = respond_ok(&mut stream, id, result);
+                    }
+                    Ok(OpOutcome::Err {
+                        code,
+                        message,
+                        app_rev,
+                        scene_rev,
+                    }) => {
+                        let _ = respond_err(&mut stream, id, code, &message, app_rev, scene_rev);
+                    }
+                    Err(_) => {
+                        let _ = respond_err(&mut stream, id, "TIMEOUT", "ui busy", 0, 0);
+                    }
+                }
             }
-            let op = match parse_op(&req) {
-                Ok(o) => o,
-                Err(e) => {
-                    let _ = respond_err(&mut stream, id, "BAD_OP", &e, 0, 0);
-                    continue;
-                }
-            };
-            let (tx, rx) = mpsc::channel::<OpOutcome>();
-            if !send(OpRequest { op, respond: tx }) {
-                let _ = respond_err(&mut stream, id, "BUSY", "ui thread gone", 0, 0);
-                break;
-            }
-            match rx.recv_timeout(Duration::from_secs(30)) {
-                Ok(OpOutcome::Ok(result)) => {
-                    let _ = respond_ok(&mut stream, id, result);
-                }
-                Ok(OpOutcome::Err {
-                    code,
-                    message,
-                    app_rev,
-                    scene_rev,
-                }) => {
-                    let _ = respond_err(&mut stream, id, code, &message, app_rev, scene_rev);
-                }
-                Err(_) => {
-                    let _ = respond_err(&mut stream, id, "TIMEOUT", "ui busy", 0, 0);
-                }
-            }
-        }
+        });
     }
 }
 
