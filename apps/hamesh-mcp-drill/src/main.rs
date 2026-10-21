@@ -87,6 +87,19 @@ fn tool_json(resp: &serde_json::Value, what: &str) -> serde_json::Value {
     serde_json::from_str(text).unwrap_or_else(|_| fail(format!("{what}: not JSON: {text}")))
 }
 
+/// The isError flag is the MCP-level contract (decision 018): failures
+/// must raise it structurally, successes must not. Content stays
+/// parseable either way — that is asserted separately by tool_json.
+fn assert_is_error(resp: &serde_json::Value, want: bool, what: &str) {
+    let got = resp
+        .get("result")
+        .and_then(|r| r.get("isError"))
+        .and_then(|b| b.as_bool());
+    if got != Some(want) {
+        fail(format!("{what}: expected isError={want}, got {resp}"));
+    }
+}
+
 fn main() {
     if !std::path::Path::new("Cargo.toml").exists()
         || !std::path::Path::new("apps/hamesh-mcp-drill").exists()
@@ -222,16 +235,15 @@ fn main() {
     };
 
     step(5, "map: learn rev + find composer");
-    let map = tool_json(
-        &call(
-            &mut stdin,
-            &mut stdout,
-            3,
-            "hamesh_map",
-            serde_json::json!({}),
-        ),
-        "map",
+    let map_resp = call(
+        &mut stdin,
+        &mut stdout,
+        3,
+        "hamesh_map",
+        serde_json::json!({}),
     );
+    assert_is_error(&map_resp, false, "map");
+    let map = tool_json(&map_resp, "map");
     let r1 = map
         .get("app_rev")
         .and_then(|r| r.as_u64())
@@ -260,16 +272,15 @@ fn main() {
     }
 
     step(7, "stale key rejected in-band (the fault)");
-    let stale = tool_json(
-        &call(
-            &mut stdin,
-            &mut stdout,
-            5,
-            "hamesh_key",
-            serde_json::json!({"key": "Enter", "expect_rev": r1}),
-        ),
-        "stale key",
+    let stale_resp = call(
+        &mut stdin,
+        &mut stdout,
+        5,
+        "hamesh_key",
+        serde_json::json!({"key": "Enter", "expect_rev": r1}),
     );
+    assert_is_error(&stale_resp, true, "stale key");
+    let stale = tool_json(&stale_resp, "stale key");
     if stale.get("code").and_then(|c| c.as_str()) != Some("STALE") {
         fail(format!(
             "stale Enter should come back STALE in-band: {stale}"

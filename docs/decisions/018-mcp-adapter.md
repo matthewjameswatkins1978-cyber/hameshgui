@@ -65,4 +65,6 @@ Hamesh-specific tooling.
 - Remaining open: session-scoped discovery (`isError` done —
   tools now return `CallToolResult::error` with `isError: true` on
   STALE / DENIED / LOCAL, inspector JSON still in content; drill
-  re-passes unchanged).
+  re-passes unchanged; the drill now also asserts `isError: false` on
+  success and `isError: true` on the stale rejection, so the contract
+  has standing coverage both directions).
