@@ -446,9 +446,7 @@ impl HameshWindowApp {
         if keys.is_empty() {
             return false;
         }
-        let last = self.m3_keys_apply(keys);
-        self.trace
-            .record("m3.key", &format!("-> {last}"), self.app.revision, None);
+        let _ = self.m3_keys_apply(keys);
         true
     }
 
@@ -509,6 +507,10 @@ impl HameshWindowApp {
                 None,
             );
         }
+        // One routing: every key batch — winit, inspector, smoke, tests —
+        // leaves the same trace shape here.
+        self.trace
+            .record("m3.key", &format!("-> {last}"), self.app.revision, None);
         last
     }
 }

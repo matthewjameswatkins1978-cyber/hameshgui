@@ -1,0 +1,208 @@
+//! Standing external-CLI regression drill: an outside operator drives the
+//! live window through the inspector protocol only — the same narrow door
+//! any agent uses. It maps, submits through a stale revision on purpose
+//! (the classic outside-operator mistake), repairs by re-inspecting, and
+//! verifies the submission landed. No shared memory, no model, no network:
+//! fully deterministic.
+//!
+//! LOCAL-ONLY: opens a real window, needs a desktop. Never run in CI.
+//! Run from the workspace root: `cargo run -p hamesh-drill`
+//! Exit 0 + DRILL-PASS, or nonzero + DRILL-FAIL <reason>.
+
+use std::process::{Child, Command, Stdio};
+use std::time::{Duration, Instant};
+
+const SMOKE_SECS: u64 = 60;
+const DISCOVERY: &str = "target/hamesh-inspect.json";
+const TRACE: &str = "target/hamesh-window-trace.json";
+const SNAPSHOT: &str = "target/hamesh-drill-snapshot.png";
+const WINDOW_LOG: &str = "target/hamesh-drill-window.log";
+const DRILL_TEXT: &str = "external drill";
+
+fn exe(name: &str) -> String {
+    format!("target/debug/{name}{}", std::env::consts::EXE_SUFFIX)
+}
+
+fn fail(reason: String) -> ! {
+    println!("DRILL-FAIL {reason}");
+    std::process::exit(1);
+}
+
+fn step(n: usize, name: &str) {
+    println!("DRILL-STEP {n}: {name}");
+}
+
+/// Run the external CLI once; return (exit code, stdout).
+fn cli(child: &mut Child, args: &[&str]) -> (i32, String) {
+    if let Ok(Some(status)) = child.try_wait() {
+        fail(format!("window exited early with {status} before CLI step"));
+    }
+    let out = Command::new(exe("hamesh"))
+        .args(args)
+        .output()
+        .unwrap_or_else(|e| fail(format!("failed to run hamesh CLI: {e}")));
+    let code = out.status.code().unwrap_or(1);
+    (code, String::from_utf8_lossy(&out.stdout).to_string())
+}
+
+fn app_rev(out: &str) -> u64 {
+    let v: serde_json::Value =
+        serde_json::from_str(out).unwrap_or_else(|_| fail(format!("CLI reply not JSON: {out}")));
+    v.get("app_rev")
+        .and_then(|r| r.as_u64())
+        .unwrap_or_else(|| fail(format!("CLI reply has no app_rev: {out}")))
+}
+
+fn code_is(out: &str, want: &str) -> bool {
+    serde_json::from_str::<serde_json::Value>(out)
+        .ok()
+        .and_then(|v| v.get("code")?.as_str().map(|s| s.to_string()))
+        .as_deref()
+        == Some(want)
+}
+
+fn main() {
+    if !std::path::Path::new("Cargo.toml").exists()
+        || !std::path::Path::new("apps/hamesh-drill").exists()
+    {
+        fail("run from the workspace root (cargo run -p hamesh-drill)".to_string());
+    }
+
+    step(0, "build window + CLI");
+    let st = Command::new("cargo")
+        .args(["build", "-q", "-p", "hamesh-window", "-p", "hamesh-cli"])
+        .status()
+        .unwrap_or_else(|e| fail(format!("cargo build failed to start: {e}")));
+    if !st.success() {
+        fail("cargo build -p hamesh-window -p hamesh-cli failed".to_string());
+    }
+
+    // A stale discovery file would connect the drill to a dead run.
+    let _ = std::fs::remove_file(DISCOVERY);
+
+    step(1, "open window --m3 --inspect (smoke clock)");
+    let log = std::fs::File::create(WINDOW_LOG)
+        .unwrap_or_else(|e| fail(format!("cannot create {WINDOW_LOG}: {e}")));
+    let mut child: Child = Command::new(exe("hamesh-window-demo"))
+        .args(["--m3", "--inspect", &format!("--smoke-test={SMOKE_SECS}")])
+        .stdout(Stdio::from(
+            log.try_clone()
+                .unwrap_or_else(|e| fail(format!("log clone failed: {e}"))),
+        ))
+        .stderr(Stdio::from(log))
+        .spawn()
+        .unwrap_or_else(|e| fail(format!("failed to spawn window: {e}")));
+
+    step(2, "wait for inspector discovery");
+    let t0 = Instant::now();
+    loop {
+        if let Ok(raw) = std::fs::read_to_string(DISCOVERY) {
+            if raw.contains("\"port\"") {
+                break;
+            }
+        }
+        if let Ok(Some(status)) = child.try_wait() {
+            fail(format!("window exited during discovery with {status}"));
+        }
+        if t0.elapsed() > Duration::from_secs(30) {
+            fail("no discovery file after 30s".to_string());
+        }
+        std::thread::sleep(Duration::from_millis(250));
+    }
+
+    step(3, "map: learn rev + find composer");
+    let (code, out) = cli(&mut child, &["map"]);
+    if code != 0 {
+        fail(format!("map failed with code {code}: {out}"));
+    }
+    let r1 = app_rev(&out);
+    if !out.contains("composer") {
+        fail("map has no composer node".to_string());
+    }
+
+    step(4, "type into composer by id (no focus tricks)");
+    let (code, out) = cli(&mut child, &["type", "composer", DRILL_TEXT]);
+    if code != 0 {
+        fail(format!("type failed with code {code}: {out}"));
+    }
+    let r2 = app_rev(&out);
+    if r2 <= r1 {
+        fail(format!("type did not advance rev: {r1} -> {r2}"));
+    }
+
+    step(5, "submit with a STALE rev on purpose (the fault)");
+    let (code, out) = cli(
+        &mut child,
+        &["--expect-rev", &r1.to_string(), "key", "Enter"],
+    );
+    if code != 2 || !code_is(&out, "STALE") {
+        fail(format!(
+            "stale Enter should be rejected STALE/2, got {code}: {out}"
+        ));
+    }
+
+    step(6, "repair: re-map, confirm the rejected op changed nothing");
+    let (code, out) = cli(&mut child, &["map"]);
+    if code != 0 {
+        fail(format!("re-map failed with code {code}: {out}"));
+    }
+    let r3 = app_rev(&out);
+    if r3 != r2 {
+        fail(format!("rejected op must not change rev: {r2} vs {r3}"));
+    }
+
+    step(7, "retry submit with the fresh rev");
+    let (code, out) = cli(
+        &mut child,
+        &["--expect-rev", &r3.to_string(), "key", "Enter"],
+    );
+    if code != 0 {
+        fail(format!("fresh Enter failed with code {code}: {out}"));
+    }
+    let r4 = app_rev(&out);
+    if r4 <= r3 {
+        fail(format!("submit did not advance rev: {r3} -> {r4}"));
+    }
+
+    step(8, "snapshot evidence");
+    let (code, out) = cli(&mut child, &["snapshot", SNAPSHOT]);
+    if code != 0 {
+        fail(format!("snapshot failed with code {code}: {out}"));
+    }
+    let meta =
+        std::fs::metadata(SNAPSHOT).unwrap_or_else(|e| fail(format!("snapshot file missing: {e}")));
+    if meta.len() == 0 {
+        fail("snapshot file is empty".to_string());
+    }
+
+    step(
+        9,
+        "wait for the smoke clock, then check the window's own trace",
+    );
+    let status = child
+        .wait()
+        .unwrap_or_else(|e| fail(format!("waiting for window failed: {e}")));
+    if !status.success() {
+        fail(format!("window exited with {status}"));
+    }
+    let trace =
+        std::fs::read_to_string(TRACE).unwrap_or_else(|e| fail(format!("no trace file: {e}")));
+    let mut submitted = false;
+    if let Ok(v) = serde_json::from_str::<serde_json::Value>(&trace) {
+        if let Some(arr) = v.as_array() {
+            for e in arr {
+                let kind = e.get("kind").and_then(|k| k.as_str()).unwrap_or("");
+                let detail = e.get("detail").and_then(|d| d.as_str()).unwrap_or("");
+                if kind == "m3.key" && detail.contains("submitted") && detail.contains(DRILL_TEXT) {
+                    submitted = true;
+                    break;
+                }
+            }
+        }
+    }
+    if !submitted {
+        fail("trace has no submitted record for the drill text".to_string());
+    }
+
+    println!("DRILL-PASS stale-inject -> repair -> submit verified (revs {r1}->{r2}->{r3}->{r4})");
+}
