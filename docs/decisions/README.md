@@ -6,3 +6,5 @@
 - `004-native-window.md` — winit 0.30 + softbuffer CPU presentation.
 - `005-verified-dependency-versions.md` — live crates.io version/license table.
 - `006-gpu-presentation.md` — wgpu 30 + vello 0.11 with loss recovery.
+- `007-parley-text-path.md` — parley chosen, cosmic-text fallback.
+- `008-a11y-ime-partial.md` — AccessKit + winit IME constraints for M3.
