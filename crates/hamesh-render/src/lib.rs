@@ -26,17 +26,21 @@ pub struct Frame {
 fn blit_text(pix: &mut Pixmap, node: &hamesh_scene::SceneNode) {
     let avail_w = (node.rect.w - 16.0).max(8.0);
     let layout = hamesh_text::TextLayout::new(&node.text, avail_w, 16.0);
-    if layout.height() <= 0.0 {
-        return;
-    }
+    // Empty text still gets a line box: the caret must render in an
+    // empty focused composer (this early-return once ate the caret).
+    let lh = layout.height().max(18.0);
     let ox = node.rect.x + 8.0;
-    let oy = node.rect.y + ((node.rect.h - layout.height()) / 2.0).max(0.0);
-    let glyphs = hamesh_text::rasterize_layout(&layout);
+    let oy = node.rect.y + ((node.rect.h - lh) / 2.0).max(0.0);
+    let glyphs = if layout.height() > 0.0 {
+        hamesh_text::rasterize_layout(&layout)
+    } else {
+        Vec::new()
+    };
     // Caret bar for the focused composer (scene truth, read by the Eye too).
     if node.focused {
         if let Some(cx) = node.caret_x {
             let bx = ox + cx;
-            let bh = layout.height().max(8.0);
+            let bh = lh.max(8.0);
             if bx >= node.rect.x && bx + 2.0 <= node.rect.x + node.rect.w {
                 let mut cp = Paint::default();
                 cp.set_color(Color::from_rgba8(120, 220, 200, 255));
@@ -100,11 +104,10 @@ pub fn render(scene: &Scene) -> Frame {
         // Simple rounded look: draw rect; overlay translucency shows through.
         pix.fill_rect(r, &paint, Transform::identity(), None);
         // Real text: parley layout + swash raster, blitted per covered
-        // pixel and clipped to the node's rect. Layout runs per frame
-        // here (spike cost); a glyph cache is the known follow-up.
-        if !node.text.trim().is_empty() {
-            blit_text(&mut pix, node);
-        }
+        // pixel and clipped to the node's rect. The caret draws even for
+        // empty text, so blit_text itself decides what to skip — never
+        // gate the whole call on text presence (that ate the caret twice).
+        blit_text(&mut pix, node);
     }
 
     Frame {

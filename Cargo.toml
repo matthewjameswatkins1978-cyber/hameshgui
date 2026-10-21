@@ -12,6 +12,7 @@ members = [
   "crates/hamesh-widgets",
   "crates/hamesh-window",
   "apps/demo",
+  "apps/hamesh-cli",
 ]
 resolver = "2"
 

@@ -13,21 +13,38 @@
 //!
 //! Run: `cargo run -p hamesh-window --bin hamesh-window-demo`
 
-use hamesh_automation::{click_component_human, click_human, invoke_direct};
+use hamesh_automation::{click_component_human, invoke_direct};
 use hamesh_core::{App, Component, Role};
 use hamesh_diag::Trace;
 use hamesh_widgets::Key as WKey;
 use hamesh_widgets::{handle_key, rebuild_feed_nodes, sync_composer, Focus, Widgets};
 mod gpu;
+mod inspect_srv;
 
 use std::num::NonZeroU32;
 use std::sync::Arc;
 use std::time::Instant;
 use winit::application::ApplicationHandler;
 use winit::event::{ElementState, MouseButton, WindowEvent};
-use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop};
+use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop, EventLoopProxy};
 use winit::keyboard::{KeyCode, PhysicalKey};
 use winit::window::{Window, WindowId};
+
+/// Cross-thread requests into the UI thread. The inspector server never
+/// touches application state; it forwards here and the UI thread applies
+/// the op with the same handlers as real input (Lucy's convergence rule).
+#[derive(Debug)]
+pub enum UserEvent {
+    Inspect(inspect_srv::OpRequest),
+}
+
+/// A `wait` that has not resolved yet. Checked every frame in
+/// `about_to_wait` so waiting never blocks the event loop.
+struct PendingWait {
+    target_rev: u64,
+    deadline: Instant,
+    respond: std::sync::mpsc::Sender<inspect_srv::OpOutcome>,
+}
 
 fn sample_app() -> App {
     let mut app = App::new("win");
@@ -128,6 +145,10 @@ struct HameshWindowApp {
     surface: Option<softbuffer::Surface<Arc<Window>, Arc<Window>>>,
     gpu: Option<gpu::GpuState>,
     use_gpu: bool,
+    proxy: Option<EventLoopProxy<UserEvent>>,
+    use_inspect: bool,
+    inspect_serving: bool,
+    pending_waits: Vec<PendingWait>,
     /// M3 Pi-style UI: conversation feed + composer, driven by the same
     /// `handle_key` core as the headless drills. `None` = M1 demo app.
     widgets: Option<Widgets>,
@@ -155,6 +176,10 @@ impl HameshWindowApp {
             surface: None,
             gpu: None,
             use_gpu: false,
+            proxy: None,
+            use_inspect: false,
+            inspect_serving: false,
+            pending_waits: Vec::new(),
             widgets: None,
             use_m3: false,
             shift_held: false,
@@ -344,28 +369,38 @@ impl HameshWindowApp {
         }
     }
 
-    /// M3 mouse: hit-test, and move keyboard focus when the hit target
-    /// takes focus. Same rule as automation's focus_human.
-    fn m3_click(&mut self) {
+    /// THE press path: hit-test, activate the hit command (if any), and
+    /// move keyboard focus when the hit target takes it. Real mouse,
+    /// external inspector clicks and automation focus all converge here —
+    /// one routing implementation, not three similar ones.
+    fn apply_press(&mut self, x: f32, y: f32) -> (Option<String>, bool, Option<String>) {
         let layout = hamesh_layout::compute(&self.app, self.size.0 as f32, self.size.1 as f32);
-        let hit = hamesh_layout::hit_test(&self.app, &layout, self.cursor.0, self.cursor.1);
-        let moved = hit.as_ref().and_then(|id| {
-            self.widgets.as_mut().and_then(|w| {
-                w.focus.order.iter().position(|o| o == id).map(|pos| {
+        let r = hamesh_automation::click_human(&mut self.app, &layout, x, y);
+        let hit = r.hit_component.clone();
+        let mut focus = None;
+        if let Some(id) = &hit {
+            if let Some(w) = self.widgets.as_mut() {
+                if let Some(pos) = w.focus.order.iter().position(|o| o == id) {
                     w.focus.current = pos;
-                    sync_composer(&mut self.app, w);
-                    id.clone()
-                })
-            })
-        });
+                    hamesh_widgets::sync_composer(&mut self.app, w);
+                    focus = Some(id.clone());
+                }
+            }
+        }
         self.scene_rev += 1;
+        (hit, r.success, focus)
+    }
+
+    /// M3 mouse: the shared press path, then trace.
+    fn m3_click(&mut self) {
+        let (hit, acted, focus) = self.apply_press(self.cursor.0, self.cursor.1);
         self.trace.record(
             "m3.click",
-            &format!("hit={hit:?} focus={moved:?}"),
+            &format!("hit={hit:?} acted={acted} focus={focus:?}"),
             self.app.revision,
             None,
         );
-        println!("M3 click: hit={hit:?} focus={moved:?}");
+        println!("M3 click: hit={hit:?} acted={acted} focus={focus:?}");
     }
 
     /// M3 keyboard: map the winit event onto the shared `handle_key` core.
@@ -405,23 +440,23 @@ impl HameshWindowApp {
         if keys.is_empty() {
             return false;
         }
+        let last = self.m3_keys_apply(keys);
+        self.trace
+            .record("m3.key", &format!("-> {last}"), self.app.revision, None);
+        true
+    }
+
+    /// Shared key-application core: the winit path maps events to keys,
+    /// the inspector path maps KeyMsg to keys, both land here.
+    fn m3_keys_apply(&mut self, keys: Vec<WKey>) -> String {
         let mut last = String::new();
-        // Re-borrow per key: each borrow ends before the next iteration,
-        // so the trailing refresh_feed is never blocked. (A single held
-        // `drop(w)` does nothing — references aren't dropped by it.)
         for k in &keys {
             if let Some(w) = self.widgets.as_mut() {
                 last = handle_key(&mut self.app, w, k);
             }
         }
         self.refresh_feed();
-        self.trace.record(
-            "m3.key",
-            &format!("{keys:?} -> {last}"),
-            self.app.revision,
-            None,
-        );
-        true
+        last
     }
 
     /// M3 smoke script: run once after open — focus the composer through
@@ -469,6 +504,201 @@ impl HameshWindowApp {
         );
     }
 
+    /// Attach current revision stamps to an Ok payload (uniform envelope).
+    fn stamped(&self, mut v: serde_json::Value) -> inspect_srv::OpOutcome {
+        if let Some(o) = v.as_object_mut() {
+            o.insert(
+                "app_rev".to_string(),
+                serde_json::Value::from(self.app.revision),
+            );
+            o.insert(
+                "scene_rev".to_string(),
+                serde_json::Value::from(self.scene_rev),
+            );
+        }
+        inspect_srv::OpOutcome::Ok(v)
+    }
+
+    fn err(&self, code: &'static str, message: String) -> inspect_srv::OpOutcome {
+        inspect_srv::OpOutcome::Err {
+            code,
+            message,
+            app_rev: self.app.revision,
+            scene_rev: self.scene_rev,
+        }
+    }
+
+    fn check_stale(&self, expect: &Option<u64>) -> Option<inspect_srv::OpOutcome> {
+        match expect {
+            Some(e) if *e != self.app.revision => Some(self.err(
+                "STALE",
+                format!(
+                    "app moved: expected rev {e}, live rev {}",
+                    self.app.revision
+                ),
+            )),
+            _ => None,
+        }
+    }
+
+    /// Apply one external op on the UI thread, using the same handlers
+    /// as real input. Takes the whole request so `wait` can park its
+    /// responder instead of answering immediately.
+    fn apply_op(&mut self, req: inspect_srv::OpRequest) {
+        use hamesh_automation::type_human;
+        use inspect_srv::{KeyMsg, Op, OpOutcome};
+        let inspect_srv::OpRequest { op, respond } = req;
+        let reply: Option<OpOutcome> = match op {
+            Op::Map => {
+                let (layout, scene) = self.layout_and_scene();
+                let map = hamesh_inspect::compact_map(&self.app, &layout, &scene);
+                let v = serde_json::to_value(&map).unwrap_or(serde_json::Value::Null);
+                Some(self.stamped(v))
+            }
+            Op::Detail { id } => {
+                let (layout, _) = self.layout_and_scene();
+                match hamesh_inspect::detail(&self.app, &layout, &id) {
+                    Some(d) => {
+                        let v = serde_json::to_value(&d).unwrap_or(serde_json::Value::Null);
+                        Some(self.stamped(v))
+                    }
+                    None => Some(self.err("NOT_FOUND", format!("unknown component {id}"))),
+                }
+            }
+            Op::ClickId { id, expect_rev } => {
+                if let Some(e) = self.check_stale(&expect_rev) {
+                    Some(e)
+                } else {
+                    let layout =
+                        hamesh_layout::compute(&self.app, self.size.0 as f32, self.size.1 as f32);
+                    let center = layout
+                        .nodes
+                        .get(&id)
+                        .map(|n| (n.rect.x + n.rect.w / 2.0, n.rect.y + n.rect.h / 2.0));
+                    match center {
+                        Some((x, y)) => {
+                            let (hit, acted, focus) = self.apply_press(x, y);
+                            self.trace.record(
+                                "ext.click",
+                                &format!("id={id} hit={hit:?} acted={acted}"),
+                                self.app.revision,
+                                None,
+                            );
+                            Some(self.stamped(serde_json::json!({
+                                "hit": hit, "acted": acted, "focus": focus,
+                                "mechanism": "HumanEquivalent",
+                            })))
+                        }
+                        None => Some(self.err("NOT_FOUND", format!("no layout rect for {id}"))),
+                    }
+                }
+            }
+            Op::ClickAt { x, y, expect_rev } => {
+                if let Some(e) = self.check_stale(&expect_rev) {
+                    Some(e)
+                } else {
+                    let (hit, acted, focus) = self.apply_press(x, y);
+                    self.trace.record(
+                        "ext.click",
+                        &format!("at=({x:.0},{y:.0}) hit={hit:?} acted={acted}"),
+                        self.app.revision,
+                        None,
+                    );
+                    Some(self.stamped(serde_json::json!({
+                        "hit": hit, "acted": acted, "focus": focus,
+                        "mechanism": "HumanEquivalent",
+                    })))
+                }
+            }
+            Op::Key { key, expect_rev } => {
+                if let Some(e) = self.check_stale(&expect_rev) {
+                    Some(e)
+                } else if self.widgets.is_none() {
+                    Some(self.err("NO_M3", "keyboard needs --m3 mode".to_string()))
+                } else {
+                    let k = match key {
+                        KeyMsg::Char(c) => WKey::Char(c),
+                        KeyMsg::Enter => WKey::Enter,
+                        KeyMsg::Backspace => WKey::Backspace,
+                        KeyMsg::Delete => WKey::Delete,
+                        KeyMsg::Left => WKey::Left,
+                        KeyMsg::Right => WKey::Right,
+                        KeyMsg::Up => WKey::Up,
+                        KeyMsg::Down => WKey::Down,
+                        KeyMsg::Home => WKey::Home,
+                        KeyMsg::End => WKey::End,
+                        KeyMsg::Tab => WKey::Tab,
+                        KeyMsg::ShiftTab => WKey::ShiftTab,
+                        KeyMsg::Escape => WKey::Escape,
+                    };
+                    let out = self.m3_keys_apply(vec![k]);
+                    self.trace
+                        .record("ext.key", &format!("-> {out}"), self.app.revision, None);
+                    Some(self.stamped(serde_json::json!({
+                        "result": out,
+                        "focused": self.widgets.as_ref().and_then(|w| w.focus.focused()),
+                        "mechanism": "HumanEquivalent",
+                    })))
+                }
+            }
+            Op::Type { id, text } => {
+                if self.widgets.is_none() {
+                    Some(self.err("NO_M3", "typing needs --m3 mode".to_string()))
+                } else {
+                    let layout =
+                        hamesh_layout::compute(&self.app, self.size.0 as f32, self.size.1 as f32);
+                    // type_human borrows widgets + app disjointly via split.
+                    let r = {
+                        let Some(w) = self.widgets.as_mut() else {
+                            return;
+                        };
+                        type_human(&mut self.app, w, &layout, &id, &text)
+                    };
+                    self.refresh_feed();
+                    self.trace.record(
+                        "ext.type",
+                        &format!("id={id} success={} {:?}", r.success, r.notes),
+                        self.app.revision,
+                        None,
+                    );
+                    Some(self.stamped(serde_json::json!({
+                        "success": r.success,
+                        "hit": r.hit_component,
+                        "notes": r.notes,
+                        "mechanism": format!("{:?}", r.mechanism),
+                    })))
+                }
+            }
+            Op::Snapshot { path } => {
+                let (_layout, scene) = self.layout_and_scene();
+                let frame = hamesh_render::render(&scene);
+                match hamesh_render::save_png(&frame, &path) {
+                    Ok(()) => Some(self.stamped(serde_json::json!({ "path": path }))),
+                    Err(e) => Some(self.err("IO", e)),
+                }
+            }
+            Op::Wait {
+                app_rev,
+                timeout_ms,
+            } => {
+                if self.app.revision != app_rev {
+                    Some(self.stamped(serde_json::json!({ "waited": false })))
+                } else {
+                    self.pending_waits.push(PendingWait {
+                        target_rev: app_rev,
+                        deadline: Instant::now() + std::time::Duration::from_millis(timeout_ms),
+                        respond,
+                    });
+                    // Parked: the responder now lives in the wait queue.
+                    return;
+                }
+            }
+        };
+        if let Some(out) = reply {
+            let _ = respond.send(out);
+        }
+    }
+
     fn dump_inspection(&mut self) {
         let (layout, scene) = self.layout_and_scene();
         let map = hamesh_inspect::compact_map(&self.app, &layout, &scene);
@@ -497,7 +727,7 @@ impl HameshWindowApp {
     }
 }
 
-impl ApplicationHandler for HameshWindowApp {
+impl ApplicationHandler<UserEvent> for HameshWindowApp {
     fn resumed(&mut self, event_loop: &ActiveEventLoop) {
         let attrs = Window::default_attributes()
             .with_title("Hamesh — the Eye and the Hand")
@@ -543,6 +773,46 @@ impl ApplicationHandler for HameshWindowApp {
             self.refresh_feed();
             println!("M3 chat open: Tab focuses, type in composer, Enter submits, wheel scrolls");
         }
+        if self.use_inspect && !self.inspect_serving {
+            if let Some(proxy) = self.proxy.clone() {
+                match std::net::TcpListener::bind("127.0.0.1:0") {
+                    Ok(lis) => {
+                        let port = lis.local_addr().map(|a| a.port()).unwrap_or(0);
+                        let token = inspect_srv::dev_token();
+                        match inspect_srv::write_discovery(port, &token) {
+                            Ok(()) => {
+                                let send = move |req: inspect_srv::OpRequest| {
+                                    proxy.send_event(UserEvent::Inspect(req)).is_ok()
+                                };
+                                std::thread::spawn(move || inspect_srv::serve(lis, token, send));
+                                self.inspect_serving = true;
+                                self.trace.record(
+                                    "inspect.serve",
+                                    &format!("127.0.0.1:{port} (dev token)"),
+                                    self.app.revision,
+                                    None,
+                                );
+                                println!(
+                                    "INSPECT serving on 127.0.0.1:{port} — local dev only, token required"
+                                );
+                            }
+                            Err(e) => self.trace.record(
+                                "inspect.discovery_failed",
+                                &format!("{e}"),
+                                self.app.revision,
+                                None,
+                            ),
+                        }
+                    }
+                    Err(e) => self.trace.record(
+                        "inspect.bind_failed",
+                        &format!("{e}"),
+                        self.app.revision,
+                        None,
+                    ),
+                }
+            }
+        }
         self.trace.record(
             "window.open",
             &format!("{}x{} physical", self.size.0, self.size.1),
@@ -553,6 +823,12 @@ impl ApplicationHandler for HameshWindowApp {
             "HAMESH window open: {}x{} — click, Space, R, I, Esc",
             self.size.0, self.size.1
         );
+    }
+
+    fn user_event(&mut self, _event_loop: &ActiveEventLoop, event: UserEvent) {
+        match event {
+            UserEvent::Inspect(req) => self.apply_op(req),
+        }
     }
 
     fn window_event(&mut self, event_loop: &ActiveEventLoop, _id: WindowId, event: WindowEvent) {
@@ -583,27 +859,19 @@ impl ApplicationHandler for HameshWindowApp {
                     if self.use_m3 {
                         self.m3_click();
                     } else {
-                        let layout = hamesh_layout::compute(
-                            &self.app,
-                            self.size.0 as f32,
-                            self.size.1 as f32,
-                        );
-                        let r = click_human(&mut self.app, &layout, self.cursor.0, self.cursor.1);
+                        let (hit, acted, focus) = self.apply_press(self.cursor.0, self.cursor.1);
                         sync_label(&mut self.app);
-                        self.scene_rev += 1;
                         self.trace.record(
                             "hand.mouse_click",
                             &format!(
-                                "at=({:.0},{:.0}) hit={:?} success={}",
-                                self.cursor.0, self.cursor.1, r.hit_component, r.success
+                                "at=({:.0},{:.0}) hit={:?} acted={} focus={focus:?}",
+                                self.cursor.0, self.cursor.1, hit, acted
                             ),
                             self.app.revision,
                             None,
                         );
                         println!(
-                            "HAND mouse: hit={:?} success={} counter={:?}",
-                            r.hit_component,
-                            r.success,
+                            "HAND mouse: hit={hit:?} acted={acted} counter={:?}",
                             self.app.state.get("counter")
                         );
                     }
@@ -693,6 +961,32 @@ impl ApplicationHandler for HameshWindowApp {
     }
 
     fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
+        // Resolve parked `wait` ops without blocking the event loop.
+        if !self.pending_waits.is_empty() {
+            let cur = self.app.revision;
+            let now = Instant::now();
+            let mut i = 0;
+            while i < self.pending_waits.len() {
+                let (done, expired) = {
+                    let pw = &self.pending_waits[i];
+                    (cur != pw.target_rev, now >= pw.deadline)
+                };
+                if done || expired {
+                    let pw = self.pending_waits.remove(i);
+                    let out = if done {
+                        self.stamped(serde_json::json!({"waited": true}))
+                    } else {
+                        self.err(
+                            "TIMEOUT",
+                            format!("no change within deadline (still rev {cur})"),
+                        )
+                    };
+                    let _ = pw.respond.send(out);
+                } else {
+                    i += 1;
+                }
+            }
+        }
         if self.use_m3 && self.smoke_deadline.is_some() && !self.m3_smoke_done {
             self.m3_smoke_done = true;
             self.m3_smoke_script();
@@ -722,7 +1016,9 @@ fn main() {
     // and presented frames without needing a human to click around.
     let smoke_secs: Option<u64> =
         std::env::args().find_map(|a| a.strip_prefix("--smoke-test=").and_then(|v| v.parse().ok()));
-    let event_loop = EventLoop::new().expect("event loop");
+    let event_loop = EventLoop::<UserEvent>::with_user_event()
+        .build()
+        .expect("event loop");
     event_loop.set_control_flow(ControlFlow::Poll);
     let mut app = HameshWindowApp::new();
     app.use_gpu = std::env::args().any(|a| a == "--gpu");
@@ -733,6 +1029,11 @@ fn main() {
     if app.use_m3 {
         println!("M3 mode: feed + composer (Tab/typing/Enter/wheel)");
     }
+    app.use_inspect = std::env::args().any(|a| a == "--inspect");
+    if app.use_inspect {
+        println!("INSPECT mode: local loopback inspector (dev only)");
+    }
+    app.proxy = Some(event_loop.create_proxy());
     if let Some(secs) = smoke_secs {
         app.smoke_deadline = Some(Instant::now() + std::time::Duration::from_secs(secs));
         println!("SMOKE mode: {secs}s");

@@ -798,6 +798,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "hamesh-cli"
+version = "0.1.0"
+dependencies = [
+ "serde_json",
+]
+
+[[package]]
 name = "hamesh-core"
 version = "0.1.0"
 dependencies = [

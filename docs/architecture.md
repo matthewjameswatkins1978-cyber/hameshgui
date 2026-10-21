@@ -58,15 +58,32 @@ The demo proves the framework can catch, not just commit, these faults:
 
 ## What is already live (beyond headless)
 
-- `crates/hamesh-window`: real winit 0.30 OS window + softbuffer CPU
-  presentation of the same `Scene`. Resize re-runs layout; mouse/keyboard
-  route through the labeled Hand; `I` dumps Eye evidence; `--smoke-test=N`
-  verifies open + present + dump non-interactively.
+- `crates/hamesh-window`: real winit 0.30 OS window with softbuffer CPU
+  presentation AND wgpu 30 + vello 0.11 GPU presentation (`--gpu`) of
+  the same `Scene`, with surface-loss recovery and device-loss fallback.
+  Resize re-runs layout; mouse/keyboard route through the labeled Hand;
+  `--smoke-test=N` verifies open + present + dump non-interactively.
+- `crates/hamesh-text`: parley layout + swash raster into both renderers;
+  glyph placement anchor derived from zeno source semantics.
+- `crates/hamesh-widgets`: composer, virtualized feed, keyboard focus,
+  one shared `handle_key` core for headless and window drivers.
+- External Eye/Hand: `apps/hamesh-cli` drives/inspects a running
+  window over a local token-gated protocol (map/detail/click/key/type/
+  snapshot/wait), sharing the UI thread's exact handlers via winit user
+  events; stale revisions refused, waits non-blocking.
+- `crates/hamesh-pi`: clean-room Pi RPC adapter (JSONL over child stdio),
+  proven against the live `pi` CLI (get_state round-trip observed).
+- CPU/GPU tolerance harness: same Scene through both renderers, compared
+  per smoke run. Current M3 verdict: within tolerance on rects, diverge
+  on rounded corners + glyph AA (classified, not a single %).
 
 ## What is NOT yet built
 
-- Native window + GPU presentation (winit/wgpu/Vello): research running.
-- Real text shaping/editing (Parley / COSMIC-Text): research running.
-- AccessKit bridge, IME, clipboard, scrolling, drag-and-drop.
+- Real text editing: multiline, selection, clipboard, IME composition
+  (composer is single-line; parley-vs-editor evaluation open).
+- AccessKit bridge, IME plumbing, drag-and-drop.
 - Deterministic replay with controllable clocks.
-- Networked inspector/MCP adapter (local-only by design so far).
+- MCP adapter (CLI first, by design; protocol is adapter-ready).
+- GitHub CI gates (local gates green; hosted workflow not yet added).
+- Independent desktop observation layer (Windows-specific, later).
+- Per-region tolerance masks for the GPU/CPU comparison.

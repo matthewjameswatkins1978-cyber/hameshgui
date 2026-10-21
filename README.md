@@ -32,6 +32,11 @@ the Memory (bounded diagnostic traces and replay evidence).
       one shared `handle_key` core; Eye sees caret, Hand types/submits/
       scrolls on both headless and live window (`--m3`). Feed panels are
       sized, never hugging (decision 011).
+- [x] External Eye/Hand: separate-process `hamesh` CLI (map/detail/click/
+      key/type/snapshot/wait) over a local token-gated protocol, sharing
+      the UI thread's exact handlers; stale revisions refused, wait is
+      non-blocking. First independent debugging exercise done via the
+      external loop (decision 013).
 - [ ] Accessibility bridge (AccessKit): planned.
 
 ## Workspace
