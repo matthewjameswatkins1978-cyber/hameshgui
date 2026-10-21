@@ -205,6 +205,50 @@ impl HameshWindowApp {
         }
     }
 
+    /// GPU readback for the tolerance harness: render offscreen and save.
+    /// No-op unless `--gpu` was passed and init succeeded.
+    fn dump_gpu_snapshot(&mut self) {
+        if !self.use_gpu {
+            return;
+        }
+        let (_layout, scene) = self.layout_and_scene();
+        if let Some(gpu) = self.gpu.as_mut() {
+            match gpu.snapshot(&scene, "target/hamesh-window-gpu.png") {
+                Ok((n, gpix)) => {
+                    // Tolerance harness (decision 002): same Scene through
+                    // the CPU renderer, compared pixel-by-pixel.
+                    let cpu = hamesh_render::render(&scene);
+                    let verdict = match hamesh_render::compare(
+                        &gpix,
+                        &cpu.pixmap,
+                        &hamesh_render::Tolerance::default(),
+                    ) {
+                        Ok(()) => "within tolerance".to_string(),
+                        Err(e) => format!("DIVERGED: {e}"),
+                    };
+                    self.trace.record(
+                        "gpu.snapshot",
+                        &format!("{n} nodes -> target/hamesh-window-gpu.png; cpu-vs-gpu {verdict}"),
+                        self.app.revision,
+                        Some("target/hamesh-window-gpu.png".to_string()),
+                    );
+                    println!(
+                        "GPU snapshot: {n} nodes -> target/hamesh-window-gpu.png; cpu-vs-gpu {verdict}"
+                    );
+                }
+                Err(e) => {
+                    self.trace.record(
+                        "gpu.snapshot_failed",
+                        &format!("{e}"),
+                        self.app.revision,
+                        None,
+                    );
+                    println!("GPU snapshot FAILED: {e}");
+                }
+            }
+        }
+    }
+
     fn dump_inspection(&mut self) {
         let (layout, scene) = self.layout_and_scene();
         let map = hamesh_inspect::compact_map(&self.app, &layout, &scene);
@@ -389,6 +433,7 @@ impl ApplicationHandler for HameshWindowApp {
         if let Some(deadline) = self.smoke_deadline {
             if Instant::now() >= deadline {
                 self.dump_inspection();
+                self.dump_gpu_snapshot();
                 let _ = std::fs::write("target/hamesh-window-trace.json", self.trace.export_json());
                 println!(
                     "SMOKE frames={} trace=target/hamesh-window-trace.json",

@@ -8,5 +8,6 @@ license.workspace = true
 hamesh-core = { path = "../hamesh-core" }
 hamesh-layout = { path = "../hamesh-layout" }
 hamesh-scene = { path = "../hamesh-scene" }
+hamesh-text = { path = "../hamesh-text" }
 tiny-skia.workspace = true
 serde.workspace = true

@@ -44,6 +44,12 @@ pub struct GpuState {
     surface: RenderSurface<'static>,
     renderer: Renderer,
     device_lost_rx: std::sync::mpsc::Receiver<String>,
+    /// Text layouts keyed by node id + text + width. `FontContext::new`
+    /// scans system fonts every construction, so uncached per-frame
+    /// layout costs ~40ms/frame; the cache restores interactive rates.
+    /// (The stateless CPU path in hamesh-render still lays out per frame;
+    /// a shared cache is the known follow-up.)
+    text_cache: std::collections::HashMap<String, hamesh_text::TextLayout>,
     pub stats: GpuStats,
 }
 
@@ -51,7 +57,14 @@ fn node_color(c: [u8; 4]) -> Color {
     Color::from_rgba8(c[0], c[1], c[2], c[3])
 }
 
-fn to_vello(scene: &hamesh_scene::Scene) -> VelloScene {
+/// Translate the Hamesh scene: one rounded rect per visible node plus
+/// one vello glyph run per text node (same positioned data as CPU).
+/// Takes the text-layout cache explicitly so the free function stays
+/// borrow-clean for both `paint` and `snapshot`.
+fn build_vscene(
+    cache: &mut std::collections::HashMap<String, hamesh_text::TextLayout>,
+    scene: &hamesh_scene::Scene,
+) -> VelloScene {
     let mut v = VelloScene::new();
     for node in &scene.nodes {
         if !node.visible {
@@ -72,8 +85,44 @@ fn to_vello(scene: &hamesh_scene::Scene) -> VelloScene {
             None,
             &shape,
         );
+        // Real text: same parley layout as the CPU path, drawn with
+        // vello glyph runs. `parley::FontData` IS vello's `FontData`
+        // (single linebender_resource_handle 0.1.1 in the tree).
+        if !node.text.trim().is_empty() {
+            let avail = (r.w - 16.0).max(8.0);
+            let key = format!("{}|{:.0}|{}", node.id, avail, node.text);
+            if !cache.contains_key(&key) {
+                let layout = hamesh_text::TextLayout::new(&node.text, avail, 16.0);
+                cache.insert(key.clone(), layout);
+            }
+            if let Some(layout) = cache.get(&key) {
+                if layout.height() > 0.0 {
+                    draw_text(&mut v, node, layout);
+                }
+            }
+        }
     }
     v
+}
+
+fn draw_text(v: &mut VelloScene, node: &hamesh_scene::SceneNode, layout: &hamesh_text::TextLayout) {
+    let dy = node.rect.y + ((node.rect.h - layout.height()) / 2.0).max(0.0);
+    let brush = Brush::Solid(node_color([235, 245, 243, 255]));
+    for run in layout.runs() {
+        v.draw_glyphs(&run.font)
+            .font_size(run.size)
+            .hint(true)
+            .brush(&brush)
+            .transform(Affine::translate(((node.rect.x + 8.0) as f64, dy as f64)))
+            .draw(
+                Fill::NonZero,
+                run.glyphs.iter().map(|(id, x, y)| vello::Glyph {
+                    id: *id,
+                    x: *x,
+                    y: *y,
+                }),
+            );
+    }
 }
 
 impl GpuState {
@@ -105,6 +154,7 @@ impl GpuState {
             surface,
             renderer,
             device_lost_rx,
+            text_cache: std::collections::HashMap::new(),
             stats: GpuStats::default(),
         })
     }
@@ -132,7 +182,7 @@ impl GpuState {
         if self.surface.config.width != width || self.surface.config.height != height {
             self.resize(width, height);
         }
-        let vscene = to_vello(scene);
+        let vscene = build_vscene(&mut self.text_cache, scene);
         let visible = scene.nodes.iter().filter(|n| n.visible).count();
         let device = self.context.devices[dev_id].device.clone();
         let queue = self.context.devices[dev_id].queue.clone();
@@ -192,5 +242,121 @@ impl GpuState {
         queue.present(surface_texture);
         self.stats.frames_presented += 1;
         Ok(visible)
+    }
+
+    /// Render the scene to an offscreen texture, read the pixels back,
+    /// and save a PNG. This is the GPU half of the CPU/GPU tolerance
+    /// harness (decision 002): same `Scene` in, comparable PNG out.
+    /// Returns the number of visible nodes drawn plus the pixel buffer.
+    pub fn snapshot(
+        &mut self,
+        scene: &hamesh_scene::Scene,
+        path: &str,
+    ) -> Result<(usize, tiny_skia::Pixmap), GpuError> {
+        let width = scene.viewport_w.max(1.0) as u32;
+        let height = scene.viewport_h.max(1.0) as u32;
+        let dev_id = self.surface.dev_id;
+        let device = self.context.devices[dev_id].device.clone();
+        let queue = self.context.devices[dev_id].queue.clone();
+        let vscene = build_vscene(&mut self.text_cache, scene);
+        let visible = scene.nodes.iter().filter(|n| n.visible).count();
+
+        let tex = device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("hamesh-snapshot"),
+            size: wgpu::Extent3d {
+                width,
+                height,
+                depth_or_array_layers: 1,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: wgpu::TextureFormat::Rgba8Unorm,
+            usage: wgpu::TextureUsages::STORAGE_BINDING
+                | wgpu::TextureUsages::COPY_SRC
+                | wgpu::TextureUsages::TEXTURE_BINDING,
+            view_formats: &[],
+        });
+        let view = tex.create_view(&wgpu::TextureViewDescriptor::default());
+        let params = RenderParams {
+            base_color: node_color([10, 15, 17, 255]),
+            width,
+            height,
+            antialiasing_method: AaConfig::Msaa16,
+        };
+        self.renderer
+            .render_to_texture(&device, &queue, &vscene, &view, &params)
+            .map_err(|e| GpuError::Vello(format!("snapshot render: {e:?}")))?;
+
+        // COPY_BYTES_PER_ROW_ALIGNMENT = 256.
+        let padded = (width * 4).div_ceil(256) * 256;
+        let buf = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("hamesh-snapshot-readback"),
+            size: (padded * height) as u64,
+            usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        let mut enc = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+            label: Some("hamesh-snapshot-copy"),
+        });
+        enc.copy_texture_to_buffer(
+            wgpu::TexelCopyTextureInfo {
+                texture: &tex,
+                mip_level: 0,
+                origin: wgpu::Origin3d::ZERO,
+                aspect: wgpu::TextureAspect::All,
+            },
+            wgpu::TexelCopyBufferInfo {
+                buffer: &buf,
+                layout: wgpu::TexelCopyBufferLayout {
+                    offset: 0,
+                    bytes_per_row: Some(padded),
+                    rows_per_image: Some(height),
+                },
+            },
+            wgpu::Extent3d {
+                width,
+                height,
+                depth_or_array_layers: 1,
+            },
+        );
+        queue.submit([enc.finish()]);
+
+        let (tx, rx) = std::sync::mpsc::channel();
+        buf.slice(..).map_async(wgpu::MapMode::Read, move |r| {
+            let _ = tx.send(r);
+        });
+        device
+            .poll(wgpu::PollType::wait_indefinitely())
+            .map_err(|e| GpuError::Surface(format!("poll: {e:?}")))?;
+        rx.recv()
+            .map_err(|e| GpuError::Surface(format!("map recv: {e:?}")))?
+            .map_err(|e| GpuError::Surface(format!("map: {e:?}")))?;
+        let data = {
+            let mapped = buf
+                .slice(..)
+                .get_mapped_range()
+                .map_err(|e| GpuError::Surface(format!("range: {e:?}")))?;
+            mapped.to_vec()
+        };
+        buf.unmap();
+
+        // Unpad rows; vello emits straight alpha, tiny-skia takes it.
+        let mut pix = tiny_skia::Pixmap::new(width, height).expect("snapshot pixmap");
+        let dst = pix.data_mut();
+        for y in 0..height as usize {
+            let src_row = y * padded as usize;
+            let dst_row = y * width as usize * 4;
+            dst[dst_row..dst_row + width as usize * 4]
+                .copy_from_slice(&data[src_row..src_row + width as usize * 4]);
+        }
+        if let Some(parent) = std::path::Path::new(path).parent() {
+            if !parent.as_os_str().is_empty() {
+                std::fs::create_dir_all(parent).expect("snapshot dir");
+            }
+        }
+        pix.save_png(path)
+            .map_err(|e| GpuError::Surface(format!("save_png: {e:?}")))?;
+        Ok((visible, pix))
     }
 }

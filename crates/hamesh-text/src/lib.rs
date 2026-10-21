@@ -11,7 +11,7 @@ use parley::style::StyleProperty;
 use parley::{FontContext, LayoutContext};
 
 pub mod glue;
-pub use glue::{proof_png, rasterize_parley, RasterGlyph};
+pub use glue::{glyph_origin, proof_png, rasterize_layout, rasterize_parley, RasterGlyph};
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct TextMetrics {
@@ -26,37 +26,77 @@ pub struct TextMetrics {
 
 pub const SAMPLE: &str = "Hello Hamesh — the Eye and the Hand 世界";
 
-pub fn layout_parley(text: &str, max_width: f32) -> TextMetrics {
-    let mut fcx = FontContext::new();
-    let mut lcx: LayoutContext<peniko::Brush> = LayoutContext::new();
-    let mut builder = lcx.ranged_builder(&mut fcx, text, 1.0, false);
-    builder.push_default(StyleProperty::FontSize(16.0));
-    let mut layout = builder.build(text);
-    layout.break_all_lines(Some(max_width));
-    let mut runs = 0;
-    let mut glyphs = 0;
-    // Note: `Line::glyphs` needs the layout lifetime, so count through
-    // runs -> clusters -> glyphs. Mild ergonomic tax, recorded for the decision.
-    for line in layout.lines() {
-        for run in line.runs() {
-            runs += 1;
-            for cluster in run.clusters() {
-                glyphs += cluster.glyphs().count();
+/// Owned parley layout: safe to hand to CPU (swash) and GPU (vello)
+/// consumers. The `Layout` owns its font data (Arc-backed), so no
+/// `FontContext` needs to outlive it — verified by the compiler.
+pub struct TextLayout {
+    layout: parley::Layout<peniko::Brush>,
+}
+
+/// One run's positioned data, fully owned for consumer convenience.
+#[derive(Clone, Debug)]
+pub struct TextRun {
+    pub font: parley::FontData,
+    pub size: f32,
+    /// (glyph id, layout-absolute x, layout-absolute y)
+    pub glyphs: Vec<(u32, f32, f32)>,
+}
+
+impl TextLayout {
+    pub fn new(text: &str, max_width: f32, font_size: f32) -> Self {
+        let mut fcx = FontContext::new();
+        let mut lcx: LayoutContext<peniko::Brush> = LayoutContext::new();
+        let mut builder = lcx.ranged_builder(&mut fcx, text, 1.0, false);
+        builder.push_default(StyleProperty::FontSize(font_size));
+        let mut layout = builder.build(text);
+        layout.break_all_lines(Some(max_width));
+        Self { layout }
+    }
+
+    pub fn width(&self) -> f32 {
+        self.layout.width()
+    }
+
+    pub fn height(&self) -> f32 {
+        self.layout.height()
+    }
+
+    pub fn line_count(&self) -> usize {
+        let n = self.layout.lines().len();
+        n
+    }
+
+    /// Owned per-run positioned glyphs. Coordinates are layout-absolute
+    /// (see decision 009): add the node's origin to place them.
+    pub fn runs(&self) -> Vec<TextRun> {
+        let mut out = Vec::new();
+        for line in self.layout.lines() {
+            for item in line.items() {
+                let parley::PositionedLayoutItem::GlyphRun(gr) = item else {
+                    continue;
+                };
+                let run = gr.run();
+                out.push(TextRun {
+                    font: run.font().clone(),
+                    size: run.font_size(),
+                    glyphs: gr.positioned_glyphs().map(|g| (g.id, g.x, g.y)).collect(),
+                });
             }
         }
+        out
     }
-    // Bind scalars before constructing: the lines() iterator must drop
-    // before `layout` does (tail-expression temporaries outlive locals).
-    let line_count = layout.lines().len();
-    let width = layout.width();
-    let height = layout.height();
+}
+
+pub fn layout_parley(text: &str, max_width: f32) -> TextMetrics {
+    let layout = TextLayout::new(text, max_width, 16.0);
+    let owned = layout.runs();
     TextMetrics {
         engine: "parley",
-        lines: line_count,
-        runs,
-        glyphs,
-        width,
-        height,
+        lines: layout.line_count(),
+        runs: owned.len(),
+        glyphs: owned.iter().map(|r| r.glyphs.len()).sum(),
+        width: layout.width(),
+        height: layout.height(),
     }
 }
 

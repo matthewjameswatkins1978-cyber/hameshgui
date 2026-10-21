@@ -9,3 +9,4 @@
 - `007-parley-text-path.md` — parley chosen, cosmic-text fallback.
 - `008-a11y-ime-partial.md` — AccessKit + winit IME constraints for M3.
 - `009-glyph-glue.md` — parley runs to swash alpha bitmaps.
+- `010-text-in-scene.md` — CPU blit + vello glyphs, tolerance verdict.
