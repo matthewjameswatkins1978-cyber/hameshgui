@@ -126,6 +126,13 @@ impl Feed {
         self.heights.push(-1.0);
     }
 
+    /// Append an empty message and hand back its index, so streamed
+    /// deltas have somewhere to land without exposing layout internals.
+    pub fn push_live(&mut self, role: &str) -> usize {
+        self.push(role, "");
+        self.messages.len() - 1
+    }
+
     pub fn relayout(&mut self, width: f32) {
         self.layout_width = width;
         for (i, m) in self.messages.iter().enumerate() {

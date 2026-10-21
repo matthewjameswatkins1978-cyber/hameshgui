@@ -324,8 +324,23 @@ impl PiClient {
     /// Spawn `pi --mode rpc ...` and connect. Mirrors the Agent X launch
     /// contract: `--mode rpc --no-extensions --no-skills` plus either
     /// `--no-session` (ephemeral) or a session dir + id (persistent).
+    /// Spawn `exe` with the given args, working around Windows `.cmd`
+    /// shims (Rust cannot spawn those directly): on `NotFound`, retry once
+    /// through `cmd /C`. The command line stays visible either way.
+    fn spawn_child(exe: &str, args: &[&str], cwd: Option<&str>) -> io::Result<ChildTransport> {
+        match ChildTransport::spawn(exe, args, cwd) {
+            Ok(t) => Ok(t),
+            Err(e) if e.kind() == io::ErrorKind::NotFound && cfg!(windows) => {
+                let mut full = vec!["/C", exe];
+                full.extend_from_slice(args);
+                ChildTransport::spawn("cmd", &full, cwd)
+            }
+            Err(e) => Err(e),
+        }
+    }
+
     pub fn spawn_ephemeral(exe: &str, cwd: Option<&str>) -> io::Result<Self> {
-        let t = ChildTransport::spawn(
+        let t = Self::spawn_child(
             exe,
             &[
                 "--mode",
@@ -345,7 +360,7 @@ impl PiClient {
         session_dir: &str,
         session_id: &str,
     ) -> io::Result<Self> {
-        let t = ChildTransport::spawn(
+        let t = Self::spawn_child(
             exe,
             &[
                 "--mode",

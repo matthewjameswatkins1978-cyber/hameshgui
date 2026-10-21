@@ -928,6 +928,7 @@ dependencies = [
  "hamesh-diag",
  "hamesh-inspect",
  "hamesh-layout",
+ "hamesh-pi",
  "hamesh-render",
  "hamesh-scene",
  "hamesh-text",

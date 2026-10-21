@@ -155,6 +155,10 @@ struct HameshWindowApp {
     use_m3: bool,
     shift_held: bool,
     m3_smoke_done: bool,
+    /// M4 live loop: background Pi worker link. `None` unless `--pi`.
+    /// Never blocks the UI thread; drains between frames.
+    pi: Option<PiLink>,
+    use_pi: bool,
     cursor: (f32, f32),
     size: (u32, u32),
     frames: u64,
@@ -184,6 +188,8 @@ impl HameshWindowApp {
             use_m3: false,
             shift_held: false,
             m3_smoke_done: false,
+            pi: None,
+            use_pi: false,
             cursor: (0.0, 0.0),
             size: (800, 600),
             frames: 0,
@@ -449,6 +455,19 @@ impl HameshWindowApp {
     /// Shared key-application core: the winit path maps events to keys,
     /// the inspector path maps KeyMsg to keys, both land here.
     fn m3_keys_apply(&mut self, keys: Vec<WKey>) -> String {
+        // Detect a submission AFTER the loop: batches (smoke script,
+        // pasted typing) type the text and press Enter in one go, so a
+        // pre-read of the composer always sees it empty. A submission
+        // happened iff Enter was applied while focused and the feed
+        // grew by a user message. The UI thread owns this decision;
+        // the worker only receives already-authorized text.
+        let had_enter = keys.contains(&WKey::Enter);
+        let before = self.widgets.as_ref().map(|w| {
+            (
+                w.focus.focused() == Some(w.composer_id.as_str()),
+                w.feed.messages.len(),
+            )
+        });
         let mut last = String::new();
         for k in &keys {
             if let Some(w) = self.widgets.as_mut() {
@@ -456,12 +475,189 @@ impl HameshWindowApp {
             }
         }
         self.refresh_feed();
+        let submitted: Option<String> = match (had_enter, before) {
+            (true, Some((true, before_len))) => self
+                .widgets
+                .as_ref()
+                .filter(|w| w.feed.messages.len() > before_len)
+                .and_then(|w| w.feed.messages.iter().rev().find(|m| m.role == "user"))
+                .map(|m| m.text.clone()),
+            _ => None,
+        };
+        if let (Some(text), Some(link)) = (submitted, self.pi.as_ref()) {
+            let _ = link.job_tx.send(PiJob::Prompt(text.clone()));
+            self.trace.record(
+                "m3.pi_queued",
+                &format!("submitted {text:?} to worker"),
+                self.app.revision,
+                None,
+            );
+        }
         last
     }
+}
 
+/// A Pi job for the worker thread: prompt the model, or abort the run.
+#[derive(Debug)]
+enum PiJob {
+    Prompt(String),
+    /// Cancel the current run. Wired when Esc stops meaning quit during
+    /// a live run (M4 follow-up); the worker already honors it today.
+    #[allow(dead_code)]
+    Abort,
+}
+
+/// Streamed Pi activity back to the UI thread. The UI never blocks on
+/// the model: it drains these between frames and folds text into the
+/// feed like any other state change.
+#[derive(Debug)]
+enum PiEvt {
+    Started,
+    Delta(String),
+    Done { text: String, aborted: bool },
+    Failed(String),
+}
+
+/// Link to the background Pi worker. `live_index` is the feed slot
+/// currently being streamed into (`None` when idle).
+struct PiLink {
+    job_tx: std::sync::mpsc::Sender<PiJob>,
+    evt_rx: std::sync::mpsc::Receiver<PiEvt>,
+    live_index: Option<usize>,
+    follow: bool,
+}
+
+/// Run `pi --mode rpc` off-thread: prompt, stream deltas, report done.
+/// Never touches UI state; everything crosses on channels.
+fn pi_worker(jobs: std::sync::mpsc::Receiver<PiJob>, events: std::sync::mpsc::Sender<PiEvt>) {
+    let mut client = match hamesh_pi::PiClient::spawn_ephemeral("pi", None) {
+        Ok(c) => c,
+        Err(e) => {
+            let _ = events.send(PiEvt::Failed(format!("spawn: {e}")));
+            return;
+        }
+    };
+    if let Err(e) = client.get_state(std::time::Duration::from_secs(20)) {
+        let _ = events.send(PiEvt::Failed(format!("handshake: {e}")));
+        return;
+    }
+    while let Ok(job) = jobs.recv() {
+        match job {
+            PiJob::Abort => {
+                let _ = client.abort(std::time::Duration::from_secs(10));
+            }
+            PiJob::Prompt(text) => {
+                let _ = events.send(PiEvt::Started);
+                let r = client.prompt_and_wait(
+                    &text,
+                    &mut |d: &str| {
+                        let _ = events.send(PiEvt::Delta(d.to_string()));
+                    },
+                    std::time::Duration::from_secs(180),
+                );
+                match r {
+                    Ok((text, aborted)) => {
+                        let _ = events.send(PiEvt::Done { text, aborted });
+                    }
+                    Err(e) => {
+                        let _ = events.send(PiEvt::Failed(format!("{e}")));
+                    }
+                }
+            }
+        }
+    }
+}
+
+impl HameshWindowApp {
     /// M3 smoke script: run once after open — focus the composer through
     /// the real focus path, type, submit, scroll. Proves the keyboard path
     /// end-to-end without a human at the keyboard.
+    /// Drain finished/partial Pi output without blocking: each event
+    /// appends to (or creates) an assistant message, then the visible
+    /// window rebuilds. Runs every frame; all I/O stays on the worker.
+    /// Empty assistant bubbles are skipped by the renderer; text streams
+    /// in as deltas arrive.
+    fn drain_pi(&mut self) {
+        enum Act {
+            Started,
+            Delta(String),
+            Done { text: String, aborted: bool },
+            Failed(String),
+        }
+        let mut acts = Vec::new();
+        if let Some(link) = self.pi.as_mut() {
+            while let Ok(ev) = link.evt_rx.try_recv() {
+                match ev {
+                    PiEvt::Started => acts.push(Act::Started),
+                    PiEvt::Delta(d) => acts.push(Act::Delta(d)),
+                    PiEvt::Done { text, aborted } => acts.push(Act::Done { text, aborted }),
+                    PiEvt::Failed(e) => acts.push(Act::Failed(e)),
+                }
+            }
+        }
+        if acts.is_empty() {
+            return;
+        }
+        let mut changed = false;
+        for a in acts {
+            match a {
+                Act::Started => {
+                    if let Some(w) = self.widgets.as_mut() {
+                        let i = w.feed.push_live("agent");
+                        if let Some(link) = self.pi.as_mut() {
+                            link.live_index = Some(i);
+                            link.follow = true;
+                        }
+                        changed = true;
+                    }
+                }
+                Act::Delta(d) => {
+                    let idx = self.pi.as_ref().and_then(|l| l.live_index);
+                    if let (Some(i), Some(w)) = (idx, self.widgets.as_mut()) {
+                        if let Some(m) = w.feed.messages.get_mut(i) {
+                            m.text.push_str(&d);
+                            changed = true;
+                        }
+                    }
+                }
+                Act::Done { text, aborted } => {
+                    if let Some(w) = self.widgets.as_mut() {
+                        if let Some(link) = self.pi.as_mut() {
+                            link.live_index = None;
+                        }
+                        let vp = w.feed_viewport.max(200.0);
+                        w.feed.scroll_to_bottom(vp);
+                        self.trace.record(
+                            "m3.pi_done",
+                            &format!(
+                                "aborted={aborted} chars={} messages={}",
+                                text.chars().count(),
+                                w.feed.messages.len()
+                            ),
+                            self.app.revision,
+                            None,
+                        );
+                        changed = true;
+                    }
+                }
+                Act::Failed(e) => {
+                    if let Some(w) = self.widgets.as_mut() {
+                        if let Some(link) = self.pi.as_mut() {
+                            link.live_index = None;
+                        }
+                        w.feed.push("system", &format!("Pi error: {e}"));
+                        let vp = w.feed_viewport.max(200.0);
+                        w.feed.scroll_to_bottom(vp);
+                        changed = true;
+                    }
+                }
+            }
+        }
+        if changed {
+            self.refresh_feed();
+        }
+    }
+
     fn m3_smoke_script(&mut self) {
         let layout = hamesh_layout::compute(&self.app, self.size.0 as f32, self.size.1 as f32);
         let (ok, hit) = match self.widgets.as_mut() {
@@ -480,12 +676,18 @@ impl HameshWindowApp {
         if !ok {
             return;
         }
+        // One batch through the shared core (queues a Pi job when --pi).
+        let mut keys: Vec<WKey> = "m3 smoke".chars().map(WKey::Char).collect();
+        keys.push(WKey::Enter);
+        let out = self.m3_keys_apply(keys);
+        self.trace.record(
+            "m3.smoke_keys",
+            &format!("applied keys -> {out}"),
+            self.app.revision,
+            None,
+        );
         if let Some(w) = self.widgets.as_mut() {
-            for c in "m3 smoke".chars() {
-                handle_key(&mut self.app, w, &WKey::Char(c));
-            }
-            handle_key(&mut self.app, w, &WKey::Enter);
-            w.feed.scroll_by(-120.0, 400.0);
+            w.feed.scroll_by(-120.0, w.feed_viewport.max(200.0));
         }
         self.refresh_feed();
         let (n_msgs, composer_text, focused) = match self.widgets.as_ref() {
@@ -773,6 +975,42 @@ impl ApplicationHandler<UserEvent> for HameshWindowApp {
             self.refresh_feed();
             println!("M3 chat open: Tab focuses, type in composer, Enter submits, wheel scrolls");
         }
+        if self.use_pi && self.pi.is_none() {
+            let (job_tx, job_rx) = std::sync::mpsc::channel::<PiJob>();
+            let (evt_tx, evt_rx) = std::sync::mpsc::channel::<PiEvt>();
+            std::thread::spawn(move || pi_worker(job_rx, evt_tx));
+            self.pi = Some(PiLink {
+                job_tx,
+                evt_rx,
+                live_index: None,
+                follow: false,
+            });
+            self.trace.record(
+                "pi.worker",
+                "background pi worker spawned (--pi)",
+                self.app.revision,
+                None,
+            );
+            println!("PI live mode: composer submits to a background pi worker");
+        }
+        if self.use_pi && self.pi.is_none() {
+            let (job_tx, job_rx) = std::sync::mpsc::channel::<PiJob>();
+            let (evt_tx, evt_rx) = std::sync::mpsc::channel::<PiEvt>();
+            std::thread::spawn(move || pi_worker(job_rx, evt_tx));
+            self.pi = Some(PiLink {
+                job_tx,
+                evt_rx,
+                live_index: None,
+                follow: false,
+            });
+            self.trace.record(
+                "pi.worker",
+                "background pi worker spawned (--pi)",
+                self.app.revision,
+                None,
+            );
+            println!("PI live mode: composer submits to a background pi worker");
+        }
         if self.use_inspect && !self.inspect_serving {
             if let Some(proxy) = self.proxy.clone() {
                 match std::net::TcpListener::bind("127.0.0.1:0") {
@@ -961,6 +1199,8 @@ impl ApplicationHandler<UserEvent> for HameshWindowApp {
     }
 
     fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
+        // Live Pi output lands here, never blocking the loop.
+        self.drain_pi();
         // Resolve parked `wait` ops without blocking the event loop.
         if !self.pending_waits.is_empty() {
             let cur = self.app.revision;
@@ -1032,6 +1272,14 @@ fn main() {
     app.use_inspect = std::env::args().any(|a| a == "--inspect");
     if app.use_inspect {
         println!("INSPECT mode: local loopback inspector (dev only)");
+    }
+    app.use_pi = std::env::args().any(|a| a == "--pi");
+    if app.use_pi {
+        println!("PI mode: composer submits stream through a background pi worker (needs auth + network)");
+    }
+    app.use_pi = std::env::args().any(|a| a == "--pi");
+    if app.use_pi {
+        println!("PI mode: composer submits stream through a background pi worker (needs auth + network)");
     }
     app.proxy = Some(event_loop.create_proxy());
     if let Some(secs) = smoke_secs {
