@@ -28,6 +28,7 @@ use std::net::TcpStream;
 
 use rmcp::{
     handler::server::{router::tool::ToolRouter, wrapper::Parameters},
+    model::{CallToolResult, ContentBlock},
     tool, tool_handler, tool_router, ServerHandler, ServiceExt,
 };
 use schemars::JsonSchema;
@@ -108,14 +109,27 @@ fn forward(op: &str, params: serde_json::Value, conn: &Conn) -> String {
 static INSPECTOR_LOCK: std::sync::LazyLock<tokio::sync::Mutex<()>> =
     std::sync::LazyLock::new(|| tokio::sync::Mutex::new(()));
 
-async fn call(op: &'static str, params: serde_json::Value, conn: Conn) -> String {
+async fn call(op: &'static str, params: serde_json::Value, conn: Conn) -> CallToolResult {
     let _guard = INSPECTOR_LOCK.lock().await;
-    tokio::task::spawn_blocking(move || forward(op, params, &conn))
+    let body = tokio::task::spawn_blocking(move || forward(op, params, &conn))
         .await
         .unwrap_or_else(|e| {
             serde_json::json!({"ok": false, "code": "LOCAL", "message": format!("join: {e}")})
                 .to_string()
-        })
+        });
+    // Structural errors for MCP clients: the inspector JSON stays in
+    // content either way, but STALE / DENIED / LOCAL now also raise
+    // isError so clients with error handling trip without parsing.
+    let ok = serde_json::from_str::<serde_json::Value>(&body)
+        .ok()
+        .and_then(|v| v.get("ok").and_then(|o| o.as_bool()))
+        .unwrap_or(false);
+    let content = vec![ContentBlock::text(body)];
+    if ok {
+        CallToolResult::success(content)
+    } else {
+        CallToolResult::error(content)
+    }
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -195,14 +209,14 @@ impl HameshMcp {
     /// Read the live component tree: ids, roles, rects, rev stamps. Start
     /// every session here; the app_rev you get back anchors later calls.
     #[tool(name = "hamesh_map")]
-    async fn map(&self, p: Parameters<Conn>) -> String {
+    async fn map(&self, p: Parameters<Conn>) -> CallToolResult {
         call("map", serde_json::json!({}), p.0).await
     }
 
     /// Read one component in depth: props, state keys, diagnostics
     /// (disabled/invisible/clipped and why). Takes a component id.
     #[tool(name = "hamesh_detail")]
-    async fn detail(&self, p: Parameters<DetailArgs>) -> String {
+    async fn detail(&self, p: Parameters<DetailArgs>) -> CallToolResult {
         let a = p.0;
         call("detail", serde_json::json!({"id": a.id}), a.conn).await
     }
@@ -211,7 +225,7 @@ impl HameshMcp {
     /// pass app_rev back as expect_rev; on code STALE, re-run hamesh_map
     /// and retry with the fresh app_rev. Rejected ops change nothing.
     #[tool(name = "hamesh_click")]
-    async fn click(&self, p: Parameters<ClickArgs>) -> String {
+    async fn click(&self, p: Parameters<ClickArgs>) -> CallToolResult {
         let a = p.0;
         let (op, params) = if let Some((x, y)) = a.target.split_once(',') {
             let x: f64 = x.trim().parse().unwrap_or(-1.0);
@@ -233,7 +247,7 @@ impl HameshMcp {
     /// Left Right Up Down Home End. Mutating: pass app_rev back as
     /// expect_rev; on code STALE, re-run hamesh_map and retry.
     #[tool(name = "hamesh_key")]
-    async fn key(&self, p: Parameters<KeyArgs>) -> String {
+    async fn key(&self, p: Parameters<KeyArgs>) -> CallToolResult {
         let a = p.0;
         call(
             "key",
@@ -245,7 +259,7 @@ impl HameshMcp {
 
     /// Type full text into a component by id (no focus tricks needed).
     #[tool(name = "hamesh_type")]
-    async fn type_text(&self, p: Parameters<TypeArgs>) -> String {
+    async fn type_text(&self, p: Parameters<TypeArgs>) -> CallToolResult {
         let a = p.0;
         call(
             "type",
@@ -257,7 +271,7 @@ impl HameshMcp {
 
     /// Render the current frame to a PNG; replies with the path + revs.
     #[tool(name = "hamesh_snapshot")]
-    async fn snapshot(&self, p: Parameters<SnapshotArgs>) -> String {
+    async fn snapshot(&self, p: Parameters<SnapshotArgs>) -> CallToolResult {
         let a = p.0;
         let path = a
             .path
@@ -268,7 +282,7 @@ impl HameshMcp {
     /// Block until app_rev changes or timeout_ms elapses (default 5000).
     /// Use it to wait for streamed output or settle loops.
     #[tool(name = "hamesh_wait")]
-    async fn wait(&self, p: Parameters<WaitArgs>) -> String {
+    async fn wait(&self, p: Parameters<WaitArgs>) -> CallToolResult {
         let a = p.0;
         call(
             "wait",

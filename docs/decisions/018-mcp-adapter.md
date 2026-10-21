@@ -62,5 +62,7 @@ Hamesh-specific tooling.
   carrying the drill text, snapshot, clean stdin-EOF shutdown, and the
   window's own trace as the independent witness.
 - Live: `DRILL-PASS ... (revs 8->9->9->10)` first run.
-- Remaining open: `isError` mapping for STALE/DENIED, session-scoped
-  discovery.
+- Remaining open: session-scoped discovery (`isError` done —
+  tools now return `CallToolResult::error` with `isError: true` on
+  STALE / DENIED / LOCAL, inspector JSON still in content; drill
+  re-passes unchanged).
