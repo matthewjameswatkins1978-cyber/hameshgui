@@ -285,8 +285,25 @@ fn main() {
         fail(format!("exactly one racer may apply: rev {r6} -> {r7}"));
     }
 
+    step(11, "click path: focus follows the Hand");
+    // The one inspector op with no standing coverage: click the composer
+    // by id and require the reply to report focus on it.
+    let (code, out) = cli(&mut child, &["click", "composer"]);
+    if code != 0 {
+        fail(format!("click composer failed with code {code}: {out}"));
+    }
+    let clicked: serde_json::Value =
+        serde_json::from_str(&out).unwrap_or_else(|_| fail(format!("click reply not JSON: {out}")));
+    let focus = clicked
+        .get("result")
+        .and_then(|r| r.get("focus"))
+        .and_then(|f| f.as_str());
+    if focus != Some("composer") {
+        fail(format!("click should focus composer, got {focus:?}: {out}"));
+    }
+
     step(
-        11,
+        12,
         "wait for the smoke clock, then check the window's own trace",
     );
     let status = child
@@ -314,5 +331,5 @@ fn main() {
         fail("trace has no submitted record for the drill text".to_string());
     }
 
-    println!("DRILL-PASS stale-inject -> repair -> submit -> wait -> race verified (revs {r1}->{r2}->{r3}->{r4}->{r5}->{r6}->{r7})");
+    println!("DRILL-PASS stale -> repair -> submit -> wait -> race -> click verified (revs {r1}->{r2}->{r3}->{r4}->{r5}->{r6}->{r7})");
 }

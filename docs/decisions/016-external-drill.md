@@ -73,3 +73,16 @@ prescribes, and verify — deterministically, with no model in the loop.
   yield exactly one winner and one STALE (either may win), and the rev
   must advance by exactly one.
 - Live: `DRILL-PASS ... (revs 8->9->9->10->11->12->13)` first run.
+
+## Addendum 2026-10-21 — click coverage + single-fire smoke dump
+
+- The one inspector op with no standing coverage was `click`: the
+  drill now clicks the composer by id and requires the reply to
+  report focus on it.
+- Same run killed a cosmetic wart the doubled log lines had been
+  signalling: with `ControlFlow::Poll` the loop could re-enter
+  `about_to_wait` before `event_loop.exit()` took effect, so the
+  smoke deadline block double-dumped inspection, snapshot, trace
+  and verdicts. The block now clears `smoke_deadline` when it fires.
+- Live: `DRILL-PASS ... -> race -> click verified (...)`, one
+  `SMOKE frames=` line in the window log.

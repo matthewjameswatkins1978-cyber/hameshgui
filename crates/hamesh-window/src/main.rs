@@ -1398,6 +1398,11 @@ impl ApplicationHandler<UserEvent> for HameshWindowApp {
         }
         if let Some(deadline) = self.smoke_deadline {
             if Instant::now() >= deadline {
+                // Fire once: with ControlFlow::Poll the loop can re-enter
+                // about_to_wait before event_loop.exit() takes effect,
+                // which used to double-dump inspection, snapshot, trace
+                // and verdict lines.
+                self.smoke_deadline = None;
                 if self.use_pi && self.use_m3 {
                     self.m3_pi_assert();
                 }
