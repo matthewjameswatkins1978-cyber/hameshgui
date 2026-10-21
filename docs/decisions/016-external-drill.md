@@ -64,3 +64,12 @@ prescribes, and verify — deterministically, with no model in the loop.
   order), per-connection request order preserved by each
   connection's sequential loop. Dev-only local threat model unchanged.
 - Live after fix: `DRILL-PASS ... (revs 8->9->9->10->11)`.
+
+## Addendum 2026-10-21 — race step proves the serializer
+
+- The per-connection-threads fix rested on one claim: the UI thread
+  stays the serializer, so rev discipline is unchanged. Now a drill
+  step asserts it: two racing `Enter` submits on the same rev must
+  yield exactly one winner and one STALE (either may win), and the rev
+  must advance by exactly one.
+- Live: `DRILL-PASS ... (revs 8->9->9->10->11->12->13)` first run.

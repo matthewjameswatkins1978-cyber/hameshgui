@@ -240,8 +240,53 @@ fn main() {
         fail(format!("woken wait should report rev {r5}: {out}"));
     }
 
+    step(10, "race: two submits, one rev — exactly one may win");
+    // Two racing Enter presses on the same rev prove the UI thread is
+    // still the serializer after the per-connection-threads fix: one
+    // applies (rev+1), the other is rejected STALE. Either may win, but
+    // never both and never neither — that is the whole assertion.
+    let (code, out) = cli(&mut child, &["type", "composer", "race probe"]);
+    if code != 0 {
+        fail(format!("race setup type failed with code {code}: {out}"));
+    }
+    let r6 = app_rev(&out);
+    if r6 <= r5 {
+        fail(format!("race setup type did not advance rev: {r5} -> {r6}"));
+    }
+    let r6a = r6.to_string();
+    let r6b = r6.to_string();
+    let t1 = std::thread::spawn(move || cli_raw(&["--expect-rev", r6a.as_str(), "key", "Enter"]));
+    let t2 = std::thread::spawn(move || cli_raw(&["--expect-rev", r6b.as_str(), "key", "Enter"]));
+    let (c1, o1) = t1
+        .join()
+        .unwrap_or_else(|_| fail("racer thread panicked".to_string()));
+    let (c2, o2) = t2
+        .join()
+        .unwrap_or_else(|_| fail("racer thread panicked".to_string()));
+    let won = [(c1, &o1), (c2, &o2)]
+        .iter()
+        .filter(|(c, o)| *c == 0 && o.contains("submitted"))
+        .count();
+    let stale = [(c1, &o1), (c2, &o2)]
+        .iter()
+        .filter(|(c, o)| *c == 2 && code_is(o, "STALE"))
+        .count();
+    if won != 1 || stale != 1 {
+        fail(format!(
+            "race must yield exactly one winner and one STALE (got {won}/{stale}): [{c1}] {o1} [{c2}] {o2}"
+        ));
+    }
+    let (code, out) = cli(&mut child, &["map"]);
+    if code != 0 {
+        fail(format!("post-race map failed with code {code}: {out}"));
+    }
+    let r7 = app_rev(&out);
+    if r7 != r6 + 1 {
+        fail(format!("exactly one racer may apply: rev {r6} -> {r7}"));
+    }
+
     step(
-        10,
+        11,
         "wait for the smoke clock, then check the window's own trace",
     );
     let status = child
@@ -269,5 +314,5 @@ fn main() {
         fail("trace has no submitted record for the drill text".to_string());
     }
 
-    println!("DRILL-PASS stale-inject -> repair -> submit -> wait verified (revs {r1}->{r2}->{r3}->{r4}->{r5})");
+    println!("DRILL-PASS stale-inject -> repair -> submit -> wait -> race verified (revs {r1}->{r2}->{r3}->{r4}->{r5}->{r6}->{r7})");
 }
