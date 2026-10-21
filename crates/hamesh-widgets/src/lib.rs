@@ -43,6 +43,10 @@ pub struct Composer {
     pub text: String,
     pub caret: usize,
     pub focused: bool,
+    /// Marked text being composed by an IME (Preedit): shown inline at
+    /// the caret but not yet committed. Never submitted on its own;
+    /// Commit (or submit) folds it into `text` first. See decision 019.
+    pub preedit: Option<String>,
 }
 
 impl Composer {
@@ -65,6 +69,47 @@ impl Composer {
         self.text.insert_str(idx, s);
         self.caret += s.chars().count();
         self.clamp_caret();
+    }
+
+    /// Ime::Preedit: empty string (or cleared) drops the marked text.
+    pub fn set_preedit(&mut self, s: &str) {
+        if s.is_empty() {
+            self.preedit = None;
+        } else {
+            self.preedit = Some(s.to_string());
+        }
+    }
+
+    /// Ime::Commit or submit-while-composing: fold marked text into the
+    /// buffer through the grapheme-correct insert path, then clear it.
+    pub fn commit(&mut self, s: &str) {
+        self.preedit = None;
+        if !s.is_empty() {
+            self.insert(s);
+        }
+    }
+
+    pub fn clear_preedit(&mut self) {
+        self.preedit = None;
+    }
+
+    /// Displayed text: committed text with any live preedit spliced at
+    /// the caret. The caret itself stays at the composition start, so
+    /// `caret_x` (measured over the committed prefix) is unaffected.
+    pub fn shown_text(&self) -> String {
+        match &self.preedit {
+            None => self.text.clone(),
+            Some(p) => {
+                let byte = self
+                    .text
+                    .char_indices()
+                    .nth(self.caret)
+                    .map(|(i, _)| i)
+                    .unwrap_or(self.text.len());
+                let (head, tail) = self.text.split_at(byte);
+                format!("{head}{p}{tail}")
+            }
+        }
     }
 
     pub fn backspace(&mut self) {
@@ -139,6 +184,11 @@ impl Composer {
     }
 
     pub fn take_submission(&mut self) -> Option<String> {
+        // Submitting while composing commits first: the marked text is
+        // real user input, never silently dropped.
+        if let Some(p) = self.preedit.take() {
+            self.insert(&p);
+        }
         let t = self.text.trim().to_string();
         self.text.clear();
         self.caret = 0;
@@ -418,8 +468,12 @@ pub fn sync_composer(app: &mut App, w: &Widgets) {
     let avail = 700.0;
     let cx = w.composer.caret_x(avail);
     if let Some(c) = app.get_mut(&w.composer_id) {
-        c.props.insert("text".to_string(), w.composer.text.clone());
+        c.props.insert("text".to_string(), w.composer.shown_text());
         c.props.insert("caret_x".to_string(), format!("{cx:.1}"));
+        c.props.insert(
+            "preedit".to_string(),
+            w.composer.preedit.clone().unwrap_or_default(),
+        );
         c.props.insert(
             "focused".to_string(),
             (w.focus.focused() == Some(w.composer_id.as_str())).to_string(),
@@ -633,5 +687,52 @@ mod tests {
         assert_eq!(c.caret, 3);
         c.backspace();
         assert_eq!(c.text, "x");
+    }
+
+    #[test]
+    fn preedit_shows_but_does_not_commit() {
+        // Decision 019: marked text is display-only until Commit.
+        let mut c = Composer::new();
+        c.insert("ab");
+        c.move_left();
+        c.set_preedit("\u{3042}\u{3044}");
+        assert_eq!(c.text, "ab", "preedit leaked into the buffer");
+        assert_eq!(c.shown_text(), "a\u{3042}\u{3044}b");
+        assert_eq!(c.caret, 1, "caret must stay at composition start");
+        // caret_x measures the committed prefix only.
+        let bare = Composer {
+            text: "a".to_string(),
+            caret: 1,
+            ..Default::default()
+        };
+        assert_eq!(c.caret_x(700.0), bare.caret_x(700.0));
+        // Empty preedit clears.
+        c.set_preedit("");
+        assert_eq!(c.shown_text(), "ab");
+        assert!(c.preedit.is_none());
+    }
+
+    #[test]
+    fn commit_folds_through_grapheme_insert() {
+        let mut c = Composer::new();
+        c.set_preedit("\u{3042}");
+        c.commit("\u{1F468}\u{200D}\u{1F469}\u{200D}\u{1F467}");
+        assert!(c.preedit.is_none());
+        assert_eq!(c.caret, 5, "caret counts chars of the committed text");
+        // Whole-grapheme delete still holds after a commit.
+        c.backspace();
+        assert_eq!(c.text, "");
+        assert_eq!(c.caret, 0);
+    }
+
+    #[test]
+    fn submit_commits_preedit_first() {
+        let mut c = Composer::new();
+        c.insert("hi ");
+        c.set_preedit("\u{4E2D}\u{6587}");
+        let out = c.take_submission();
+        assert_eq!(out, Some("hi \u{4E2D}\u{6587}".to_string()));
+        assert!(c.preedit.is_none());
+        assert_eq!(c.text, "");
     }
 }

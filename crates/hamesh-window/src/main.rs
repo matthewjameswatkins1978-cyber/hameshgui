@@ -25,7 +25,7 @@ use std::num::NonZeroU32;
 use std::sync::Arc;
 use std::time::Instant;
 use winit::application::ApplicationHandler;
-use winit::event::{ElementState, MouseButton, WindowEvent};
+use winit::event::{ElementState, Ime, MouseButton, WindowEvent};
 use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop, EventLoopProxy};
 use winit::keyboard::{KeyCode, PhysicalKey};
 use winit::window::{Window, WindowId};
@@ -716,6 +716,89 @@ impl HameshWindowApp {
         println!("SMOKE-PI-{verdict}");
     }
 
+    /// IME wiring (decision 019): thin delegation to the tested Composer
+    /// model. Preedit/Commit land only when the composer is focused;
+    /// everything is traced. The winit arm itself is deliberately tiny —
+    /// it cannot be driven without a real OS IME, so the model owns the
+    /// behavior and the headless tests own the proof.
+    fn ime_event(&mut self, ime: Ime) {
+        let focused = self
+            .widgets
+            .as_ref()
+            .is_some_and(|w| w.focus.focused() == Some(w.composer_id.as_str()));
+        match ime {
+            Ime::Enabled => {
+                self.trace
+                    .record("m3.ime", "enabled", self.app.revision, None);
+            }
+            Ime::Preedit(s, _) => {
+                if !focused {
+                    return;
+                }
+                if let Some(w) = self.widgets.as_mut() {
+                    w.composer.set_preedit(&s);
+                    hamesh_widgets::sync_composer(&mut self.app, w);
+                }
+                self.refresh_feed();
+                self.trace.record(
+                    "m3.ime_preedit",
+                    &format!("{} chars", s.chars().count()),
+                    self.app.revision,
+                    None,
+                );
+                self.update_ime_cursor_area();
+            }
+            Ime::Commit(s) => {
+                if !focused {
+                    return;
+                }
+                if let Some(w) = self.widgets.as_mut() {
+                    w.composer.commit(&s);
+                    hamesh_widgets::sync_composer(&mut self.app, w);
+                }
+                self.refresh_feed();
+                self.trace.record(
+                    "m3.ime_commit",
+                    &format!("{} chars", s.chars().count()),
+                    self.app.revision,
+                    None,
+                );
+            }
+            Ime::Disabled => {
+                if let Some(w) = self.widgets.as_mut() {
+                    w.composer.clear_preedit();
+                    hamesh_widgets::sync_composer(&mut self.app, w);
+                }
+                self.refresh_feed();
+                self.trace
+                    .record("m3.ime", "disabled", self.app.revision, None);
+            }
+        }
+    }
+
+    /// Tell the OS where the caret is so the candidate window opens in a
+    /// sane place. Approximate (composer rect + caret_x); the OS clamps.
+    /// Refreshed on every Preedit; caret moves between compositions reuse
+    /// the last position.
+    fn update_ime_cursor_area(&self) {
+        let (rect, cx) = match self.widgets.as_ref() {
+            Some(w) => {
+                let layout =
+                    hamesh_layout::compute(&self.app, self.size.0 as f32, self.size.1 as f32);
+                let rect = layout.nodes.get(&w.composer_id).map(|n| n.rect.clone());
+                (rect, w.composer.caret_x(700.0))
+            }
+            None => (None, 0.0),
+        };
+        if let (Some(r), Some(win)) = (rect, self.window.as_ref()) {
+            use winit::dpi::{LogicalPosition, LogicalSize};
+            win.set_ime_cursor_area(
+                LogicalPosition::new((r.x + cx) as f64, r.y as f64),
+                LogicalSize::new((r.w - cx).max(8.0) as f64, r.h as f64),
+            );
+        }
+    }
+
     fn m3_smoke_script(&mut self) {
         let layout = hamesh_layout::compute(&self.app, self.size.0 as f32, self.size.1 as f32);
         let (ok, hit) = match self.widgets.as_mut() {
@@ -1039,6 +1122,12 @@ impl ApplicationHandler<UserEvent> for HameshWindowApp {
             self.enter_m3();
             self.refresh_feed();
             println!("M3 chat open: Tab focuses, type in composer, Enter submits, wheel scrolls");
+            // IME allowed while the chat surface is up; Preedit/Commit
+            // are accepted only when the composer itself is focused
+            // (see ime_event), and the cursor area follows the caret.
+            if let Some(win) = self.window.as_ref() {
+                win.set_ime_allowed(true);
+            }
         }
         if self.use_pi && self.pi.is_none() {
             let (job_tx, job_rx) = std::sync::mpsc::channel::<PiJob>();
@@ -1179,6 +1268,9 @@ impl ApplicationHandler<UserEvent> for HameshWindowApp {
                         );
                     }
                 }
+            }
+            WindowEvent::Ime(ime) => {
+                self.ime_event(ime);
             }
             WindowEvent::KeyboardInput { event, .. } => {
                 if event.state != ElementState::Pressed {
