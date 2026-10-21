@@ -10,6 +10,9 @@
 use parley::style::StyleProperty;
 use parley::{FontContext, LayoutContext};
 
+pub mod glue;
+pub use glue::{proof_png, rasterize_parley, RasterGlyph};
+
 #[derive(Clone, Debug, PartialEq)]
 pub struct TextMetrics {
     /// Which engine produced this.

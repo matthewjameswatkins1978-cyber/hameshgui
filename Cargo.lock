@@ -872,6 +872,8 @@ dependencies = [
  "cosmic-text",
  "parley",
  "peniko 0.3.2",
+ "swash",
+ "tiny-skia",
 ]
 
 [[package]]

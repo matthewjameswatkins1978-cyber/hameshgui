@@ -8,3 +8,5 @@ license.workspace = true
 parley = "0.12"
 cosmic-text = "0.19"
 peniko = "0.3"
+swash = "0.2"
+tiny-skia = "0.11"

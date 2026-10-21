@@ -8,3 +8,4 @@
 - `006-gpu-presentation.md` — wgpu 30 + vello 0.11 with loss recovery.
 - `007-parley-text-path.md` — parley chosen, cosmic-text fallback.
 - `008-a11y-ime-partial.md` — AccessKit + winit IME constraints for M3.
+- `009-glyph-glue.md` — parley runs to swash alpha bitmaps.
