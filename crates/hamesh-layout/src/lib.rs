@@ -61,9 +61,13 @@ fn child_style(comp: &hamesh_core::Component) -> Style {
             .and_then(|v| v.parse::<f32>().ok())
             .filter(|v| *v > 0.0)
     };
+    // Containers hug their children (auto) and grow into free space.
+    // NOTE: Role::List MUST be here — a virtualized feed's panel sizes
+    // to its visible window. Missing it pinned the feed to 32px and the
+    // flex shrink then crushed every message row (caught by the M3 PNG).
     let is_container = matches!(
         comp.role,
-        hamesh_core::Role::Window | hamesh_core::Role::Panel
+        hamesh_core::Role::Window | hamesh_core::Role::Panel | hamesh_core::Role::List
     );
     let w = parse("w")
         .map(Dimension::length)

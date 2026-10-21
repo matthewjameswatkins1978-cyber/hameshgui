@@ -28,6 +28,181 @@ fn center(layout: &LayoutOutput, id: &str) -> Option<(f32, f32)> {
         .map(|n| (n.rect.x + n.rect.w / 2.0, n.rect.y + n.rect.h / 2.0))
 }
 
+/// Human-equivalent focus: click the target (full hit-test path) and, if
+/// the click lands on it AND it is in the keyboard focus order, move
+/// keyboard focus there — exactly like a human clicking into a field.
+pub fn focus_human(
+    app: &mut App,
+    widgets: &mut hamesh_widgets::Widgets,
+    layout: &LayoutOutput,
+    id: &str,
+) -> AutomationResult {
+    let before = app.revision;
+    // Click at the target's center through the full hit-test path, but
+    // judge by WHERE the pointer lands, not by command routing: text
+    // fields take focus without owning a command.
+    let Some((x, y)) = center(layout, id) else {
+        return AutomationResult {
+            mechanism: Mechanism::HumanEquivalent,
+            action: "focus".into(),
+            target: id.into(),
+            success: false,
+            hit_component: None,
+            revision_before: before,
+            revision_after: app.revision,
+            notes: vec!["no layout rect for target".into()],
+        };
+    };
+    let click = click_human(app, layout, x, y);
+    if click.hit_component.as_deref() != Some(id) {
+        return AutomationResult {
+            mechanism: Mechanism::HumanEquivalent,
+            action: "focus".into(),
+            target: id.into(),
+            success: false,
+            hit_component: click.hit_component,
+            revision_before: before,
+            revision_after: app.revision,
+            notes: vec!["pointer did not reach target; focus unchanged".into()],
+        };
+    }
+    let enabled = app.components.get(id).map(|c| c.enabled).unwrap_or(false);
+    if !enabled {
+        return AutomationResult {
+            mechanism: Mechanism::HumanEquivalent,
+            action: "focus".into(),
+            target: id.into(),
+            success: false,
+            hit_component: Some(id.into()),
+            revision_before: before,
+            revision_after: app.revision,
+            notes: vec!["target disabled: no focus".into()],
+        };
+    }
+    // Click hit the target. If it takes keyboard focus, move it.
+    // (Buttons activate on click AND take focus in real toolkits.)
+    if let Some(pos) = widgets.focus.order.iter().position(|o| o == id) {
+        widgets.focus.current = pos;
+        hamesh_widgets::sync_composer(app, widgets);
+        AutomationResult {
+            mechanism: Mechanism::HumanEquivalent,
+            action: "focus".into(),
+            target: id.into(),
+            success: true,
+            hit_component: Some(id.into()),
+            revision_before: before,
+            revision_after: app.revision,
+            notes: vec!["pointer reached target; keyboard focus moved".into()],
+        }
+    } else {
+        AutomationResult {
+            mechanism: Mechanism::HumanEquivalent,
+            action: "focus".into(),
+            target: id.into(),
+            success: false,
+            hit_component: Some(id.into()),
+            revision_before: before,
+            revision_after: app.revision,
+            notes: vec!["click landed but target is not focusable".into()],
+        }
+    }
+}
+
+/// Human-equivalent key press through the keyboard focus path.
+/// Tab/ShiftTab always traverse focus; text entry requires the focused
+/// composer to be visible and enabled — otherwise the key is ignored
+/// and reported (like a human typing into the void).
+pub fn key_human(
+    app: &mut App,
+    widgets: &mut hamesh_widgets::Widgets,
+    key: &hamesh_widgets::Key,
+) -> AutomationResult {
+    let before = app.revision;
+    let what = hamesh_widgets::handle_key(app, widgets, key);
+    let ignored = what.contains("ignored") || what.contains("no-op");
+    AutomationResult {
+        mechanism: Mechanism::HumanEquivalent,
+        action: "key".into(),
+        target: format!("{key:?}"),
+        success: !ignored,
+        hit_component: None,
+        revision_before: before,
+        revision_after: app.revision,
+        notes: vec![what],
+    }
+}
+
+/// Human-equivalent typing: click-to-focus, then one key event per char.
+/// Fails honestly when the target is covered, disabled, invisible, or
+/// not a text input — a human could not type into it either.
+pub fn type_human(
+    app: &mut App,
+    widgets: &mut hamesh_widgets::Widgets,
+    layout: &LayoutOutput,
+    target_id: &str,
+    text: &str,
+) -> AutomationResult {
+    let before = app.revision;
+    let focus = focus_human(app, widgets, layout, target_id);
+    if !focus.success {
+        return AutomationResult {
+            mechanism: Mechanism::HumanEquivalent,
+            action: "type".into(),
+            target: target_id.into(),
+            success: false,
+            hit_component: focus.hit_component,
+            revision_before: before,
+            revision_after: app.revision,
+            notes: vec!["could not focus target; no text entered".into()],
+        };
+    }
+    let mut entered = 0;
+    for c in text.chars() {
+        let r = key_human(app, widgets, &hamesh_widgets::Key::Char(c));
+        if r.success {
+            entered += 1;
+        } else {
+            break;
+        }
+    }
+    AutomationResult {
+        mechanism: Mechanism::HumanEquivalent,
+        action: "type".into(),
+        target: target_id.into(),
+        success: entered == text.chars().count(),
+        hit_component: Some(target_id.into()),
+        revision_before: before,
+        revision_after: app.revision,
+        notes: vec![format!(
+            "entered {entered}/{} chars via focus path",
+            text.chars().count()
+        )],
+    }
+}
+
+/// Direct composer mutation. Bypasses focus, visibility and hit-testing
+/// by design — labeled DirectOp, never GUI proof.
+pub fn set_composer_text_direct(
+    app: &mut App,
+    widgets: &mut hamesh_widgets::Widgets,
+    text: &str,
+) -> AutomationResult {
+    let before = app.revision;
+    widgets.composer.text = text.to_string();
+    widgets.composer.caret = text.chars().count();
+    hamesh_widgets::sync_composer(app, widgets);
+    AutomationResult {
+        mechanism: Mechanism::DirectOp,
+        action: "set-text".into(),
+        target: widgets.composer_id.clone(),
+        success: true,
+        hit_component: None,
+        revision_before: before,
+        revision_after: app.revision,
+        notes: vec!["direct op: did NOT traverse focus/hit-test path".into()],
+    }
+}
+
 /// Human-equivalent click at a point: hit-test, then apply the target's
 /// command if the hit target is enabled and visible.
 pub fn click_human(app: &mut App, layout: &LayoutOutput, x: f32, y: f32) -> AutomationResult {
@@ -252,5 +427,74 @@ mod tests {
         let r = click_component_human(&mut app, &layout, "btn");
         assert!(!r.success, "overlay should intercept: {r:?}");
         assert_ne!(r.hit_component.as_deref(), Some("btn"));
+    }
+
+    fn app_with_composer() -> (App, hamesh_widgets::Widgets, LayoutOutput) {
+        use hamesh_core::{Component, Role};
+        let mut app = App::new("win");
+        app.add("win", Component::new("feed", Role::List, "feed"));
+        app.add(
+            "win",
+            Component::new("composer", Role::TextInput, "composer").with_prop("h", "36"),
+        );
+        let mut w = hamesh_widgets::Widgets::default();
+        w.composer_id = "composer".to_string();
+        w.feed_id = "feed".to_string();
+        w.focus = hamesh_widgets::Focus::rebuild(&app);
+        let layout = hamesh_layout::compute(&app, 800.0, 600.0);
+        (app, w, layout)
+    }
+
+    #[test]
+    fn typing_enters_text_and_submit_appends() {
+        let (mut app, mut w, layout) = app_with_composer();
+        let r = type_human(&mut app, &mut w, &layout, "composer", "hello");
+        assert!(r.success, "{r:?}");
+        assert_eq!(r.mechanism, Mechanism::HumanEquivalent);
+        assert_eq!(w.composer.text, "hello");
+        let k = key_human(&mut app, &mut w, &hamesh_widgets::Key::Enter);
+        assert!(k.success, "{k:?}");
+        assert_eq!(w.feed.messages.len(), 1);
+        assert_eq!(w.composer.text, "");
+    }
+
+    #[test]
+    fn covered_composer_blocks_typing() {
+        use hamesh_core::{Component, Role};
+        let (mut app, mut w, _) = app_with_composer();
+        app.add(
+            "win",
+            Component::new("veil", Role::Overlay, "veil")
+                .with_prop("overlay", "true")
+                .with_prop("ox", "0")
+                .with_prop("oy", "0")
+                .with_prop("w", "800")
+                .with_prop("h", "600"),
+        );
+        let layout = hamesh_layout::compute(&app, 800.0, 600.0);
+        let r = type_human(&mut app, &mut w, &layout, "composer", "nope");
+        assert!(!r.success, "covered composer must block typing: {r:?}");
+        assert_eq!(w.composer.text, "");
+        // Direct op still works, labeled as such.
+        let d = set_composer_text_direct(&mut app, &mut w, "nope");
+        assert_eq!(d.mechanism, Mechanism::DirectOp);
+        assert!(d.success);
+    }
+
+    #[test]
+    fn tab_moves_focus_and_unfocused_typing_fails() {
+        let (mut app, mut w, layout) = app_with_composer();
+        // Focus starts on the feed; Tab reaches the composer.
+        let t = key_human(&mut app, &mut w, &hamesh_widgets::Key::Tab);
+        assert!(t.success);
+        assert_eq!(w.focus.focused(), Some("composer"));
+        let t = key_human(&mut app, &mut w, &hamesh_widgets::Key::Tab);
+        assert!(t.success);
+        assert_eq!(w.focus.focused(), Some("feed"));
+        // Typing now targets nothing: key_human reports ignored.
+        let k = key_human(&mut app, &mut w, &hamesh_widgets::Key::Char('x'));
+        assert!(!k.success);
+        assert_eq!(w.composer.text, "");
+        let _ = layout;
     }
 }

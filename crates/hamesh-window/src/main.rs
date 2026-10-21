@@ -16,6 +16,8 @@
 use hamesh_automation::{click_component_human, click_human, invoke_direct};
 use hamesh_core::{App, Component, Role};
 use hamesh_diag::Trace;
+use hamesh_widgets::Key as WKey;
+use hamesh_widgets::{handle_key, rebuild_feed_nodes, sync_composer, Focus, Widgets};
 mod gpu;
 
 use std::num::NonZeroU32;
@@ -69,6 +71,44 @@ fn sample_app() -> App {
     app
 }
 
+/// M3 Pi-style application tree: header + virtualized feed + composer.
+fn m3_app() -> (App, Widgets) {
+    let mut app = App::new("win");
+    app.add(
+        "win",
+        Component::new("header", Role::Header, "Agent X chat")
+            .with_prop("h", "48")
+            .with_prop("text", "Agent X — Hamesh chat"),
+    );
+    app.add(
+        "win",
+        Component::new("feed", Role::List, "feed").with_prop("layout", "column"),
+    );
+    app.add(
+        "win",
+        Component::new("composer", Role::TextInput, "composer")
+            .with_prop("h", "40")
+            .with_prop("text", ""),
+    );
+    let mut w = Widgets {
+        composer_id: "composer".to_string(),
+        feed_id: "feed".to_string(),
+        ..Default::default()
+    };
+    for i in 0..30 {
+        let role = if i % 2 == 0 { "user" } else { "agent" };
+        w.feed.push(
+            role,
+            &format!("Message {i}: the quick brown fox jumps over the lazy dog"),
+        );
+    }
+    w.feed.relayout(700.0);
+    w.feed.scroll_to_bottom(400.0);
+    w.focus = Focus::rebuild(&app);
+    sync_composer(&mut app, &w);
+    (app, w)
+}
+
 fn sync_label(app: &mut App) {
     let c = app.state.get("counter").cloned().unwrap_or_default();
     if let Some(l) = app.get_mut("counter_label") {
@@ -88,6 +128,12 @@ struct HameshWindowApp {
     surface: Option<softbuffer::Surface<Arc<Window>, Arc<Window>>>,
     gpu: Option<gpu::GpuState>,
     use_gpu: bool,
+    /// M3 Pi-style UI: conversation feed + composer, driven by the same
+    /// `handle_key` core as the headless drills. `None` = M1 demo app.
+    widgets: Option<Widgets>,
+    use_m3: bool,
+    shift_held: bool,
+    m3_smoke_done: bool,
     cursor: (f32, f32),
     size: (u32, u32),
     frames: u64,
@@ -109,6 +155,10 @@ impl HameshWindowApp {
             surface: None,
             gpu: None,
             use_gpu: false,
+            widgets: None,
+            use_m3: false,
+            shift_held: false,
+            m3_smoke_done: false,
             cursor: (0.0, 0.0),
             size: (800, 600),
             frames: 0,
@@ -120,6 +170,51 @@ impl HameshWindowApp {
         let layout = hamesh_layout::compute(&self.app, self.size.0 as f32, self.size.1 as f32);
         let scene = hamesh_scene::build(&self.app, &layout, self.scene_rev);
         (layout, scene)
+    }
+
+    /// Feed width for layout: viewport minus chrome. Kept in one place so
+    /// headless drills, GPU cache keys and the window agree.
+    fn feed_width(&self) -> f32 {
+        (self.size.0 as f32 - 60.0).max(200.0)
+    }
+
+    /// Swap the M1 demo tree for the M3 chat tree (called once, on open).
+    fn enter_m3(&mut self) {
+        let (app, mut w) = m3_app();
+        self.app = app;
+        let width = self.feed_width();
+        rebuild_feed_nodes(&mut self.app, &mut w, "feed", width);
+        w.focus = Focus::rebuild(&self.app);
+        sync_composer(&mut self.app, &w);
+        self.widgets = Some(w);
+        self.scene_rev += 1;
+        self.trace.record(
+            "m3.enter",
+            "feed + composer live; same handle_key core as drills",
+            self.app.revision,
+            None,
+        );
+    }
+
+    /// Rebuild the visible feed window after scroll/submit/resize.
+    /// The feed panel is SIZED to the available space (never hugging the
+    /// full content): hug-all overflowed the column and flex-shrink
+    /// crushed the fixed header/composer. Visible nodes fill exactly this.
+    /// Budget at 600px height: chrome (header, composer, gaps, padding)
+    /// takes 152, so feed = h-128 and the window is feed minus padding.
+    fn refresh_feed(&mut self) {
+        let width = self.feed_width();
+        let viewport = (self.size.1 as f32 - 152.0).max(176.0);
+        if let Some(w) = self.widgets.as_mut() {
+            w.feed_viewport = viewport;
+            let feed_id = w.feed_id.clone();
+            rebuild_feed_nodes(&mut self.app, w, "feed", width);
+            if let Some(f) = self.app.get_mut(&feed_id) {
+                f.props
+                    .insert("h".to_string(), format!("{:.0}", viewport + 24.0));
+            }
+            self.scene_rev += 1;
+        }
     }
 
     fn paint(&mut self) {
@@ -249,6 +344,131 @@ impl HameshWindowApp {
         }
     }
 
+    /// M3 mouse: hit-test, and move keyboard focus when the hit target
+    /// takes focus. Same rule as automation's focus_human.
+    fn m3_click(&mut self) {
+        let layout = hamesh_layout::compute(&self.app, self.size.0 as f32, self.size.1 as f32);
+        let hit = hamesh_layout::hit_test(&self.app, &layout, self.cursor.0, self.cursor.1);
+        let moved = hit.as_ref().and_then(|id| {
+            self.widgets.as_mut().and_then(|w| {
+                w.focus.order.iter().position(|o| o == id).map(|pos| {
+                    w.focus.current = pos;
+                    sync_composer(&mut self.app, w);
+                    id.clone()
+                })
+            })
+        });
+        self.scene_rev += 1;
+        self.trace.record(
+            "m3.click",
+            &format!("hit={hit:?} focus={moved:?}"),
+            self.app.revision,
+            None,
+        );
+        println!("M3 click: hit={hit:?} focus={moved:?}");
+    }
+
+    /// M3 keyboard: map the winit event onto the shared `handle_key` core.
+    /// Returns true when the event was consumed by the M3 path.
+    fn m3_key(&mut self, event: &winit::event::KeyEvent) -> bool {
+        if self.widgets.is_none() {
+            return false;
+        }
+        let mut keys: Vec<WKey> = Vec::new();
+        if let Some(text) = event.text.as_ref() {
+            for c in text.chars() {
+                // Enter arrives as text too; the physical key wins below.
+                if c != '\r' && c != '\n' {
+                    keys.push(WKey::Char(c));
+                }
+            }
+        }
+        match event.physical_key {
+            PhysicalKey::Code(KeyCode::Enter) | PhysicalKey::Code(KeyCode::NumpadEnter) => {
+                keys.push(WKey::Enter)
+            }
+            PhysicalKey::Code(KeyCode::Backspace) => keys.push(WKey::Backspace),
+            PhysicalKey::Code(KeyCode::Delete) => keys.push(WKey::Delete),
+            PhysicalKey::Code(KeyCode::ArrowLeft) => keys.push(WKey::Left),
+            PhysicalKey::Code(KeyCode::ArrowRight) => keys.push(WKey::Right),
+            PhysicalKey::Code(KeyCode::ArrowUp) => keys.push(WKey::Up),
+            PhysicalKey::Code(KeyCode::ArrowDown) => keys.push(WKey::Down),
+            PhysicalKey::Code(KeyCode::Home) => keys.push(WKey::Home),
+            PhysicalKey::Code(KeyCode::End) => keys.push(WKey::End),
+            PhysicalKey::Code(KeyCode::Tab) => keys.push(if self.shift_held {
+                WKey::ShiftTab
+            } else {
+                WKey::Tab
+            }),
+            _ => {}
+        }
+        if keys.is_empty() {
+            return false;
+        }
+        let mut last = String::new();
+        // Re-borrow per key: each borrow ends before the next iteration,
+        // so the trailing refresh_feed is never blocked. (A single held
+        // `drop(w)` does nothing — references aren't dropped by it.)
+        for k in &keys {
+            if let Some(w) = self.widgets.as_mut() {
+                last = handle_key(&mut self.app, w, k);
+            }
+        }
+        self.refresh_feed();
+        self.trace.record(
+            "m3.key",
+            &format!("{keys:?} -> {last}"),
+            self.app.revision,
+            None,
+        );
+        true
+    }
+
+    /// M3 smoke script: run once after open — focus the composer through
+    /// the real focus path, type, submit, scroll. Proves the keyboard path
+    /// end-to-end without a human at the keyboard.
+    fn m3_smoke_script(&mut self) {
+        let layout = hamesh_layout::compute(&self.app, self.size.0 as f32, self.size.1 as f32);
+        let (ok, hit) = match self.widgets.as_mut() {
+            Some(w) => {
+                let f = hamesh_automation::focus_human(&mut self.app, w, &layout, "composer");
+                (f.success, f.hit_component)
+            }
+            None => (false, None),
+        };
+        self.trace.record(
+            "m3.smoke_focus",
+            &format!("success={ok} hit={hit:?}"),
+            self.app.revision,
+            None,
+        );
+        if !ok {
+            return;
+        }
+        if let Some(w) = self.widgets.as_mut() {
+            for c in "m3 smoke".chars() {
+                handle_key(&mut self.app, w, &WKey::Char(c));
+            }
+            handle_key(&mut self.app, w, &WKey::Enter);
+            w.feed.scroll_by(-120.0, 400.0);
+        }
+        self.refresh_feed();
+        let (n_msgs, composer_text, focused) = match self.widgets.as_ref() {
+            Some(w) => (
+                w.feed.messages.len(),
+                w.composer.text.clone(),
+                w.focus.focused().unwrap_or("?").to_string(),
+            ),
+            None => (0, "<no widgets>".to_string(), "?".to_string()),
+        };
+        self.trace.record(
+            "m3.smoke_script",
+            &format!("typed + submitted + scrolled; messages={n_msgs} composer={composer_text:?} focus={focused}"),
+            self.app.revision,
+            None,
+        );
+    }
+
     fn dump_inspection(&mut self) {
         let (layout, scene) = self.layout_and_scene();
         let map = hamesh_inspect::compact_map(&self.app, &layout, &scene);
@@ -318,6 +538,11 @@ impl ApplicationHandler for HameshWindowApp {
         }
         let size = window.inner_size();
         self.size = (size.width.max(1), size.height.max(1));
+        if self.use_m3 {
+            self.enter_m3();
+            self.refresh_feed();
+            println!("M3 chat open: Tab focuses, type in composer, Enter submits, wheel scrolls");
+        }
         self.trace.record(
             "window.open",
             &format!("{}x{} physical", self.size.0, self.size.1),
@@ -355,30 +580,42 @@ impl ApplicationHandler for HameshWindowApp {
             }
             WindowEvent::MouseInput { state, button, .. } => {
                 if state == ElementState::Pressed && button == MouseButton::Left {
-                    let layout =
-                        hamesh_layout::compute(&self.app, self.size.0 as f32, self.size.1 as f32);
-                    let r = click_human(&mut self.app, &layout, self.cursor.0, self.cursor.1);
-                    sync_label(&mut self.app);
-                    self.scene_rev += 1;
-                    self.trace.record(
-                        "hand.mouse_click",
-                        &format!(
-                            "at=({:.0},{:.0}) hit={:?} success={}",
-                            self.cursor.0, self.cursor.1, r.hit_component, r.success
-                        ),
-                        self.app.revision,
-                        None,
-                    );
-                    println!(
-                        "HAND mouse: hit={:?} success={} counter={:?}",
-                        r.hit_component,
-                        r.success,
-                        self.app.state.get("counter")
-                    );
+                    if self.use_m3 {
+                        self.m3_click();
+                    } else {
+                        let layout = hamesh_layout::compute(
+                            &self.app,
+                            self.size.0 as f32,
+                            self.size.1 as f32,
+                        );
+                        let r = click_human(&mut self.app, &layout, self.cursor.0, self.cursor.1);
+                        sync_label(&mut self.app);
+                        self.scene_rev += 1;
+                        self.trace.record(
+                            "hand.mouse_click",
+                            &format!(
+                                "at=({:.0},{:.0}) hit={:?} success={}",
+                                self.cursor.0, self.cursor.1, r.hit_component, r.success
+                            ),
+                            self.app.revision,
+                            None,
+                        );
+                        println!(
+                            "HAND mouse: hit={:?} success={} counter={:?}",
+                            r.hit_component,
+                            r.success,
+                            self.app.state.get("counter")
+                        );
+                    }
                 }
             }
             WindowEvent::KeyboardInput { event, .. } => {
                 if event.state != ElementState::Pressed {
+                    return;
+                }
+                if self.use_m3 && event.physical_key != PhysicalKey::Code(KeyCode::Escape) {
+                    // M3 path consumes everything except Escape (quit).
+                    self.m3_key(&event);
                     return;
                 }
                 match event.physical_key {
@@ -424,12 +661,42 @@ impl ApplicationHandler for HameshWindowApp {
                 }
                 let _ = event;
             }
+            WindowEvent::ModifiersChanged(mods) => {
+                self.shift_held = mods.state().shift_key();
+            }
+            WindowEvent::MouseWheel { delta, .. } => {
+                if self.use_m3 {
+                    let amount = match delta {
+                        winit::event::MouseScrollDelta::LineDelta(_, y) => y * 60.0,
+                        winit::event::MouseScrollDelta::PixelDelta(p) => -(p.y as f32),
+                    };
+                    let scrolled = if let Some(w) = self.widgets.as_mut() {
+                        w.feed.scroll_by(-amount, 400.0);
+                        Some(w.feed.scroll_px)
+                    } else {
+                        None
+                    };
+                    if let Some(px) = scrolled {
+                        self.refresh_feed();
+                        self.trace.record(
+                            "m3.wheel",
+                            &format!("scroll {px}"),
+                            self.app.revision,
+                            None,
+                        );
+                    }
+                }
+            }
             WindowEvent::RedrawRequested => self.paint(),
             _ => {}
         }
     }
 
     fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
+        if self.use_m3 && self.smoke_deadline.is_some() && !self.m3_smoke_done {
+            self.m3_smoke_done = true;
+            self.m3_smoke_script();
+        }
         if let Some(deadline) = self.smoke_deadline {
             if Instant::now() >= deadline {
                 self.dump_inspection();
@@ -461,6 +728,10 @@ fn main() {
     app.use_gpu = std::env::args().any(|a| a == "--gpu");
     if app.use_gpu {
         println!("GPU mode: wgpu + vello (falls back to CPU if init fails)");
+    }
+    app.use_m3 = std::env::args().any(|a| a == "--m3");
+    if app.use_m3 {
+        println!("M3 mode: feed + composer (Tab/typing/Enter/wheel)");
     }
     if let Some(secs) = smoke_secs {
         app.smoke_deadline = Some(Instant::now() + std::time::Duration::from_secs(secs));

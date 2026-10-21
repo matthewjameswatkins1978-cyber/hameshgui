@@ -88,40 +88,68 @@ fn build_vscene(
         // Real text: same parley layout as the CPU path, drawn with
         // vello glyph runs. `parley::FontData` IS vello's `FontData`
         // (single linebender_resource_handle 0.1.1 in the tree).
-        if !node.text.trim().is_empty() {
+        // NOTE: caret draws even for empty text (focused empty composer)
+        // so it lives outside the text check, like the CPU renderer.
+        let layout = if node.text.trim().is_empty() {
+            None
+        } else {
             let avail = (r.w - 16.0).max(8.0);
             let key = format!("{}|{:.0}|{}", node.id, avail, node.text);
             if !cache.contains_key(&key) {
                 let layout = hamesh_text::TextLayout::new(&node.text, avail, 16.0);
                 cache.insert(key.clone(), layout);
             }
-            if let Some(layout) = cache.get(&key) {
-                if layout.height() > 0.0 {
-                    draw_text(&mut v, node, layout);
-                }
-            }
-        }
+            cache.get(&key).filter(|l| l.height() > 0.0)
+        };
+        draw_text(&mut v, node, layout);
     }
     v
 }
 
-fn draw_text(v: &mut VelloScene, node: &hamesh_scene::SceneNode, layout: &hamesh_text::TextLayout) {
-    let dy = node.rect.y + ((node.rect.h - layout.height()) / 2.0).max(0.0);
+fn draw_text(
+    v: &mut VelloScene,
+    node: &hamesh_scene::SceneNode,
+    layout: Option<&hamesh_text::TextLayout>,
+) {
+    // Empty text still lays out nothing, but the caret needs a line box.
+    let lh = layout.map(|l| l.height()).unwrap_or(0.0).max(18.0);
+    let dy = node.rect.y + ((node.rect.h - lh) / 2.0).max(0.0);
     let brush = Brush::Solid(node_color([235, 245, 243, 255]));
-    for run in layout.runs() {
-        v.draw_glyphs(&run.font)
-            .font_size(run.size)
-            .hint(true)
-            .brush(&brush)
-            .transform(Affine::translate(((node.rect.x + 8.0) as f64, dy as f64)))
-            .draw(
-                Fill::NonZero,
-                run.glyphs.iter().map(|(id, x, y)| vello::Glyph {
-                    id: *id,
-                    x: *x,
-                    y: *y,
-                }),
+    if let Some(layout) = layout {
+        for run in layout.runs() {
+            v.draw_glyphs(&run.font)
+                .font_size(run.size)
+                .hint(true)
+                .brush(&brush)
+                .transform(Affine::translate(((node.rect.x + 8.0) as f64, dy as f64)))
+                .draw(
+                    Fill::NonZero,
+                    run.glyphs.iter().map(|(id, x, y)| vello::Glyph {
+                        id: *id,
+                        x: *x,
+                        y: *y,
+                    }),
+                );
+        }
+    }
+    // Caret bar for the focused composer (mirrors the CPU renderer).
+    if node.focused {
+        if let Some(cx) = node.caret_x {
+            let care = RoundedRect::new(
+                (node.rect.x + 8.0 + cx) as f64,
+                dy as f64,
+                (node.rect.x + 8.0 + cx + 2.0) as f64,
+                (dy + lh.max(8.0)) as f64,
+                1.0,
             );
+            v.fill(
+                Fill::NonZero,
+                Affine::IDENTITY,
+                &Brush::Solid(node_color([120, 220, 200, 255])),
+                None,
+                &care,
+            );
+        }
     }
 }
 

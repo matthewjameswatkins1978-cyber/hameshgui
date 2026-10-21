@@ -20,6 +20,11 @@ pub struct SceneNode {
     pub enabled: bool,
     pub color: [u8; 4],
     pub text: String,
+    /// Caret x (layout-space, relative to the text origin) for a focused
+    /// text input. `None` = no caret. Part of scene truth so CPU and GPU
+    /// renderers (and the Eye) agree on where editing happens.
+    pub caret_x: Option<f32>,
+    pub focused: bool,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -65,6 +70,8 @@ pub fn build(app: &App, layout: &LayoutOutput, scene_revision: u64) -> Scene {
             // painting names of containers ("root", "main") as text
             // was a real bug caught by the frame PNG.
             let text = c.props.get("text").cloned().unwrap_or_default();
+            let caret_x = c.props.get("caret_x").and_then(|v| v.parse::<f32>().ok());
+            let focused = c.props.get("focused").map(|s| s == "true").unwrap_or(false);
             Some(SceneNode {
                 id: c.id.0.clone(),
                 role: role.clone(),
@@ -76,6 +83,8 @@ pub fn build(app: &App, layout: &LayoutOutput, scene_revision: u64) -> Scene {
                 enabled: c.enabled,
                 color: role_color(&role, &c.name),
                 text,
+                caret_x,
+                focused,
             })
         })
         .collect();

@@ -10,3 +10,4 @@
 - `008-a11y-ime-partial.md` — AccessKit + winit IME constraints for M3.
 - `009-glyph-glue.md` — parley runs to swash alpha bitmaps.
 - `010-text-in-scene.md` — CPU blit + vello glyphs, tolerance verdict.
+- `011-m3-foundations.md` — composer, feed, focus, sized panels.

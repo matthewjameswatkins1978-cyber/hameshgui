@@ -28,6 +28,10 @@ the Memory (bounded diagnostic traces and replay evidence).
       CPU blit and vello `draw_glyphs`, placed from the same positioned
       data. First CPU/GPU tolerance verdict: **within tolerance**
       (decisions 009, 010).
+- [x] M3 foundations: composer + virtualized feed + keyboard focus through
+      one shared `handle_key` core; Eye sees caret, Hand types/submits/
+      scrolls on both headless and live window (`--m3`). Feed panels are
+      sized, never hugging (decision 011).
 - [ ] Accessibility bridge (AccessKit): planned.
 
 ## Workspace

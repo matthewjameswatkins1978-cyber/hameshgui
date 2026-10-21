@@ -793,6 +793,7 @@ dependencies = [
  "hamesh-core",
  "hamesh-diag",
  "hamesh-layout",
+ "hamesh-widgets",
  "serde",
 ]
 
@@ -814,6 +815,7 @@ dependencies = [
  "hamesh-layout",
  "hamesh-render",
  "hamesh-scene",
+ "hamesh-widgets",
  "serde_json",
 ]
 
@@ -878,6 +880,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "hamesh-widgets"
+version = "0.1.0"
+dependencies = [
+ "hamesh-core",
+ "hamesh-layout",
+ "hamesh-text",
+ "serde",
+]
+
+[[package]]
 name = "hamesh-window"
 version = "0.1.0"
 dependencies = [
@@ -889,6 +901,7 @@ dependencies = [
  "hamesh-render",
  "hamesh-scene",
  "hamesh-text",
+ "hamesh-widgets",
  "pollster",
  "serde_json",
  "softbuffer",

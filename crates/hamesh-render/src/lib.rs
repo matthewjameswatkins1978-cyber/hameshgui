@@ -32,6 +32,20 @@ fn blit_text(pix: &mut Pixmap, node: &hamesh_scene::SceneNode) {
     let ox = node.rect.x + 8.0;
     let oy = node.rect.y + ((node.rect.h - layout.height()) / 2.0).max(0.0);
     let glyphs = hamesh_text::rasterize_layout(&layout);
+    // Caret bar for the focused composer (scene truth, read by the Eye too).
+    if node.focused {
+        if let Some(cx) = node.caret_x {
+            let bx = ox + cx;
+            let bh = layout.height().max(8.0);
+            if bx >= node.rect.x && bx + 2.0 <= node.rect.x + node.rect.w {
+                let mut cp = Paint::default();
+                cp.set_color(Color::from_rgba8(120, 220, 200, 255));
+                if let Some(bar) = SkRect::from_xywh(bx, oy, 2.0, bh) {
+                    pix.fill_rect(bar, &cp, Transform::identity(), None);
+                }
+            }
+        }
+    }
     let (fw, fh) = (pix.width() as i32, pix.height() as i32);
     for g in &glyphs {
         let (x0, y0) = hamesh_text::glyph_origin(g, ox, oy);
@@ -182,5 +196,45 @@ mod tests {
         let f = render(&scene);
         assert_eq!((f.frame_ref.width, f.frame_ref.height), (320, 200));
         compare(&f.pixmap, &f.pixmap.clone(), &Tolerance::default()).expect("self equal");
+    }
+
+    /// A focused composer with text renders both glyph pixels AND a caret
+    /// bar at the measured caret x. Deterministic pixel evidence for the
+    /// caret path (no screenshot eyeballing).
+    #[test]
+    fn caret_bar_is_drawn() {
+        let mut app = App::new("win");
+        app.add(
+            "win",
+            Component::new("c", Role::TextInput, "composer")
+                .with_prop("h", "40")
+                .with_prop("text", "hi")
+                .with_prop("caret_x", "10.0")
+                .with_prop("focused", "true"),
+        );
+        let layout = hamesh_layout::compute(&app, 320.0, 200.0);
+        let scene = hamesh_scene::build(&app, &layout, 1);
+        let node = scene.nodes.iter().find(|n| n.id == "c").unwrap();
+        assert!(node.focused);
+        assert_eq!(node.caret_x, Some(10.0));
+        let f = render(&scene);
+        // Caret bar: x in [ox+10, ox+12), spanning the node height.
+        let ox = node.rect.x + 8.0;
+        let mut caret_pixels = 0;
+        let data = f.pixmap.data();
+        let w = f.pixmap.width() as usize;
+        for y in (node.rect.y as usize)..((node.rect.y + node.rect.h) as usize) {
+            for x in ((ox + 10.0) as usize)..((ox + 12.0) as usize + 1) {
+                let o = (y * w + x) * 4;
+                // Caret color is teal-green (120, 220, 200): green dominant.
+                if data[o + 1] > 150 && data[o] < 200 {
+                    caret_pixels += 1;
+                }
+            }
+        }
+        assert!(
+            caret_pixels >= 10,
+            "caret bar missing: {caret_pixels} teal pixels near x={ox}"
+        );
     }
 }

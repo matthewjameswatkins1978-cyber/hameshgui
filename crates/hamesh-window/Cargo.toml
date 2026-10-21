@@ -14,6 +14,7 @@ hamesh-layout = { path = "../hamesh-layout" }
 hamesh-scene = { path = "../hamesh-scene" }
 hamesh-render = { path = "../hamesh-render" }
 hamesh-text = { path = "../hamesh-text" }
+hamesh-widgets = { path = "../hamesh-widgets" }
 hamesh-inspect = { path = "../hamesh-inspect" }
 hamesh-diag = { path = "../hamesh-diag" }
 hamesh-automation = { path = "../hamesh-automation" }
