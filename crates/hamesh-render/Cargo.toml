@@ -1,0 +1,12 @@
+[package]
+name = "hamesh-render"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+hamesh-core = { path = "../hamesh-core" }
+hamesh-layout = { path = "../hamesh-layout" }
+hamesh-scene = { path = "../hamesh-scene" }
+tiny-skia.workspace = true
+serde.workspace = true

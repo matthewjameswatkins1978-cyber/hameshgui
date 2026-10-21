@@ -1,0 +1,10 @@
+[package]
+name = "hamesh-layout"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+hamesh-core = { path = "../hamesh-core" }
+taffy.workspace = true
+serde.workspace = true

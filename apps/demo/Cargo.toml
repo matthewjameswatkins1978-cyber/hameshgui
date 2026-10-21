@@ -1,0 +1,19 @@
+[package]
+name = "hamesh-demo"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "hamesh-demo"
+path = "src/main.rs"
+
+[dependencies]
+hamesh-core = { path = "../../crates/hamesh-core" }
+hamesh-layout = { path = "../../crates/hamesh-layout" }
+hamesh-scene = { path = "../../crates/hamesh-scene" }
+hamesh-render = { path = "../../crates/hamesh-render" }
+hamesh-inspect = { path = "../../crates/hamesh-inspect" }
+hamesh-automation = { path = "../../crates/hamesh-automation" }
+hamesh-diag = { path = "../../crates/hamesh-diag" }
+serde_json = "1"

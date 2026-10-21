@@ -1,0 +1,11 @@
+[package]
+name = "hamesh-automation"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+hamesh-core = { path = "../hamesh-core" }
+hamesh-layout = { path = "../hamesh-layout" }
+hamesh-diag = { path = "../hamesh-diag" }
+serde.workspace = true
