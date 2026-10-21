@@ -7,6 +7,7 @@ members = [
   "crates/hamesh-inspect",
   "crates/hamesh-automation",
   "crates/hamesh-diag",
+  "crates/hamesh-window",
   "apps/demo",
 ]
 resolver = "2"

@@ -17,7 +17,11 @@ the Memory (bounded diagnostic traces and replay evidence).
 - [x] M2 headless: stable IDs, compact map + component detail, hit-testing,
       human-equivalent click vs labeled direct op, fault drills
       (disabled button, overlay intercept, clipping diagnostics).
-- [ ] M1 native window (winit + GPU via wgpu/Vello): in research.
+- [x] M1 native window (winit + softbuffer CPU presentation): real 800×600
+      window opens, presents frames, handles resize; `--smoke-test=N`
+      proves it non-interactively with map + PNG + trace evidence.
+      (`cargo run -p hamesh-window --bin hamesh-window-demo`).
+- [ ] M1 GPU presentation (wgpu/Vello): in research.
 - [ ] Text editing foundation (Parley / COSMIC-Text evaluation): in research.
 - [ ] Accessibility bridge (AccessKit): planned.
 

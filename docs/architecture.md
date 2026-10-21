@@ -56,6 +56,13 @@ The demo proves the framework can catch, not just commit, these faults:
 | 4 | Direct invocation | succeeds but labeled `DirectOp`, never GUI proof |
 | 5 | Clipping | `detail()` reports rect-beyond-parent with reachability warning |
 
+## What is already live (beyond headless)
+
+- `crates/hamesh-window`: real winit 0.30 OS window + softbuffer CPU
+  presentation of the same `Scene`. Resize re-runs layout; mouse/keyboard
+  route through the labeled Hand; `I` dumps Eye evidence; `--smoke-test=N`
+  verifies open + present + dump non-interactively.
+
 ## What is NOT yet built
 
 - Native window + GPU presentation (winit/wgpu/Vello): research running.
