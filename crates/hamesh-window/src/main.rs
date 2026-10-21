@@ -455,6 +455,22 @@ impl HameshWindowApp {
     /// Shared key-application core: the winit path maps events to keys,
     /// the inspector path maps KeyMsg to keys, both land here.
     fn m3_keys_apply(&mut self, keys: Vec<WKey>) -> String {
+        // Escape during a live run aborts it: the window Esc arm and the
+        // external key-Escape path both land here, so one rule covers
+        // hand, eye, and keyboard. Escape when idle is a no-op here —
+        // the window arm still quits. handle_key already no-ops Escape.
+        if keys.contains(&WKey::Escape) && self.pi.as_ref().is_some_and(|l| l.live_index.is_some())
+        {
+            if let Some(link) = self.pi.as_ref() {
+                let _ = link.job_tx.send(PiJob::Abort);
+            }
+            self.trace.record(
+                "m3.pi_abort",
+                "escape during live run",
+                self.app.revision,
+                None,
+            );
+        }
         // Detect a submission AFTER the loop: batches (smoke script,
         // pasted typing) type the text and press Enter in one go, so a
         // pre-read of the composer always sees it empty. A submission
@@ -1172,7 +1188,15 @@ impl ApplicationHandler<UserEvent> for HameshWindowApp {
                     return;
                 }
                 match event.physical_key {
-                    PhysicalKey::Code(KeyCode::Escape) => event_loop.exit(),
+                    PhysicalKey::Code(KeyCode::Escape) => {
+                        // Live run: Escape aborts it and stays open (one
+                        // rule via m3_keys_apply). Idle: Escape quits.
+                        if self.use_m3 && self.pi.as_ref().is_some_and(|l| l.live_index.is_some()) {
+                            self.m3_keys_apply(vec![WKey::Escape]);
+                        } else {
+                            event_loop.exit();
+                        }
+                    }
                     PhysicalKey::Code(KeyCode::Space) => {
                         let layout = hamesh_layout::compute(
                             &self.app,
@@ -1333,4 +1357,45 @@ fn main() {
         println!("SMOKE mode: {secs}s");
     }
     event_loop.run_app(&mut app).expect("run app");
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Headless M3 app with a Pi link whose worker side is just channels:
+    /// no window, no model, no network. `live` simulates a run in flight.
+    fn wired_app(live: bool) -> (HameshWindowApp, std::sync::mpsc::Receiver<PiJob>) {
+        let mut app = HameshWindowApp::new();
+        app.enter_m3();
+        let (job_tx, job_rx) = std::sync::mpsc::channel();
+        let (_evt_tx, evt_rx) = std::sync::mpsc::channel();
+        app.pi = Some(PiLink {
+            job_tx,
+            evt_rx,
+            live_index: if live { Some(0) } else { None },
+            follow: false,
+        });
+        (app, job_rx)
+    }
+
+    #[test]
+    fn escape_aborts_live_run() {
+        let (mut app, job_rx) = wired_app(true);
+        app.m3_keys_apply(vec![WKey::Escape]);
+        match job_rx.try_recv() {
+            Ok(PiJob::Abort) => {}
+            other => panic!("expected Abort, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn escape_idle_sends_nothing() {
+        let (mut app, job_rx) = wired_app(false);
+        app.m3_keys_apply(vec![WKey::Escape]);
+        assert!(
+            job_rx.try_recv().is_err(),
+            "idle Escape must not queue a job"
+        );
+    }
 }

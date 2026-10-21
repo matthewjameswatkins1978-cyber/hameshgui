@@ -52,4 +52,6 @@ back as streamed text in the feed, with the UI thread never blocking.
   deadline path records `m3.pi_assert` (`PASS` / `FAIL(..)` /
   `INCOMPLETE(..)`) plus a `SMOKE-PI-*` stdout line. Live 90s proof:
   queued → done (chars=15, exact token) → `PASS`. The `m3 smoke`
-  follow-up above is done; abort UX remains queued.
+  and abort-UX follow-ups above are both done: Escape during a live run
+  aborts it via `m3.pi_abort` (window Esc arm and external key-Escape
+  share the rule); Escape when idle still quits.
