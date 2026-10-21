@@ -835,6 +835,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "hamesh-drill"
+version = "0.1.0"
+dependencies = [
+ "serde_json",
+]
+
+[[package]]
 name = "hamesh-faults"
 version = "0.1.0"
 dependencies = [
@@ -917,6 +924,7 @@ dependencies = [
  "hamesh-layout",
  "hamesh-text",
  "serde",
+ "unicode-segmentation",
 ]
 
 [[package]]

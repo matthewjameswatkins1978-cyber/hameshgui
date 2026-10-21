@@ -6,6 +6,33 @@
 //! through `handle_key` (human path) or direct mutation (labeled DirectOp).
 
 use hamesh_core::{App, Component, ComponentId, Role};
+use unicode_segmentation::UnicodeSegmentation;
+
+/// Char offsets of every grapheme boundary in `text`, including 0 and the
+/// end. The caret stays char-indexed (cheap, stable across edits); all
+/// deletions and arrow moves snap to these boundaries so multi-char
+/// graphemes (ZWJ sequences, skin tones, flags, combining marks) are never
+/// split. See decision 017.
+fn grapheme_bounds(text: &str) -> Vec<usize> {
+    let mut bounds = vec![0];
+    let mut seen = 0;
+    for g in text.graphemes(true) {
+        seen += g.chars().count();
+        bounds.push(seen);
+    }
+    bounds
+}
+
+/// Byte range of char offsets `[start, end)` in `text`.
+fn char_range_bytes(text: &str, start: usize, end: usize) -> (usize, usize) {
+    let byte_at = |n: usize| {
+        text.char_indices()
+            .nth(n)
+            .map(|(i, _)| i)
+            .unwrap_or(text.len())
+    };
+    (byte_at(start), byte_at(end))
+}
 
 /// Single-line text composer. Caret is a char-boundary index; its pixel
 /// position is measured by laying out the text *before* the caret, so it
@@ -44,27 +71,54 @@ impl Composer {
         if self.caret == 0 {
             return;
         }
-        let mut chars: Vec<(usize, char)> = self.text.char_indices().collect();
-        let (byte, _) = chars.remove(self.caret - 1);
-        self.text = chars.into_iter().map(|(_, c)| c).collect();
-        let _ = byte;
-        self.caret -= 1;
-    }
-
-    pub fn delete_forward(&mut self) {
-        let mut chars: Vec<char> = self.text.chars().collect();
-        if self.caret < chars.len() {
-            chars.remove(self.caret);
-            self.text = chars.into_iter().collect();
+        // Delete the whole grapheme before the caret, not one char:
+        // ZWJ sequences, skin tones, flags and combining marks must go
+        // together or the text is left corrupted.
+        let bounds = grapheme_bounds(&self.text);
+        let prev = bounds.iter().rev().find(|b| **b < self.caret);
+        match prev {
+            Some(&start) => {
+                let (sb, eb) = char_range_bytes(&self.text, start, self.caret);
+                self.text.drain(sb..eb);
+                self.caret = start;
+            }
+            None => self.caret = 0,
         }
     }
 
+    pub fn delete_forward(&mut self) {
+        let len = self.text.chars().count();
+        if self.caret >= len {
+            return;
+        }
+        let bounds = grapheme_bounds(&self.text);
+        let end = bounds
+            .iter()
+            .find(|b| **b > self.caret)
+            .copied()
+            .unwrap_or(len);
+        let (sb, eb) = char_range_bytes(&self.text, self.caret, end);
+        self.text.drain(sb..eb);
+    }
+
     pub fn move_left(&mut self) {
-        self.caret = self.caret.saturating_sub(1);
+        let bounds = grapheme_bounds(&self.text);
+        self.caret = bounds
+            .iter()
+            .rev()
+            .find(|b| **b < self.caret)
+            .copied()
+            .unwrap_or(0);
     }
 
     pub fn move_right(&mut self) {
-        self.caret = (self.caret + 1).min(self.text.chars().count());
+        let len = self.text.chars().count();
+        let bounds = grapheme_bounds(&self.text);
+        self.caret = bounds
+            .iter()
+            .find(|b| **b > self.caret)
+            .copied()
+            .unwrap_or(len);
     }
 
     pub fn home(&mut self) {
@@ -506,5 +560,78 @@ mod tests {
         // Focus is on the feed; typing must not reach the composer.
         handle_key(&mut app, &mut w, &Key::Char('x'));
         assert_eq!(w.composer.text, "");
+    }
+
+    /// Grapheme fixtures (decision 017): ZWJ family (5 chars, 1 grapheme),
+    /// waving hand + skin tone (2 chars), flag (2 chars), e + combining
+    /// acute (2 chars). Char-based editing splits these; the composer must
+    /// delete and cross them whole.
+    const ZWJ_FAMILY: &str = "\u{1F468}\u{200D}\u{1F469}\u{200D}\u{1F467}";
+    const HAND_TONE: &str = "\u{1F44B}\u{1F3FD}";
+
+    #[test]
+    fn backspace_deletes_whole_graphemes() {
+        let mut c = Composer::new();
+        c.insert("a");
+        c.insert(ZWJ_FAMILY);
+        c.insert("e\u{301}");
+        c.insert(HAND_TONE);
+        assert_eq!(c.caret, 1 + 5 + 2 + 2);
+        c.backspace();
+        assert_eq!(c.text, format!("a{ZWJ_FAMILY}e\u{301}"), "skin tone split");
+        c.backspace();
+        assert_eq!(c.text, format!("a{ZWJ_FAMILY}"), "combining mark split");
+        c.backspace();
+        assert_eq!(c.text, "a", "ZWJ family split");
+        assert_eq!(c.caret, 1);
+        c.backspace();
+        assert_eq!(c.text, "");
+        assert_eq!(c.caret, 0);
+        // Backspace at zero is a no-op, not a panic.
+        c.backspace();
+        assert_eq!(c.text, "");
+    }
+
+    #[test]
+    fn arrows_cross_graphemes_whole() {
+        let mut c = Composer::new();
+        c.insert(HAND_TONE);
+        assert_eq!(c.caret, 2);
+        c.move_left();
+        assert_eq!(c.caret, 0, "arrow stopped inside skin-tone emoji");
+        c.move_right();
+        assert_eq!(c.caret, 2, "arrow stopped inside skin-tone emoji");
+        c.move_right();
+        assert_eq!(c.caret, 2, "arrow ran past the end");
+    }
+
+    #[test]
+    fn delete_forward_deletes_whole_grapheme() {
+        let mut c = Composer::new();
+        c.insert(ZWJ_FAMILY);
+        c.home();
+        c.delete_forward();
+        assert_eq!(c.text, "", "forward delete split the ZWJ family");
+        // Delete at end is a no-op.
+        c.delete_forward();
+        assert_eq!(c.text, "");
+    }
+
+    #[test]
+    fn grapheme_positions_stay_valid() {
+        // Mid-text edits keep the caret on a boundary: insert inside a
+        // flag, then walk and delete — nothing may split or panic.
+        let mut c = Composer::new();
+        c.insert("\u{1F1EB}\u{1F1EE}");
+        assert_eq!(c.caret, 2);
+        c.move_left();
+        assert_eq!(c.caret, 0);
+        c.insert("x");
+        assert_eq!(c.text, "x\u{1F1EB}\u{1F1EE}");
+        c.move_right();
+        c.move_right();
+        assert_eq!(c.caret, 3);
+        c.backspace();
+        assert_eq!(c.text, "x");
     }
 }
