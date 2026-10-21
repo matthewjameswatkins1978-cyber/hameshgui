@@ -658,6 +658,46 @@ impl HameshWindowApp {
         }
     }
 
+    /// End-of-smoke verdict for the M4 loop (only under --pi): the smoke
+    /// prompt demands the token HAMESH-SMOKE-OK back, so a later agent
+    /// message containing it proves the full path carried real content,
+    /// not just event counts.
+    fn m3_pi_assert(&mut self) {
+        const TOKEN: &str = "HAMESH-SMOKE-OK";
+        let (asked, answered, streaming) = match self.widgets.as_ref() {
+            Some(w) => {
+                let mut asked_at: Option<usize> = None;
+                let mut answered = false;
+                for (i, m) in w.feed.messages.iter().enumerate() {
+                    if m.role == "user" && m.text.contains(TOKEN) {
+                        asked_at = Some(i);
+                    }
+                    if m.role == "agent"
+                        && m.text.contains(TOKEN)
+                        && asked_at.is_some_and(|a| i > a)
+                    {
+                        answered = true;
+                    }
+                }
+                let streaming = self.pi.as_ref().is_some_and(|l| l.live_index.is_some());
+                (asked_at.is_some(), answered, streaming)
+            }
+            None => (false, false, false),
+        };
+        let verdict = if answered {
+            "PASS"
+        } else if !asked {
+            "FAIL(no-submission)"
+        } else if streaming {
+            "INCOMPLETE(still-streaming)"
+        } else {
+            "FAIL(no-token-in-reply)"
+        };
+        self.trace
+            .record("m3.pi_assert", verdict, self.app.revision, None);
+        println!("SMOKE-PI-{verdict}");
+    }
+
     fn m3_smoke_script(&mut self) {
         let layout = hamesh_layout::compute(&self.app, self.size.0 as f32, self.size.1 as f32);
         let (ok, hit) = match self.widgets.as_mut() {
@@ -677,7 +717,14 @@ impl HameshWindowApp {
             return;
         }
         // One batch through the shared core (queues a Pi job when --pi).
-        let mut keys: Vec<WKey> = "m3 smoke".chars().map(WKey::Char).collect();
+        // Under --pi the prompt demands a verifiable token back, so the
+        // end-of-smoke check can assert the reply instead of eyeballing it.
+        let prompt = if self.use_pi {
+            "Reply with only this exact token and nothing else: HAMESH-SMOKE-OK"
+        } else {
+            "m3 smoke"
+        };
+        let mut keys: Vec<WKey> = prompt.chars().map(WKey::Char).collect();
         keys.push(WKey::Enter);
         let out = self.m3_keys_apply(keys);
         self.trace.record(
@@ -1233,6 +1280,9 @@ impl ApplicationHandler<UserEvent> for HameshWindowApp {
         }
         if let Some(deadline) = self.smoke_deadline {
             if Instant::now() >= deadline {
+                if self.use_pi && self.use_m3 {
+                    self.m3_pi_assert();
+                }
                 self.dump_inspection();
                 self.dump_gpu_snapshot();
                 let _ = std::fs::write("target/hamesh-window-trace.json", self.trace.export_json());
@@ -1272,10 +1322,6 @@ fn main() {
     app.use_inspect = std::env::args().any(|a| a == "--inspect");
     if app.use_inspect {
         println!("INSPECT mode: local loopback inspector (dev only)");
-    }
-    app.use_pi = std::env::args().any(|a| a == "--pi");
-    if app.use_pi {
-        println!("PI mode: composer submits stream through a background pi worker (needs auth + network)");
     }
     app.use_pi = std::env::args().any(|a| a == "--pi");
     if app.use_pi {

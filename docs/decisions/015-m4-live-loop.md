@@ -45,3 +45,11 @@ back as streamed text in the feed, with the UI thread never blocking.
 - GPU/CPU pixel divergence on the M3 scene (4–6%, rounded bubbles + glyph
   AA) is unchanged and still out of scope: structure agrees, tolerance
   model owns it.
+
+## Addendum 2026-10-21 — machine-checked regression
+
+- The smoke prompt now demands the token `HAMESH-SMOKE-OK` back, and the
+  deadline path records `m3.pi_assert` (`PASS` / `FAIL(..)` /
+  `INCOMPLETE(..)`) plus a `SMOKE-PI-*` stdout line. Live 90s proof:
+  queued → done (chars=15, exact token) → `PASS`. The `m3 smoke`
+  follow-up above is done; abort UX remains queued.
