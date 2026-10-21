@@ -8,6 +8,7 @@ members = [
   "crates/hamesh-automation",
   "crates/hamesh-diag",
   "crates/hamesh-text",
+  "crates/hamesh-pi",
   "crates/hamesh-widgets",
   "crates/hamesh-window",
   "apps/demo",

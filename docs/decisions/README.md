@@ -11,3 +11,4 @@
 - `009-glyph-glue.md` — parley runs to swash alpha bitmaps.
 - `010-text-in-scene.md` — CPU blit + vello glyphs, tolerance verdict.
 - `011-m3-foundations.md` — composer, feed, focus, sized panels.
+- `012-pi-rpc-adapter.md` — clean-room Pi RPC proven against live CLI.
