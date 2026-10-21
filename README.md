@@ -21,7 +21,9 @@ the Memory (bounded diagnostic traces and replay evidence).
       window opens, presents frames, handles resize; `--smoke-test=N`
       proves it non-interactively with map + PNG + trace evidence.
       (`cargo run -p hamesh-window --bin hamesh-window-demo`).
-- [ ] M1 GPU presentation (wgpu/Vello): in research.
+- [x] M1 GPU presentation (`--gpu`): wgpu 30 + vello 0.11 behind the
+      same Scene, with surface-loss recovery + device-loss fallback to
+      CPU. Smoke-proven: 435 frames in 8s, 7 nodes. (decision 006).
 - [ ] Text editing foundation (Parley / COSMIC-Text evaluation): in research.
 - [ ] Accessibility bridge (AccessKit): planned.
 

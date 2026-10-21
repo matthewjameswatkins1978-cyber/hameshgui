@@ -16,8 +16,10 @@
 use hamesh_automation::{click_component_human, click_human, invoke_direct};
 use hamesh_core::{App, Component, Role};
 use hamesh_diag::Trace;
+mod gpu;
+
 use std::num::NonZeroU32;
-use std::rc::Rc;
+use std::sync::Arc;
 use std::time::Instant;
 use winit::application::ApplicationHandler;
 use winit::event::{ElementState, MouseButton, WindowEvent};
@@ -81,9 +83,11 @@ struct HameshWindowApp {
     app: App,
     trace: Trace,
     scene_rev: u64,
-    window: Option<Rc<Window>>,
-    context: Option<softbuffer::Context<Rc<Window>>>,
-    surface: Option<softbuffer::Surface<Rc<Window>, Rc<Window>>>,
+    window: Option<Arc<Window>>,
+    context: Option<softbuffer::Context<Arc<Window>>>,
+    surface: Option<softbuffer::Surface<Arc<Window>, Arc<Window>>>,
+    gpu: Option<gpu::GpuState>,
+    use_gpu: bool,
     cursor: (f32, f32),
     size: (u32, u32),
     frames: u64,
@@ -103,6 +107,8 @@ impl HameshWindowApp {
             window: None,
             context: None,
             surface: None,
+            gpu: None,
+            use_gpu: false,
             cursor: (0.0, 0.0),
             size: (800, 600),
             frames: 0,
@@ -119,6 +125,13 @@ impl HameshWindowApp {
     fn paint(&mut self) {
         let (w, h) = self.size;
         if w == 0 || h == 0 {
+            return;
+        }
+        if self.use_gpu {
+            self.paint_gpu();
+            if let Some(window) = &self.window {
+                window.request_redraw();
+            }
             return;
         }
         // Render the scene BEFORE borrowing the surface (borrow discipline).
@@ -161,6 +174,37 @@ impl HameshWindowApp {
         window.request_redraw();
     }
 
+    fn paint_gpu(&mut self) {
+        let (_layout, scene) = self.layout_and_scene();
+        let Some(gpu) = self.gpu.as_mut() else {
+            self.trace.record(
+                "gpu.unavailable",
+                "GPU requested but GpuState is missing; frame skipped",
+                self.app.revision,
+                None,
+            );
+            return;
+        };
+        match gpu.paint(&scene) {
+            Ok(nodes) => {
+                self.frames += 1;
+                if self.frames == 1 {
+                    self.trace.record(
+                        "gpu.first_frame",
+                        &format!("presented {nodes} vello nodes"),
+                        self.app.revision,
+                        None,
+                    );
+                    println!("GPU first frame: {nodes} nodes presented");
+                }
+            }
+            Err(e) => {
+                self.trace
+                    .record("gpu.error", &format!("{e}"), self.app.revision, None);
+            }
+        }
+    }
+
     fn dump_inspection(&mut self) {
         let (layout, scene) = self.layout_and_scene();
         let map = hamesh_inspect::compact_map(&self.app, &layout, &scene);
@@ -194,13 +238,40 @@ impl ApplicationHandler for HameshWindowApp {
         let attrs = Window::default_attributes()
             .with_title("Hamesh — the Eye and the Hand")
             .with_inner_size(winit::dpi::LogicalSize::new(800.0, 600.0));
-        let window = Rc::new(event_loop.create_window(attrs).expect("create window"));
-        let context = softbuffer::Context::new(Rc::clone(&window)).expect("softbuffer context");
-        let surface =
-            softbuffer::Surface::new(&context, Rc::clone(&window)).expect("softbuffer surface");
-        self.window = Some(Rc::clone(&window));
-        self.context = Some(context);
-        self.surface = Some(surface);
+        let window = Arc::new(event_loop.create_window(attrs).expect("create window"));
+        self.window = Some(Arc::clone(&window));
+        if self.use_gpu {
+            match gpu::GpuState::new(Arc::clone(&window), 800, 600) {
+                Ok(state) => {
+                    self.trace.record(
+                        "gpu.ready",
+                        "wgpu 30 + vello 0.11 renderer created",
+                        self.app.revision,
+                        None,
+                    );
+                    println!("GPU path: wgpu + vello ready");
+                    self.gpu = Some(state);
+                }
+                Err(e) => {
+                    self.trace.record(
+                        "gpu.init_failed",
+                        &format!("{e}; staying on CPU path"),
+                        self.app.revision,
+                        None,
+                    );
+                    println!("GPU init failed ({e}); CPU path active");
+                    self.use_gpu = false;
+                }
+            }
+        }
+        if !self.use_gpu {
+            let context =
+                softbuffer::Context::new(Arc::clone(&window)).expect("softbuffer context");
+            let surface = softbuffer::Surface::new(&context, Arc::clone(&window))
+                .expect("softbuffer surface");
+            self.context = Some(context);
+            self.surface = Some(surface);
+        }
         let size = window.inner_size();
         self.size = (size.width.max(1), size.height.max(1));
         self.trace.record(
@@ -225,6 +296,9 @@ impl ApplicationHandler for HameshWindowApp {
             WindowEvent::Resized(size) => {
                 self.size = (size.width.max(1), size.height.max(1));
                 self.scene_rev += 1;
+                if let Some(gpu) = self.gpu.as_mut() {
+                    gpu.resize(self.size.0, self.size.1);
+                }
                 self.trace.record(
                     "window.resize",
                     &format!("{}x{}", self.size.0, self.size.1),
@@ -339,6 +413,10 @@ fn main() {
     let event_loop = EventLoop::new().expect("event loop");
     event_loop.set_control_flow(ControlFlow::Poll);
     let mut app = HameshWindowApp::new();
+    app.use_gpu = std::env::args().any(|a| a == "--gpu");
+    if app.use_gpu {
+        println!("GPU mode: wgpu + vello (falls back to CPU if init fails)");
+    }
     if let Some(secs) = smoke_secs {
         app.smoke_deadline = Some(Instant::now() + std::time::Duration::from_secs(secs));
         println!("SMOKE mode: {secs}s");
