@@ -1,7 +1,8 @@
 # Hamesh architecture (Phase 1 slice, v0.1.0)
 
 One canonical meaning for components, state, commands, input and behaviour.
-Humans, agents, CLI tools and test harnesses operate on the same system.
+Humans, agents, CLI tools, MCP clients and test harnesses operate on the
+same system through the same handlers.
 
 ## Data flow
 
@@ -14,12 +15,20 @@ LayoutOutput (layout) ── absolute rects + effectively_visible
   ▼
 Scene (scene) ── paint-ordered nodes + resolved colors/text
   │               + scene_revision tied to app_revision
-  ├──► Frame (render) ── tiny-skia pixmap + FrameRef + save_png()
+  ├──► Frame (render) ── tiny-skia pixmap / wgpu+vello + FrameRef + PNG
   │                       + Tolerance model for CPU/GPU comparison
   ├──► CompactMap / Detail (inspect) ── the Eye
-  └──► click_human / invoke_direct (automation) ── the Hand
+  └──► key core / click (automation) ── the Hand (one routing:
+         winit keyboard, inspector ops, smoke script all land in
+         m3_keys_apply / apply_press)
          └──► Trace (diag) ── the Memory (bounded ring, JSON export)
 ```
+
+Outside operators enter through `crates/hamesh-window`'s inspector
+server (token-gated TCP, one thread per connection) or `apps/hamesh-mcp`
+(MCP over stdio, FIFO-serialized onto the same protocol). A background
+Pi worker (`crates/hamesh-pi`, JSONL over `pi --mode rpc` stdio) streams
+model output into the feed without ever blocking the UI thread.
 
 No subsystem duplicates application truth. Layout owns geometry,
 scene owns resolved visuals, core owns identity/state/commands.
@@ -29,13 +38,11 @@ scene owns resolved visuals, core owns identity/state/commands.
 1. **Stable identity.** `ComponentId` is never reused within an app history;
    revisions increase monotonically (`App::bump`).
 2. **Taffy locations are parent-relative.** `compute()` accumulates absolute
-   offsets through ancestors; root is pinned to the viewport size
-   (Taffy `AvailableSpace` alone does not expand an auto-sized root).
+   offsets through ancestors; root is pinned to the viewport size.
 3. **Containers hug, leaves fix.** Window/Panel default to auto size with
    `flex_grow = 1`; leaf widgets default to 32px height unless `h` is set.
 4. **Existence ≠ operability.** The Eye reports `effectively_visible`,
-   `clipped_by_parent`, `enabled`, z-order and hit-test winner separately,
-   so an agent can distinguish covered/clipped/disabled/invisible.
+   `clipped_by_parent`, `enabled`, z-order and hit-test winner separately.
 5. **Mechanism is always labeled.** `HumanEquivalent` traverses hit-test +
    focus routing; `DirectOp` bypasses it and must never masquerade as a GUI
    test. Every `AutomationResult` records mechanism + revisions before/after.
@@ -43,47 +50,57 @@ scene owns resolved visuals, core owns identity/state/commands.
    ties every screenshot to the exact state that produced it.
 7. **Memory is bounded.** `Trace::new(capacity)` evicts oldest first;
    minimum capacity 16; export is JSON.
+8. **One routing.** Physical keyboard, inspector KeyMsg, smoke script and
+   tests all converge on `m3_keys_apply`; clicks converge on
+   `apply_press`. Trace shape is identical regardless of driver.
+9. **Stale-safe revisions.** Mutating inspector ops take `expect_rev`;
+   mismatch ⇒ rejected unchanged (`STALE`). Concurrent submits on one
+   rev resolve to exactly one winner — the UI thread is the serializer.
+10. **Grapheme-correct editing.** Deletions and arrow moves snap to UAX #29
+    boundaries; the caret stays char-indexed; IME preedit is display-only
+    until Commit (or submit, which commits first).
+11. **Errors are structural.** Inspector failures carry `code`; the MCP
+    bridge additionally raises `isError`. Content stays parseable either
+    way.
 
-## Fault-drill catalog (M2)
+## Fault/repair catalog (standing drills, all green)
 
-The demo proves the framework can catch, not just commit, these faults:
+Headless (`cargo run -p hamesh-faults`, in CI): covered-submit,
+clipped-composer, dead-submit — diagnose, repair, verify.
 
-| # | Fault | Expected Eye/Hand behaviour |
-|---|-------|------------------------------|
-| 1 | Healthy button | human click succeeds, counter increments, trace records revisions |
-| 2 | Disabled button | human click hits target but reports blocked, state unchanged |
-| 3 | Transparent overlay | aimed-at-A hits veil B, reported as intercepted/occluded |
-| 4 | Direct invocation | succeeds but labeled `DirectOp`, never GUI proof |
-| 5 | Clipping | `detail()` reports rect-beyond-parent with reachability warning |
+Live CLI drill (local-only): stale-inject → repair → submit → wait
+(immediate/timeout/wake) → race (exactly one winner) → click-focus,
+witnessed by the window's own trace.
 
-## What is already live (beyond headless)
+Live MCP drill (local-only): handshake → ordered submit → in-band
+stale repair → `isError` both ways.
 
-- `crates/hamesh-window`: real winit 0.30 OS window with softbuffer CPU
-  presentation AND wgpu 30 + vello 0.11 GPU presentation (`--gpu`) of
-  the same `Scene`, with surface-loss recovery and device-loss fallback.
-  Resize re-runs layout; mouse/keyboard route through the labeled Hand;
-  `--smoke-test=N` verifies open + present + dump non-interactively.
-- `crates/hamesh-text`: parley layout + swash raster into both renderers;
-  glyph placement anchor derived from zeno source semantics.
-- `crates/hamesh-widgets`: composer, virtualized feed, keyboard focus,
-  one shared `handle_key` core for headless and window drivers.
-- External Eye/Hand: `apps/hamesh-cli` drives/inspects a running
-  window over a local token-gated protocol (map/detail/click/key/type/
-  snapshot/wait), sharing the UI thread's exact handlers via winit user
-  events; stale revisions refused, waits non-blocking.
-- `crates/hamesh-pi`: clean-room Pi RPC adapter (JSONL over child stdio),
-  proven against the live `pi` CLI (get_state round-trip observed).
-- CPU/GPU tolerance harness: same Scene through both renderers, compared
-  per smoke run. Current M3 verdict: within tolerance on rects, diverge
-  on rounded corners + glyph AA (classified, not a single %).
+## What is live
+
+- Native winit 0.30 window: softbuffer CPU + wgpu 30/vello 0.11 GPU
+  (`--gpu`), loss recovery + CPU fallback, `--smoke-test=N`.
+- Parley text on both renderers; grapheme editing; IME preedit/commit
+  model with cursor-area tracking (live-IME dogfood queued).
+- M3 chat (composer + virtualized feed + focus), M4 live Pi loop with
+  token-asserted smoke and Esc-abort.
+- External CLI + MCP bridges, per-connection inspector server,
+  wait parking, stale discipline — all drill-covered.
+- GitHub CI gates (fmt/clippy/tests/headless) green on every push;
+  GPU/desktop evidence stays local by design.
 
 ## What is NOT yet built
 
-- Real text editing: multiline, selection, clipboard, IME composition
-  (composer is single-line; parley-vs-editor evaluation open).
-- AccessKit bridge, IME plumbing, drag-and-drop.
+- IME verification with a real IME (human dogfood, non-blocking).
+- Session-scoped MCP discovery; MCP `isError` already structural.
+- Selection, clipboard, undo; multiline editing; full text editor.
+- AccessKit bridge beyond partial; drag-and-drop.
 - Deterministic replay with controllable clocks.
-- MCP adapter (CLI first, by design; protocol is adapter-ready).
-- GitHub CI gates (local gates green; hosted workflow not yet added).
-- Independent desktop observation layer (Windows-specific, later).
 - Per-region tolerance masks for the GPU/CPU comparison.
+- And, as always for this slice: no new OS, drivers, language,
+  browser, CSS replacement, all-platforms-day-one, widget gallery,
+  plugin marketplace, Pi/Agent-X rewrites, or multi-agent management.
+
+## Decisions
+
+`docs/decisions/001`–`019` record every consequential choice with
+evidence. `docs/review-m1-m2-slice.md` is the merge checklist.
