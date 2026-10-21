@@ -50,7 +50,9 @@ back as streamed text in the feed, with the UI thread never blocking.
 
 - The smoke prompt now demands the token `HAMESH-SMOKE-OK` back, and the
   deadline path records `m3.pi_assert` (`PASS` / `FAIL(..)` /
-  `INCOMPLETE(..)`) plus a `SMOKE-PI-*` stdout line. Live 90s proof:
+  `INCOMPLETE(..)`) plus a `SMOKE-PI-*` stdout line, and the process
+  exits with the verdict (0 / 1 / 2) so the regression can actually
+  fail a run — a check that always exits 0 is not a check. Live 90s proof:
   queued → done (chars=15, exact token) → `PASS`. The `m3 smoke`
   and abort-UX follow-ups above are both done: Escape during a live run
   aborts it via `m3.pi_abort` (window Esc arm and external key-Escape

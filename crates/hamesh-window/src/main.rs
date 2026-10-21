@@ -165,6 +165,10 @@ struct HameshWindowApp {
     /// Non-interactive verification: exit after this deadline, leaving
     /// trace + map + PNG evidence. `None` = interactive mode.
     smoke_deadline: Option<Instant>,
+    /// Smoke exit status: set once by the deadline path when the M4
+    /// verdict runs (0 PASS, 1 FAIL, 2 INCOMPLETE); `main` propagates it
+    /// so the machine-checked smoke can actually fail a run.
+    smoke_exit_code: Option<i32>,
 }
 
 impl HameshWindowApp {
@@ -194,6 +198,7 @@ impl HameshWindowApp {
             size: (800, 600),
             frames: 0,
             smoke_deadline: None,
+            smoke_exit_code: None,
         }
     }
 
@@ -516,6 +521,20 @@ impl HameshWindowApp {
 }
 
 /// A Pi job for the worker thread: prompt the model, or abort the run.
+/// Pure M4 verdict mapping (headless-tested): PASS exits 0, FAIL 1,
+/// INCOMPLETE (still streaming at the deadline) 2.
+fn pi_verdict(asked: bool, answered: bool, streaming: bool) -> (&'static str, i32) {
+    if answered {
+        ("PASS", 0)
+    } else if !asked {
+        ("FAIL(no-submission)", 1)
+    } else if streaming {
+        ("INCOMPLETE(still-streaming)", 2)
+    } else {
+        ("FAIL(no-token-in-reply)", 1)
+    }
+}
+
 #[derive(Debug)]
 enum PiJob {
     Prompt(String),
@@ -680,7 +699,7 @@ impl HameshWindowApp {
     /// prompt demands the token HAMESH-SMOKE-OK back, so a later agent
     /// message containing it proves the full path carried real content,
     /// not just event counts.
-    fn m3_pi_assert(&mut self) {
+    fn m3_pi_assert(&mut self) -> i32 {
         const TOKEN: &str = "HAMESH-SMOKE-OK";
         let (asked, answered, streaming) = match self.widgets.as_ref() {
             Some(w) => {
@@ -702,18 +721,11 @@ impl HameshWindowApp {
             }
             None => (false, false, false),
         };
-        let verdict = if answered {
-            "PASS"
-        } else if !asked {
-            "FAIL(no-submission)"
-        } else if streaming {
-            "INCOMPLETE(still-streaming)"
-        } else {
-            "FAIL(no-token-in-reply)"
-        };
+        let (verdict, code) = pi_verdict(asked, answered, streaming);
         self.trace
             .record("m3.pi_assert", verdict, self.app.revision, None);
         println!("SMOKE-PI-{verdict}");
+        code
     }
 
     /// IME wiring (decision 019): thin delegation to the tested Composer
@@ -1404,7 +1416,7 @@ impl ApplicationHandler<UserEvent> for HameshWindowApp {
                 // and verdict lines.
                 self.smoke_deadline = None;
                 if self.use_pi && self.use_m3 {
-                    self.m3_pi_assert();
+                    self.smoke_exit_code = Some(self.m3_pi_assert());
                 }
                 self.dump_inspection();
                 self.dump_gpu_snapshot();
@@ -1456,6 +1468,11 @@ fn main() {
         println!("SMOKE mode: {secs}s");
     }
     event_loop.run_app(&mut app).expect("run app");
+    // A machine-checked smoke must be able to fail the run: propagate
+    // the M4 verdict (None = no verdict ran, exit clean).
+    if let Some(code) = app.smoke_exit_code {
+        std::process::exit(code);
+    }
 }
 
 #[cfg(test)]
@@ -1495,6 +1512,22 @@ mod tests {
         assert!(
             job_rx.try_recv().is_err(),
             "idle Escape must not queue a job"
+        );
+    }
+
+    #[test]
+    fn pi_verdict_maps_to_exit_codes() {
+        // A machine-checked smoke must be able to fail the run:
+        // PASS 0, FAIL 1, still-streaming 2.
+        assert_eq!(pi_verdict(true, true, false), ("PASS", 0));
+        assert_eq!(pi_verdict(false, false, false), ("FAIL(no-submission)", 1));
+        assert_eq!(
+            pi_verdict(true, false, true),
+            ("INCOMPLETE(still-streaming)", 2)
+        );
+        assert_eq!(
+            pi_verdict(true, false, false),
+            ("FAIL(no-token-in-reply)", 1)
         );
     }
 }
