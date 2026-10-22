@@ -6,7 +6,9 @@
 
 use hamesh_scene::Scene;
 use serde::{Deserialize, Serialize};
-use tiny_skia::{Color, Paint, Pixmap, Rect as SkRect, Transform};
+use tiny_skia::{
+    Color, FillRule, Paint, Path, PathBuilder, Pixmap, Rect as SkRect, Stroke, Transform,
+};
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct FrameRef {
@@ -25,7 +27,7 @@ pub struct Frame {
 /// node's own rect so text never bleeds into siblings.
 fn blit_text(pix: &mut Pixmap, node: &hamesh_scene::SceneNode) {
     let avail_w = (node.rect.w - 16.0).max(8.0);
-    let layout = hamesh_text::TextLayout::new(&node.text, avail_w, 16.0);
+    let layout = hamesh_text::TextLayout::new(&node.text, avail_w, node.font_size);
     // Empty text still gets a line box: the caret must render in an
     // empty focused composer (this early-return once ate the caret).
     let lh = layout.height().max(18.0);
@@ -72,7 +74,8 @@ fn blit_text(pix: &mut Pixmap, node: &hamesh_scene::SceneNode) {
                 continue;
             }
             let mut p = Paint::default();
-            p.set_color(Color::from_rgba8(235, 245, 243, *a));
+            let [tr, tg, tb, _] = node.text_rgba;
+            p.set_color(Color::from_rgba8(tr, tg, tb, *a));
             if let Some(dot) = SkRect::from_xywh(px as f32, py as f32, 1.0, 1.0) {
                 pix.fill_rect(dot, &p, Transform::identity(), None);
             }
@@ -84,6 +87,29 @@ fn rounded_clip_rect(rect: &hamesh_layout::Rect) -> Option<SkRect> {
     SkRect::from_xywh(rect.x, rect.y, rect.w.max(1.0), rect.h.max(1.0))
 }
 
+/// Rounded-rectangle path (cubic quarter-circle approximation).
+/// Radius clamps to half the smaller side so thin bars stay sane.
+fn rounded_path(rect: &hamesh_layout::Rect, radius: f32) -> Option<Path> {
+    let r = radius.min(rect.w / 2.0).min(rect.h / 2.0);
+    if r <= 0.0 {
+        return None;
+    }
+    let (x, y, w, h) = (rect.x, rect.y, rect.w, rect.h);
+    let k = r * 0.552_284_8;
+    let mut pb = PathBuilder::new();
+    pb.move_to(x + r, y);
+    pb.line_to(x + w - r, y);
+    pb.cubic_to(x + w - r + k, y, x + w, y + r - k, x + w, y + r);
+    pb.line_to(x + w, y + h - r);
+    pb.cubic_to(x + w, y + h - r + k, x + w - r + k, y + h, x + w - r, y + h);
+    pb.line_to(x + r, y + h);
+    pb.cubic_to(x + r - k, y + h, x, y + h - r + k, x, y + h - r);
+    pb.line_to(x, y + r);
+    pb.cubic_to(x, y + r - k, x + r - k, y, x + r, y);
+    pb.close();
+    pb.finish()
+}
+
 pub fn render(scene: &Scene) -> Frame {
     let w = scene.viewport_w.max(1.0) as u32;
     let h = scene.viewport_h.max(1.0) as u32;
@@ -92,17 +118,95 @@ pub fn render(scene: &Scene) -> Frame {
     pix.fill(Color::from_rgba8(10, 15, 17, 255));
 
     for node in &scene.nodes {
-        if !node.visible {
+        if !node.visible || node.ghost {
             continue;
         }
-        let Some(r) = rounded_clip_rect(&node.rect) else {
-            continue;
-        };
         let [rr, gg, bb, aa] = node.color;
         let mut paint = Paint::default();
         paint.set_color(Color::from_rgba8(rr, gg, bb, aa));
-        // Simple rounded look: draw rect; overlay translucency shows through.
-        pix.fill_rect(r, &paint, Transform::identity(), None);
+        if node.radius > 0.0 {
+            if let Some(path) = rounded_path(&node.rect, node.radius) {
+                pix.fill_path(
+                    &path,
+                    &paint,
+                    FillRule::Winding,
+                    Transform::identity(),
+                    None,
+                );
+            }
+            if node.border_w > 0.0 {
+                // Inset half the stroke so the border stays inside the rect.
+                let half = node.border_w / 2.0;
+                let inset = hamesh_layout::Rect {
+                    x: node.rect.x + half,
+                    y: node.rect.y + half,
+                    w: (node.rect.w - node.border_w).max(1.0),
+                    h: (node.rect.h - node.border_w).max(1.0),
+                };
+                if let Some(bp) = rounded_path(&inset, (node.radius - half).max(0.0)) {
+                    let mut paint_b = Paint::default();
+                    let [br, bg, bb2, ba] = node.border_rgba;
+                    paint_b.set_color(Color::from_rgba8(br, bg, bb2, ba));
+                    let stroke = Stroke {
+                        width: node.border_w,
+                        ..Default::default()
+                    };
+                    pix.stroke_path(&bp, &paint_b, &stroke, Transform::identity(), None);
+                }
+            }
+        } else {
+            let Some(r) = rounded_clip_rect(&node.rect) else {
+                continue;
+            };
+            // Simple rounded look: draw rect; overlay translucency shows through.
+            pix.fill_rect(r, &paint, Transform::identity(), None);
+            if node.border_w > 0.0 {
+                let mut paint_b = Paint::default();
+                let [br, bg, bb2, ba] = node.border_rgba;
+                paint_b.set_color(Color::from_rgba8(br, bg, bb2, ba));
+                let stroke = Stroke {
+                    width: node.border_w,
+                    ..Default::default()
+                };
+                let mut pb = PathBuilder::new();
+                pb.move_to(r.x(), r.y());
+                pb.line_to(r.x() + r.width(), r.y());
+                pb.line_to(r.x() + r.width(), r.y() + r.height());
+                pb.line_to(r.x(), r.y() + r.height());
+                pb.close();
+                if let Some(bp) = pb.finish() {
+                    pix.stroke_path(&bp, &paint_b, &stroke, Transform::identity(), None);
+                }
+            }
+        }
+        // Progress fill: bar over the track, same height, fraction width.
+        if let Some(frac) = node.fill_frac {
+            if frac > 0.0 {
+                let bw = (node.rect.w * frac).max(1.0);
+                let bar = hamesh_layout::Rect {
+                    x: node.rect.x,
+                    y: node.rect.y,
+                    w: bw,
+                    h: node.rect.h,
+                };
+                let mut paint_f = Paint::default();
+                let [fr, fg, fb, fa] = node.fill_rgba;
+                paint_f.set_color(Color::from_rgba8(fr, fg, fb, fa));
+                if node.radius > 0.0 {
+                    if let Some(bp) = rounded_path(&bar, node.radius.min(bar.h / 2.0)) {
+                        pix.fill_path(
+                            &bp,
+                            &paint_f,
+                            FillRule::Winding,
+                            Transform::identity(),
+                            None,
+                        );
+                    }
+                } else if let Some(r) = SkRect::from_xywh(bar.x, bar.y, bar.w, bar.h) {
+                    pix.fill_rect(r, &paint_f, Transform::identity(), None);
+                }
+            }
+        }
         // Real text: parley layout + swash raster, blitted per covered
         // pixel and clipped to the node's rect. The caret draws even for
         // empty text, so blit_text itself decides what to skip — never
@@ -239,5 +343,87 @@ mod tests {
             caret_pixels >= 10,
             "caret bar missing: {caret_pixels} teal pixels near x={ox}"
         );
+    }
+
+    fn px(pix: &tiny_skia::Pixmap, x: usize, y: usize) -> [u8; 4] {
+        let o = (y * pix.width() as usize + x) * 4;
+        let d = pix.data();
+        [d[o], d[o + 1], d[o + 2], d[o + 3]]
+    }
+
+    #[test]
+    fn rounded_corners_leave_background() {
+        // radius=20 on a 100px card: the corner pixel shows the parent
+        // surface through the rounded cutout; the center takes the fill.
+        let mut app = App::new("win");
+        app.add(
+            "win",
+            Component::new("card", Role::Panel, "card")
+                .with_prop("w", "100")
+                .with_prop("h", "100")
+                .with_prop("surface", "raised")
+                .with_prop("radius", "20"),
+        );
+        let layout = hamesh_layout::compute(&app, 200.0, 200.0);
+        let scene = hamesh_scene::build(&app, &layout, 1);
+        let f = render(&scene);
+        let win_bg = scene.nodes.iter().find(|n| n.id == "win").unwrap().color;
+        let node = scene.nodes.iter().find(|n| n.id == "card").unwrap();
+        let cx = (node.rect.x + 2.0) as usize;
+        let cy = (node.rect.y + 2.0) as usize;
+        assert_eq!(px(&f.pixmap, cx, cy), win_bg, "corner cutout shows parent");
+        let mx = (node.rect.x + node.rect.w / 2.0) as usize;
+        let my = (node.rect.y + node.rect.h / 2.0) as usize;
+        assert_eq!(
+            px(&f.pixmap, mx, my),
+            hamesh_theme::resolve("raised"),
+            "center must be surface"
+        );
+    }
+
+    #[test]
+    fn ghost_spacer_paints_nothing() {
+        let mut app = App::new("win");
+        app.add(
+            "win",
+            Component::new("sp", Role::Panel, "spacer").with_prop("ghost", "true"),
+        );
+        let layout = hamesh_layout::compute(&app, 100.0, 100.0);
+        let scene = hamesh_scene::build(&app, &layout, 1);
+        assert!(scene.nodes.iter().find(|n| n.id == "sp").unwrap().ghost);
+        let f = render(&scene);
+        // Whole frame is the root fill: the ghost left no rect behind.
+        let win_bg = scene.nodes.iter().find(|n| n.id == "win").unwrap().color;
+        let d = f.pixmap.data();
+        let (chunks, _) = d.as_chunks::<4>();
+        assert!(chunks.iter().all(|c| *c == win_bg));
+    }
+
+    #[test]
+    fn progress_bar_draws_track_and_fill() {
+        let mut app = App::new("win");
+        app.add(
+            "win",
+            Component::new("bar", Role::Panel, "progress")
+                .with_prop("w", "100")
+                .with_prop("h", "10")
+                .with_prop("surface", "track")
+                .with_prop("value", "50")
+                .with_prop("fill", "accent"),
+        );
+        let layout = hamesh_layout::compute(&app, 200.0, 200.0);
+        let scene = hamesh_scene::build(&app, &layout, 1);
+        let node = scene.nodes.iter().find(|n| n.id == "bar").unwrap();
+        assert_eq!(node.fill_frac, Some(0.5));
+        let f = render(&scene);
+        let y = (node.rect.y + node.rect.h / 2.0) as usize;
+        let left = px(&f.pixmap, (node.rect.x + 5.0) as usize, y);
+        let right = px(&f.pixmap, (node.rect.x + node.rect.w - 5.0) as usize, y);
+        assert_eq!(
+            left,
+            hamesh_theme::resolve("accent"),
+            "filled half is accent"
+        );
+        assert_eq!(right, hamesh_theme::resolve("track"), "empty half is track");
     }
 }

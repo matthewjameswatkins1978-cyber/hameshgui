@@ -7,4 +7,5 @@ license.workspace = true
 [dependencies]
 hamesh-core = { path = "../hamesh-core" }
 hamesh-layout = { path = "../hamesh-layout" }
+hamesh-theme = { path = "../hamesh-theme" }
 serde.workspace = true

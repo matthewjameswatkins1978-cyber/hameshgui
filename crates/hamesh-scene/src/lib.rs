@@ -20,6 +20,27 @@ pub struct SceneNode {
     pub enabled: bool,
     pub color: [u8; 4],
     pub text: String,
+    /// Corner radius (px) from the `radius` prop. Both renderers honor it.
+    pub radius: f32,
+    /// Border width (px) from `border`, color from the `border_token`
+    /// prop (default `border`). 0 = no border.
+    pub border_w: f32,
+    pub border_rgba: [u8; 4],
+    /// Progress fill 0..1 from `value`/`min`/`max` props. `None` = not
+    /// a progress node; the renderers paint track + fill token.
+    pub fill_frac: Option<f32>,
+    /// Bar color for progress nodes, from the `fill` token prop
+    /// (default `accent`). Ignored unless `fill_frac` is set.
+    pub fill_rgba: [u8; 4],
+    /// Icon glyph name from the `icon` prop. `None` = no icon.
+    pub icon: Option<String>,
+    /// Text size (px) from `font_size` (default 16) and color from
+    /// the `text_token` prop (default near-white `text`).
+    pub font_size: f32,
+    pub text_rgba: [u8; 4],
+    /// Ghost nodes (spacers) participate in layout and hit-testing
+    /// policy but paint nothing.
+    pub ghost: bool,
     /// Caret x (layout-space, relative to the text origin) for a focused
     /// text input. `None` = no caret. Part of scene truth so CPU and GPU
     /// renderers (and the Eye) agree on where editing happens.
@@ -72,6 +93,28 @@ pub fn build(app: &App, layout: &LayoutOutput, scene_revision: u64) -> Scene {
             let text = c.props.get("text").cloned().unwrap_or_default();
             let caret_x = c.props.get("caret_x").and_then(|v| v.parse::<f32>().ok());
             let focused = c.props.get("focused").map(|s| s == "true").unwrap_or(false);
+            // Style resolution (decision 020): explicit token props win;
+            // otherwise the legacy role palette keeps old screens stable.
+            let num = |k: &str, d: f32| {
+                c.props
+                    .get(k)
+                    .and_then(|v| v.parse::<f32>().ok())
+                    .unwrap_or(d)
+            };
+            let color = c
+                .props
+                .get("surface")
+                .map(|t| hamesh_theme::resolve(t))
+                .unwrap_or_else(|| role_color(&role, &c.name));
+            let fill_frac = match (c.props.get("value"), c.props.get("min"), c.props.get("max")) {
+                (Some(v), min, max) => {
+                    let v: f32 = v.parse().unwrap_or(0.0);
+                    let lo: f32 = min.and_then(|s| s.parse().ok()).unwrap_or(0.0);
+                    let hi: f32 = max.and_then(|s| s.parse().ok()).unwrap_or(100.0);
+                    Some(((v - lo) / (hi - lo).max(1e-6)).clamp(0.0, 1.0))
+                }
+                _ => None,
+            };
             Some(SceneNode {
                 id: c.id.0.clone(),
                 role: role.clone(),
@@ -81,8 +124,29 @@ pub fn build(app: &App, layout: &LayoutOutput, scene_revision: u64) -> Scene {
                 visible: l.effectively_visible,
                 clipped: l.clipped_by_parent,
                 enabled: c.enabled,
-                color: role_color(&role, &c.name),
+                color,
                 text,
+                radius: num("radius", 0.0).max(0.0),
+                border_w: num("border", 0.0).max(0.0),
+                border_rgba: c
+                    .props
+                    .get("border_token")
+                    .map(|t| hamesh_theme::resolve(t))
+                    .unwrap_or_else(|| hamesh_theme::resolve("border")),
+                fill_frac,
+                fill_rgba: c
+                    .props
+                    .get("fill")
+                    .map(|t| hamesh_theme::resolve(t))
+                    .unwrap_or_else(|| hamesh_theme::resolve("accent")),
+                icon: c.props.get("icon").cloned(),
+                font_size: num("font_size", 16.0).max(8.0),
+                text_rgba: c
+                    .props
+                    .get("text_token")
+                    .map(|t| hamesh_theme::resolve(t))
+                    .unwrap_or_else(|| hamesh_theme::resolve("text")),
+                ghost: c.props.get("ghost").map(|s| s == "true").unwrap_or(false),
                 caret_x,
                 focused,
             })
@@ -112,5 +176,39 @@ mod tests {
         assert_eq!(scene.app_revision, app.revision);
         assert_eq!(scene.scene_revision, 7);
         assert!(scene.nodes.iter().any(|n| n.id == "b1"));
+    }
+
+    #[test]
+    fn style_props_resolve_to_scene_truth() {
+        let mut app = App::new("win");
+        app.add(
+            "win",
+            Component::new("card", Role::Panel, "card")
+                .with_prop("surface", "raised")
+                .with_prop("radius", "10")
+                .with_prop("border", "2")
+                .with_prop("border_token", "accent")
+                .with_prop("font_size", "20")
+                .with_prop("text_token", "muted"),
+        );
+        app.add(
+            "win",
+            Component::new("bar", Role::Panel, "progress")
+                .with_prop("value", "75")
+                .with_prop("fill", "success"),
+        );
+        let layout = hamesh_layout::compute(&app, 800.0, 600.0);
+        let scene = build(&app, &layout, 1);
+        let card = scene.nodes.iter().find(|n| n.id == "card").unwrap();
+        assert_eq!(card.color, hamesh_theme::resolve("raised"));
+        assert_eq!(card.radius, 10.0);
+        assert_eq!(card.border_w, 2.0);
+        assert_eq!(card.border_rgba, hamesh_theme::resolve("accent"));
+        assert_eq!(card.font_size, 20.0);
+        assert_eq!(card.text_rgba, hamesh_theme::resolve("muted"));
+        assert!(card.icon.is_none() && card.fill_frac.is_none() && !card.ghost);
+        let bar = scene.nodes.iter().find(|n| n.id == "bar").unwrap();
+        assert_eq!(bar.fill_frac, Some(0.75));
+        assert_eq!(bar.fill_rgba, hamesh_theme::resolve("success"));
     }
 }

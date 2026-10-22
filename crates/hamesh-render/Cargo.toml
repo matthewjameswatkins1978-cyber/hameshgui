@@ -9,5 +9,6 @@ hamesh-core = { path = "../hamesh-core" }
 hamesh-layout = { path = "../hamesh-layout" }
 hamesh-scene = { path = "../hamesh-scene" }
 hamesh-text = { path = "../hamesh-text" }
+hamesh-theme = { path = "../hamesh-theme" }
 tiny-skia.workspace = true
 serde.workspace = true

@@ -67,7 +67,7 @@ fn build_vscene(
 ) -> VelloScene {
     let mut v = VelloScene::new();
     for node in &scene.nodes {
-        if !node.visible {
+        if !node.visible || node.ghost {
             continue;
         }
         let r = &node.rect;
@@ -76,7 +76,7 @@ fn build_vscene(
             r.y as f64,
             (r.x + r.w) as f64,
             (r.y + r.h) as f64,
-            6.0,
+            node.radius as f64,
         );
         v.fill(
             Fill::NonZero,
@@ -85,6 +85,43 @@ fn build_vscene(
             None,
             &shape,
         );
+        if node.border_w > 0.0 {
+            let half = node.border_w as f64 / 2.0;
+            let inner = RoundedRect::new(
+                r.x as f64 + half,
+                r.y as f64 + half,
+                (r.x + r.w) as f64 - half,
+                (r.y + r.h) as f64 - half,
+                (node.radius as f64 - half).max(0.0),
+            );
+            v.stroke(
+                &vello::kurbo::Stroke::new(node.border_w as f64),
+                Affine::IDENTITY,
+                &Brush::Solid(node_color(node.border_rgba)),
+                None,
+                &inner,
+            );
+        }
+        // Progress fill mirrors the CPU renderer: bar over the track.
+        if let Some(frac) = node.fill_frac {
+            if frac > 0.0 {
+                let bw = (r.w * frac).max(1.0);
+                let bar = RoundedRect::new(
+                    r.x as f64,
+                    r.y as f64,
+                    (r.x + bw) as f64,
+                    (r.y + r.h) as f64,
+                    node.radius as f64,
+                );
+                v.fill(
+                    Fill::NonZero,
+                    Affine::IDENTITY,
+                    &Brush::Solid(node_color(node.fill_rgba)),
+                    None,
+                    &bar,
+                );
+            }
+        }
         // Real text: same parley layout as the CPU path, drawn with
         // vello glyph runs. `parley::FontData` IS vello's `FontData`
         // (single linebender_resource_handle 0.1.1 in the tree).
@@ -94,9 +131,12 @@ fn build_vscene(
             None
         } else {
             let avail = (r.w - 16.0).max(8.0);
-            let key = format!("{}|{:.0}|{}", node.id, avail, node.text);
+            let key = format!(
+                "{}|{:.0}|{:.0}|{}",
+                node.id, avail, node.font_size, node.text
+            );
             if !cache.contains_key(&key) {
-                let layout = hamesh_text::TextLayout::new(&node.text, avail, 16.0);
+                let layout = hamesh_text::TextLayout::new(&node.text, avail, node.font_size);
                 cache.insert(key.clone(), layout);
             }
             cache.get(&key).filter(|l| l.height() > 0.0)
@@ -114,7 +154,7 @@ fn draw_text(
     // Empty text still lays out nothing, but the caret needs a line box.
     let lh = layout.map(|l| l.height()).unwrap_or(0.0).max(18.0);
     let dy = node.rect.y + ((node.rect.h - lh) / 2.0).max(0.0);
-    let brush = Brush::Solid(node_color([235, 245, 243, 255]));
+    let brush = Brush::Solid(node_color(node.text_rgba));
     if let Some(layout) = layout {
         for run in layout.runs() {
             v.draw_glyphs(&run.font)

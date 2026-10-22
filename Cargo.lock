@@ -1032,6 +1032,7 @@ dependencies = [
  "hamesh-layout",
  "hamesh-scene",
  "hamesh-text",
+ "hamesh-theme",
  "serde",
  "tiny-skia",
 ]
@@ -1042,6 +1043,7 @@ version = "0.2.0"
 dependencies = [
  "hamesh-core",
  "hamesh-layout",
+ "hamesh-theme",
  "serde",
 ]
 

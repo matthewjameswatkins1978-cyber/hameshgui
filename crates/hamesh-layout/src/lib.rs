@@ -291,6 +291,14 @@ pub fn hit_test(app: &App, layout: &LayoutOutput, x: f32, y: f32) -> Option<Stri
         if !n.effectively_visible {
             continue;
         }
+        // Ghost spacers hold layout space but never intercept the Hand.
+        if app
+            .components
+            .get(id)
+            .is_some_and(|c| c.props.get("ghost").map(|s| s == "true").unwrap_or(false))
+        {
+            continue;
+        }
         if !n.rect.contains(x, y) {
             continue;
         }
@@ -304,6 +312,8 @@ pub fn hit_test(app: &App, layout: &LayoutOutput, x: f32, y: f32) -> Option<Stri
     // Disabled components still win the hit-test (a human would hit them and
     // nothing would happen); the automation layer reports "disabled".
     let _ = app;
+    // Disabled components still win the hit-test (a human would hit them
+    // and nothing would happen); only ghosts are skipped.
     best.map(|(_, id)| id)
 }
 
@@ -407,5 +417,22 @@ mod tests {
             t1.rect.y,
             t0.rect.y
         );
+    }
+
+    #[test]
+    fn ghost_spacer_never_wins_hit() {
+        // A ghost spacer holds layout space but must not intercept the
+        // Hand: the hit falls through to whatever is beneath (here, root).
+        let mut app = App::new("win");
+        app.add(
+            "win",
+            Component::new("sp", Role::Panel, "spacer")
+                .with_prop("ghost", "true")
+                .with_prop("h", "60"),
+        );
+        let out = compute(&app, 300.0, 300.0);
+        let sp = out.get("sp").unwrap();
+        let hit = hit_test(&app, &out, sp.rect.x + 2.0, sp.rect.y + 2.0);
+        assert_ne!(hit.as_deref(), Some("sp"));
     }
 }
