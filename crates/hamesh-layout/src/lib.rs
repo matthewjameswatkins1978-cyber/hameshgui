@@ -95,7 +95,9 @@ impl LayoutOutput {
 /// Style hints carried in component props:
 /// `w`, `h` (px), `flex_grow`, `layout: column|row`, `overlay: true`,
 /// `pad` (px, default 12, 0 = flush), `gap` (px, default 8),
-/// `wrap: true` (flex-wrap for responsive equal-tile rows).
+/// `wrap: true` (flex-wrap for responsive equal-tile rows),
+/// `align: start|center|end` (cross-axis, default stretch),
+/// `basis` (flex base px; 0 = share space equally regardless of content).
 fn child_style(comp: &hamesh_core::Component) -> Style {
     let parse_nonneg = |k: &str, dflt: f32| -> f32 {
         comp.props
@@ -163,6 +165,15 @@ fn child_style(comp: &hamesh_core::Component) -> Style {
     let pad = parse_nonneg("pad", 12.0);
     let gap = parse_nonneg("gap", 8.0);
     let wrap = comp.props.get("wrap").map(|s| s == "true").unwrap_or(false);
+    // Zero is a meaningful base (share equally), so unlike `parse`
+    // this accepts 0; absent stays auto.
+    let basis = comp
+        .props
+        .get("basis")
+        .and_then(|v| v.parse::<f32>().ok())
+        .filter(|v| *v >= 0.0)
+        .map(Dimension::length)
+        .unwrap_or(Dimension::auto());
     Style {
         size: Size {
             width: w,
@@ -170,6 +181,7 @@ fn child_style(comp: &hamesh_core::Component) -> Style {
         },
         flex_direction: dir,
         flex_grow: grow,
+        flex_basis: basis,
         align_self: align,
         flex_wrap: if wrap {
             FlexWrap::Wrap

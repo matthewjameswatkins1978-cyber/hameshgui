@@ -388,6 +388,8 @@ pub fn metric(s: &mut Scope, id: &str, o: MetricOpts) {
         .insert("surface".to_string(), "raised".to_string());
     tile.props.insert("border".to_string(), "1".to_string());
     tile.props.insert("flex_grow".to_string(), "1".to_string());
+    // Base zero: tiles share the row equally regardless of content.
+    tile.props.insert("basis".to_string(), "0".to_string());
     tile.props.insert("value".to_string(), o.value.clone());
     tile.props
         .insert("metric_label".to_string(), o.label.clone());

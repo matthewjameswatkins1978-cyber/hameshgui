@@ -169,6 +169,30 @@ mod tests {
     }
 
     #[test]
+    fn dashboard_tiles_shrink_then_wrap() {
+        // Wide: three equal tiles in one row. Phone-narrow: tiles
+        // shrink to min-content, then the row breaks and they stack.
+        let app = build_dashboard();
+        let wide = hamesh_layout::compute(&app, 760.0, 560.0);
+        let wa = wide.get("m-agents").unwrap();
+        let wb = wide.get("m-tasks").unwrap();
+        assert_eq!(wa.rect.y, wb.rect.y, "wide: one row");
+        // Basis zero shares space equally; whole-pixel rounding may
+        // leave a 1px remainder on one tile.
+        assert!((wa.rect.w - wb.rect.w).abs() <= 1.0, "wide: equal tiles");
+        let narrow = hamesh_layout::compute(&app, 240.0, 900.0);
+        let na = narrow.get("m-agents").unwrap();
+        let nb = narrow.get("m-tasks").unwrap();
+        assert!(
+            nb.rect.y >= na.rect.y + na.rect.h - 1.0,
+            "narrow: tiles must stack, agents.y={} h={} tasks.y={}",
+            na.rect.y,
+            na.rect.h,
+            nb.rect.y
+        );
+    }
+
+    #[test]
     fn dashboard_renders_mostly_surfaces() {
         let app = build_dashboard();
         let layout = hamesh_layout::compute(&app, 760.0, 560.0);

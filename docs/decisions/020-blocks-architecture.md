@@ -149,3 +149,8 @@ in the shared core (not the dashboard):
 5. **Painted leaves take pad 0.** An empty h=6 leaf with the
    default pad 12 lays out 24 tall; progress/icon builders zero
    it. Badge/button pills keep their padding deliberately.
+6. **Equal tiles need basis zero.** `basis` prop wired
+   (flex base; the `> 0` parse filter would have eaten 0, same
+   class as the old pad bug). Metric tiles share rows equally
+   modulo whole-pixel rounding; rows shrink to min-content,
+   then wrap.
