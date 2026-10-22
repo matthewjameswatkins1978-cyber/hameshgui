@@ -582,6 +582,63 @@ pub fn button(s: &mut Scope, id: &str, label: &str, o: ButtonOpts) {
     s.app.register_command(&o.action, id);
 }
 
+// ---- Design profiles ----
+
+/// One typographic voice: a face plus its variation axes. Empty
+/// `vars` means the default instance. Faces that are absent on a
+/// machine fall back silently (parley/fontdb); profiles must only
+/// be asserted through structural properties, never absolute widths.
+#[derive(Clone, Copy, Debug)]
+pub struct Voice {
+    pub family: &'static str,
+    pub vars: &'static str,
+}
+
+/// A design language's type contract: which voice speaks each
+/// block kind. Applied as a post-pass so any composition built
+/// from blocks can wear a profile without builder churn.
+#[derive(Clone, Copy, Debug)]
+pub struct Profile {
+    /// Display numerals and titles (condensed, authoritative).
+    pub display: Voice,
+    /// Readouts, labels, annotations (instrumental mono).
+    pub technical: Voice,
+}
+
+/// Signal Cabinet, local cut: Bahnschrift Condensed standing in
+/// for Barlow Condensed, Consolas for IBM Plex Mono. The web-font
+/// profiles in docs/decisions/027 are the target; this one proves
+/// the mechanism on faces present on the machine.
+pub const SIGNAL_CABINET_LOCAL: Profile = Profile {
+    display: Voice {
+        family: "Bahnschrift",
+        vars: "wdth 75",
+    },
+    technical: Voice {
+        family: "Consolas",
+        vars: "",
+    },
+};
+
+/// Voice a whole composition: Title + MetricValue speak display,
+/// Caption + MetricLabel speak technical. Everything else keeps
+/// the default face. Idempotent: re-applying changes nothing.
+pub fn apply_profile(app: &mut App, p: &Profile) {
+    for c in app.components.values_mut() {
+        let v = match c.props.get("block").map(|s| s.as_str()) {
+            Some("Title") | Some("MetricValue") => Some(&p.display),
+            Some("Caption") | Some("MetricLabel") => Some(&p.technical),
+            _ => None,
+        };
+        if let Some(v) = v {
+            c.props.insert("font".to_string(), v.family.to_string());
+            if !v.vars.is_empty() {
+                c.props.insert("font_vars".to_string(), v.vars.to_string());
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -627,6 +684,36 @@ mod tests {
         assert_eq!(ic.props.get("icon").map(|s| s.as_str()), Some("users"));
         let v = app.get("m-agents-value").unwrap();
         assert_eq!(v.props.get("text").map(|s| s.as_str()), Some("4"));
+    }
+
+    #[test]
+    fn profile_voices_land_on_the_right_blocks() {
+        let mut app = App::new("win");
+        {
+            let mut s = Scope::root(&mut app, "win");
+            card(&mut s, "c", CardOpts::default(), |t| {
+                title(t, "t", "Agent X");
+                caption(t, "cap", "75%");
+                button(t, "b", "Go", ButtonOpts::new(ButtonVariant::Outline, "go"));
+            });
+        }
+        apply_profile(&mut app, &SIGNAL_CABINET_LOCAL);
+        let t = app.get("t").unwrap();
+        assert_eq!(t.props.get("font").map(|s| s.as_str()), Some("Bahnschrift"));
+        assert_eq!(
+            t.props.get("font_vars").map(|s| s.as_str()),
+            Some("wdth 75")
+        );
+        let cap = app.get("cap").unwrap();
+        assert_eq!(cap.props.get("font").map(|s| s.as_str()), Some("Consolas"));
+        assert!(!cap.props.contains_key("font_vars"));
+        // Buttons keep the default face.
+        let b = app.get("b").unwrap();
+        assert!(!b.props.contains_key("font"));
+        // Idempotent: a second pass changes nothing.
+        let before = app.get("t").unwrap().props.clone();
+        apply_profile(&mut app, &SIGNAL_CABINET_LOCAL);
+        assert_eq!(app.get("t").unwrap().props, before);
     }
 
     #[test]

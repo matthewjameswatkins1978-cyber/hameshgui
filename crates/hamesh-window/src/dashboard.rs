@@ -111,6 +111,9 @@ pub fn build_dashboard() -> App {
         );
     }
     refresh_dashboard(&mut app);
+    // Signal Cabinet, local cut: condensed display voice on titles
+    // and numerals, mono on readouts and labels (029, Phase B).
+    apply_profile(&mut app, &SIGNAL_CABINET_LOCAL);
     app
 }
 
