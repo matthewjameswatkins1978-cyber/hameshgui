@@ -103,7 +103,24 @@ fn rasterize_run(ctx: &mut ScaleContext, run: &TextRun, out: &mut Vec<RasterGlyp
     let Some(font_ref) = FontRef::from_index(run.font.data.data(), run.font.index as usize) else {
         return;
     };
-    let mut scaler = ctx.builder(font_ref).size(run.size).hint(true).build();
+    // Scale with the run's variation coords: on a variable face the
+    // default-instance outlines are wider than the shaped advances,
+    // so scaling without coords crowds glyphs into each other.
+    // Unknown tags are ignored by swash; empty vars are a no-op.
+    let coords: Vec<swash::Setting<f32>> = run
+        .vars
+        .iter()
+        .map(|(tag, v)| swash::Setting {
+            tag: swash::tag_from_bytes(tag),
+            value: *v,
+        })
+        .collect();
+    let mut scaler = ctx
+        .builder(font_ref)
+        .size(run.size)
+        .hint(true)
+        .variations(coords.iter().copied())
+        .build();
     let mut render = Render::new(&[Source::Outline]);
     render.format(Format::Alpha);
     for (id, gx, gy) in run.glyphs.iter().copied() {

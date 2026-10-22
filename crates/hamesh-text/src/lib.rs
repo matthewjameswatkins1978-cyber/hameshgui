@@ -100,6 +100,7 @@ thread_local! {
 /// `FontContext` needs to outlive it — verified by the compiler.
 pub struct TextLayout {
     layout: parley::Layout<peniko::Brush>,
+    vars: Vec<([u8; 4], f32)>,
 }
 
 /// One run's positioned data, fully owned for consumer convenience.
@@ -107,6 +108,10 @@ pub struct TextLayout {
 pub struct TextRun {
     pub font: parley::FontData,
     pub size: f32,
+    /// Variation coords this run was shaped with (empty = default).
+    /// Rasterizers must scale with these or outlines disagree with
+    /// positions on variable faces.
+    pub vars: Vec<([u8; 4], f32)>,
     /// (glyph id, layout-absolute x, layout-absolute y)
     pub glyphs: Vec<(u32, f32, f32)>,
 }
@@ -117,9 +122,10 @@ pub struct TextRun {
 /// working unchanged. The scene resolves one per text node from its
 /// `font` / `font_vars` props and every consumer (advance, trim,
 /// ink, measure, render) shapes with the same spec, so boxes and
-/// paint cannot disagree. Not yet wired: variable-coord raster
-/// (swash/vello scale without coords); positions are exact, raster
-/// falls back to default-instance outlines until then.
+/// paint cannot disagree. The CPU rasterizer scales with the run's
+/// coords, so varied outlines match varied positions; vello 0.11 has
+/// no variation-coords API, so the GPU path keeps default-instance
+/// outlines at varied positions until the vello upgrade.
 #[derive(Clone, Debug, Default)]
 pub struct FontSpec {
     pub family: Option<String>,
@@ -219,7 +225,10 @@ impl TextLayout {
                 }
                 let mut layout = builder.build(text);
                 layout.break_all_lines(Some(max_width));
-                Self { layout }
+                Self {
+                    layout,
+                    vars: spec.vars.clone(),
+                }
             })
         })
     }
@@ -263,6 +272,7 @@ impl TextLayout {
                 out.push(TextRun {
                     font: run.font().clone(),
                     size: run.font_size(),
+                    vars: self.vars.clone(),
                     glyphs: gr.positioned_glyphs().map(|g| (g.id, g.x, g.y)).collect(),
                 });
             }
@@ -710,6 +720,52 @@ mod tests {
             narrow < wide,
             "wdth 75 must shape narrower than wdth 100: {narrow} vs {wide}"
         );
+    }
+
+    #[test]
+    fn varied_outlines_match_varied_positions() {
+        // Raster follow-up: the scaler must use the run's variation
+        // coords, or default-instance outlines crowd into condensed
+        // advances. Ink spans must track their own advance, not the
+        // other instance's. Skips where Bahnschrift is absent.
+        let spec = |wdth: Option<f32>| FontSpec {
+            family: Some("Bahnschrift".to_string()),
+            vars: wdth.map(|w| vec![(*b"wdth", w)]).unwrap_or_default(),
+        };
+        let lay = |s: &FontSpec| TextLayout::new_varied("Hamburg", f32::INFINITY, 64.0, None, s);
+        let (ld, lv) = (lay(&spec(None)), lay(&spec(Some(75.0))));
+        if (ld.width() - lv.width()).abs() < 1.0 {
+            eprintln!("SKIP: no variable Bahnschrift on this machine");
+            return;
+        }
+        let span = |l: &TextLayout| -> f32 {
+            let g = glue::rasterize_layout(l);
+            assert!(!g.is_empty(), "expected raster glyphs");
+            let (mut lo, mut hi) = (f32::INFINITY, f32::NEG_INFINITY);
+            for r in &g {
+                lo = lo.min(r.pen_x + r.left as f32);
+                hi = hi.max(r.pen_x + r.left as f32 + r.w as f32);
+            }
+            hi - lo
+        };
+        let (sd, sv) = (span(&ld), span(&lv));
+        eprintln!(
+            "raster proof: default adv={:.1} span={:.1} / condensed adv={:.1} span={:.1}",
+            ld.width(),
+            sd,
+            lv.width(),
+            sv
+        );
+        assert!(
+            (sv - sd).abs() > 10.0,
+            "varied outlines must differ from default: {sv} vs {sd}"
+        );
+        for (adv, sp, name) in [(ld.width(), sd, "default"), (lv.width(), sv, "condensed")] {
+            assert!(
+                (adv - sp).abs() < 12.0,
+                "{name} ink span {sp} must track its advance {adv}"
+            );
+        }
     }
 
     #[test]
