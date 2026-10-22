@@ -577,4 +577,44 @@ mod tests {
             a
         );
     }
+
+    #[test]
+    fn variable_axes_reach_shaping_when_supported() {
+        // Phase B groundwork: design profiles need wdth/opsz and
+        // beyond. Shapes one word in Bahnschrift (variable, ships
+        // with Windows) at two widths through the real parley path.
+        // Advances MUST differ if axes work end to end. Skips (never
+        // fails) where the font is absent — CI makes no such
+        // guarantee, and absence is not a Hamesh defect.
+        use parley::style::{FontFamily, StyleProperty};
+        let probe = |wdth: f32| -> f32 {
+            FONT_CX.with(|fcx| {
+                LAYOUT_CX.with(|lcx| {
+                    let mut fcx = fcx.borrow_mut();
+                    let mut lcx = lcx.borrow_mut();
+                    let mut builder = lcx.ranged_builder(&mut fcx, "Hamburg", 1.0, false);
+                    builder
+                        .push_default(StyleProperty::FontFamily(FontFamily::named("Bahnschrift")));
+                    builder.push_default(StyleProperty::FontSize(64.0));
+                    let vars = [parley::setting::FontVariation::new(
+                        parley::setting::Tag::new(b"wdth"),
+                        wdth,
+                    )];
+                    builder.push_default(StyleProperty::FontVariations((&vars).into()));
+                    let mut layout = builder.build("Hamburg");
+                    layout.break_all_lines(None);
+                    layout.width()
+                })
+            })
+        };
+        let (narrow, wide) = (probe(75.0), probe(100.0));
+        if (narrow - wide).abs() < 1.0 {
+            eprintln!("SKIP: no variable Bahnschrift on this machine");
+            return;
+        }
+        assert!(
+            narrow < wide,
+            "wdth 75 must shape narrower than wdth 100: {narrow} vs {wide}"
+        );
+    }
 }
