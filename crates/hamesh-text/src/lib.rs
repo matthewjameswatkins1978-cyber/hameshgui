@@ -111,36 +111,86 @@ pub struct TextRun {
     pub glyphs: Vec<(u32, f32, f32)>,
 }
 
+/// Font selection for shaping: optional family plus OpenType
+/// variation axes as (4-byte tag, value) pairs. `Default` is plain
+/// shaping (no family, no variations) — every existing caller keeps
+/// working unchanged. The scene resolves one per text node from its
+/// `font` / `font_vars` props and every consumer (advance, trim,
+/// ink, measure, render) shapes with the same spec, so boxes and
+/// paint cannot disagree. Not yet wired: variable-coord raster
+/// (swash/vello scale without coords); positions are exact, raster
+/// falls back to default-instance outlines until then.
+#[derive(Clone, Debug, Default)]
+pub struct FontSpec {
+    pub family: Option<String>,
+    pub vars: Vec<([u8; 4], f32)>,
+}
+
+impl FontSpec {
+    /// Stable identity for cache keys: family name plus each
+    /// axis tag and value bits, in declared order.
+    pub fn fingerprint(&self) -> u64 {
+        use std::hash::{Hash, Hasher};
+        let mut h = std::collections::hash_map::DefaultHasher::new();
+        self.family.hash(&mut h);
+        for (tag, v) in &self.vars {
+            tag.hash(&mut h);
+            v.to_bits().hash(&mut h);
+        }
+        h.finish()
+    }
+
+    /// Parse the `font` / `font_vars` component props (`font_vars`
+    /// is `"TAG value, ..."`, e.g. `"wdth 75, opsz 16"`). Malformed
+    /// entries are skipped, never fatal.
+    pub fn parse(font: Option<&str>, vars: Option<&str>) -> Self {
+        let family = font.map(str::to_string);
+        let mut out = Vec::new();
+        if let Some(v) = vars {
+            for item in v.split(',') {
+                let mut parts = item.split_whitespace();
+                if let (Some(tag), Some(val)) = (parts.next(), parts.next()) {
+                    let b = tag.as_bytes();
+                    if b.len() == 4 {
+                        if let Ok(f) = val.parse::<f32>() {
+                            out.push(([b[0], b[1], b[2], b[3]], f));
+                        }
+                    }
+                }
+            }
+        }
+        Self { family, vars: out }
+    }
+}
+
 impl TextLayout {
     /// Lay out text. `line_height` is an absolute px line box
     /// (parley `LineHeight::Absolute`); `None` keeps the font's
     /// preferred metrics. Builders declare it from the type ramp so
     /// tokens and rendering agree; legacy nodes omit it.
     pub fn new(text: &str, max_width: f32, font_size: f32, line_height: Option<f32>) -> Self {
-        Self::new_varied(text, max_width, font_size, line_height, None, &[])
+        Self::new_varied(text, max_width, font_size, line_height, &FontSpec::default())
     }
 
-    /// Lay out text in an optional font family with OpenType variation
-    /// axes applied (e.g. family `"Bahnschrift"`, `[(b"wdth", 75.0)]`).
-    /// `family: None` keeps the current default resolution; tags are
-    /// four raw bytes and values are axis units. Axes the resolved
-    /// font lacks are ignored by the shaper - check the design-profile
-    /// probe before depending on a specific axis. `None` family and
-    /// empty `variations` behave exactly like `new`.
+    /// Lay out text with the given font selection: optional family plus
+    /// OpenType variation axes (e.g. family `"Bahnschrift"`,
+    /// `vars: [(b"wdth", 75.0)]`). `FontSpec::default()` keeps the
+    /// current behavior (default family, no variations). Axes the
+    /// resolved font lacks are ignored by the shaper - check the
+    /// design-profile probe before depending on a specific axis.
     pub fn new_varied(
         text: &str,
         max_width: f32,
         font_size: f32,
         line_height: Option<f32>,
-        family: Option<&str>,
-        variations: &[([u8; 4], f32)],
+        spec: &FontSpec,
     ) -> Self {
         FONT_CX.with(|fcx| {
             LAYOUT_CX.with(|lcx| {
                 let mut fcx = fcx.borrow_mut();
                 let mut lcx = lcx.borrow_mut();
                 let mut builder = lcx.ranged_builder(&mut fcx, text, 1.0, false);
-                if let Some(f) = family {
+                if let Some(f) = spec.family.as_deref() {
                     builder.push_default(StyleProperty::FontFamily(
                         parley::style::FontFamily::named(f),
                     ));
@@ -151,8 +201,9 @@ impl TextLayout {
                         parley::style::LineHeight::Absolute(lh),
                     ));
                 }
-                if !variations.is_empty() {
-                    let vars: Vec<parley::setting::FontVariation> = variations
+                if !spec.vars.is_empty() {
+                    let vars: Vec<parley::setting::FontVariation> = spec
+                        .vars
                         .iter()
                         .map(|(tag, v)| {
                             parley::setting::FontVariation::new(parley::setting::Tag::new(tag), *v)
@@ -247,11 +298,12 @@ fn ink_uncached(
     max_width: f32,
     font_size: f32,
     line_height: Option<f32>,
+    spec: &FontSpec,
 ) -> Option<InkBox> {
     if text.trim().is_empty() {
         return None;
     }
-    let layout = TextLayout::new(text, max_width, font_size, line_height);
+    let layout = TextLayout::new_varied(text, max_width, font_size, line_height, spec);
     let baseline = layout.first_baseline()?;
     let glyphs = glue::rasterize_layout(&layout);
     let mut x0 = f32::INFINITY;
@@ -287,8 +339,9 @@ fn ink_uncached(
 /// Bounded memoization: ink is a pure function of shaped text, and
 /// live frames re-query the same strings constantly. 512 entries,
 /// cleared wholesale when full (simplest correct eviction).
-type InkCache =
-    std::sync::Mutex<std::collections::HashMap<(String, u32, u32, Option<u32>), Option<InkBox>>>;
+type InkCache = std::sync::Mutex<
+    std::collections::HashMap<(String, u32, u32, Option<u32>, u64), Option<InkBox>>
+>;
 static INK_CACHE: std::sync::OnceLock<InkCache> = std::sync::OnceLock::new();
 
 fn ink_key(
@@ -296,12 +349,14 @@ fn ink_key(
     max_width: f32,
     font_size: f32,
     line_height: Option<f32>,
-) -> (String, u32, u32, Option<u32>) {
+    spec: &FontSpec,
+) -> (String, u32, u32, Option<u32>, u64) {
     (
         text.to_string(),
         max_width.to_bits(),
         font_size.to_bits(),
         line_height.map(|v| v.to_bits()),
+        spec.fingerprint(),
     )
 }
 
@@ -312,13 +367,14 @@ pub fn ink_box(
     max_width: f32,
     font_size: f32,
     line_height: Option<f32>,
+    spec: &FontSpec,
 ) -> Option<InkBox> {
-    let key = ink_key(text, max_width, font_size, line_height);
+    let key = ink_key(text, max_width, font_size, line_height, spec);
     let cache = INK_CACHE.get_or_init(|| std::sync::Mutex::new(std::collections::HashMap::new()));
     if let Some(hit) = cache.lock().expect("ink cache").get(&key) {
         return *hit;
     }
-    let v = ink_uncached(text, max_width, font_size, line_height);
+    let v = ink_uncached(text, max_width, font_size, line_height, spec);
     let mut c = cache.lock().expect("ink cache");
     if c.len() >= 512 {
         c.clear();
@@ -327,20 +383,21 @@ pub fn ink_box(
     v
 }
 
-/// Font-relative cap height (px) for `font_size`: ink top of "H"
-/// vs its baseline. Depends only on font+size, never content, so a
-/// trim derived from it cannot jump when the label text changes.
-/// Cached per size; fallback 0.7*size keeps boxes sane if shaping fails.
-type CapCache = std::sync::Mutex<std::collections::HashMap<u32, f32>>;
+/// Font-relative cap height (px) for `font_size` and shaping: ink top
+/// of "H" vs its baseline. Depends only on font+size, never content,
+/// so a trim derived from it cannot jump when the label text changes.
+/// Cached per (size, shaping); fallback 0.7*size keeps boxes sane if
+/// shaping fails.
+type CapCache = std::sync::Mutex<std::collections::HashMap<(u32, u64), f32>>;
 static CAP_CACHE: std::sync::OnceLock<CapCache> = std::sync::OnceLock::new();
 
-pub fn cap_height_ref(font_size: f32) -> f32 {
-    let key = font_size.to_bits();
+pub fn cap_height_ref(font_size: f32, spec: &FontSpec) -> f32 {
+    let key = (font_size.to_bits(), spec.fingerprint());
     let cache = CAP_CACHE.get_or_init(|| std::sync::Mutex::new(std::collections::HashMap::new()));
     if let Some(hit) = cache.lock().expect("cap cache").get(&key) {
         return *hit;
     }
-    let v = ink_uncached("H", 400.0, font_size, None)
+    let v = ink_uncached("H", 400.0, font_size, None, spec)
         .map(|b| (b.baseline - b.y0).max(1.0))
         .unwrap_or(font_size * 0.7);
     let mut c = cache.lock().expect("cap cache");
@@ -376,18 +433,20 @@ pub fn trim_box(
     max_width: f32,
     font_size: f32,
     line_height: Option<f32>,
+    spec: &FontSpec,
 ) -> Option<FontTrim> {
     let key = (
         text.to_string(),
         max_width.to_bits(),
         font_size.to_bits(),
         line_height.map(|v| v.to_bits()),
+        spec.fingerprint(),
     );
     let cache = TRIM_CACHE.get_or_init(|| std::sync::Mutex::new(std::collections::HashMap::new()));
     if let Some(hit) = cache.lock().expect("trim cache").get(&key) {
         return *hit;
     }
-    let v = trim_uncached(text, max_width, font_size, line_height);
+    let v = trim_uncached(text, max_width, font_size, line_height, spec);
     let mut c = cache.lock().expect("trim cache");
     if c.len() >= 512 {
         c.clear();
@@ -396,8 +455,9 @@ pub fn trim_box(
     v
 }
 
-type TrimCache =
-    std::sync::Mutex<std::collections::HashMap<(String, u32, u32, Option<u32>), Option<FontTrim>>>;
+type TrimCache = std::sync::Mutex<
+    std::collections::HashMap<(String, u32, u32, Option<u32>, u64), Option<FontTrim>>
+>;
 static TRIM_CACHE: std::sync::OnceLock<TrimCache> = std::sync::OnceLock::new();
 
 fn trim_uncached(
@@ -405,11 +465,12 @@ fn trim_uncached(
     max_width: f32,
     font_size: f32,
     line_height: Option<f32>,
+    spec: &FontSpec,
 ) -> Option<FontTrim> {
     if text.trim().is_empty() {
         return None;
     }
-    let layout = TextLayout::new(text, max_width, font_size, line_height);
+    let layout = TextLayout::new_varied(text, max_width, font_size, line_height, spec);
     if layout.line_count() != 1 {
         return None;
     }
@@ -417,7 +478,7 @@ fn trim_uncached(
     let line_height = layout.height().max(1.0);
     let ascent = baseline.max(1.0);
     let descent = (line_height - baseline).max(0.0);
-    let cap = cap_height_ref(font_size);
+    let cap = cap_height_ref(font_size, spec);
     Some(FontTrim {
         top: baseline - cap,
         bottom: baseline,
@@ -510,9 +571,9 @@ mod tests {
 
     #[test]
     fn ink_box_is_ground_truth() {
-        assert!(ink_box("", 400.0, 13.0, None).is_none());
-        assert!(ink_box("   ", 400.0, 13.0, None).is_none());
-        let ink = ink_box("Connected", 400.0, 13.0, None).expect("ink");
+        assert!(ink_box("", 400.0, 13.0, None, &FontSpec::default()).is_none());
+        assert!(ink_box("   ", 400.0, 13.0, None, &FontSpec::default()).is_none());
+        let ink = ink_box("Connected", 400.0, 13.0, None, &FontSpec::default()).expect("ink");
         let lay = TextLayout::new("Connected", 400.0, 13.0, None);
         // Bearings trimmed: ink narrower than the advance box.
         assert!(
@@ -531,9 +592,9 @@ mod tests {
             ink.y1
         );
         // Cached call agrees.
-        assert_eq!(ink_box("Connected", 400.0, 13.0, None), Some(ink));
+        assert_eq!(ink_box("Connected", 400.0, 13.0, None, &FontSpec::default()), Some(ink));
         // Descenders extend ink below the baseline.
-        let desc = ink_box("Inspected", 400.0, 13.0, None).expect("ink");
+        let desc = ink_box("Inspected", 400.0, 13.0, None, &FontSpec::default()).expect("ink");
         assert!(desc.y1 > desc.baseline, "p tail should pass the baseline");
     }
 
@@ -572,8 +633,8 @@ mod tests {
     #[test]
     fn trim_is_font_relative_not_content_relative() {
         // Stability: Connected -> Disconnected must not move the box.
-        let a = trim_box("Connected", 400.0, 13.0, None).expect("trim a");
-        let b = trim_box("Disconnected", 400.0, 13.0, None).expect("trim b");
+        let a = trim_box("Connected", 400.0, 13.0, None, &FontSpec::default()).expect("trim a");
+        let b = trim_box("Disconnected", 400.0, 13.0, None, &FontSpec::default()).expect("trim b");
         assert!(
             (a.top - b.top).abs() < 0.01,
             "top moved: {:?} vs {:?}",
@@ -588,7 +649,7 @@ mod tests {
         );
         // Accents share the box: trim never clips diacritics by construction
         // (renderers align by trim, clip only to node rect).
-        let c = trim_box("Caf\u{e9}", 400.0, 13.0, None).expect("trim c");
+        let c = trim_box("Caf\u{e9}", 400.0, 13.0, None, &FontSpec::default()).expect("trim c");
         assert!(
             (a.top - c.top).abs() < 0.01,
             "accent moved top: {:?} vs {:?}",
@@ -596,8 +657,8 @@ mod tests {
             c
         );
         // Empty and wrapped text opt out to line-box placement.
-        assert!(trim_box("", 400.0, 13.0, None).is_none());
-        assert!(trim_box("a b c d e f g", 10.0, 13.0, None).is_none());
+        assert!(trim_box("", 400.0, 13.0, None, &FontSpec::default()).is_none());
+        assert!(trim_box("a b c d e f g", 10.0, 13.0, None, &FontSpec::default()).is_none());
         // Cap-alphabetic trim sits inside the line box: top at or below
         // the line top, bottom (baseline) strictly above the line bottom
         // whenever the font carries descender space.
@@ -624,8 +685,10 @@ mod tests {
                 f32::INFINITY,
                 64.0,
                 None,
-                Some("Bahnschrift"),
-                &[(*b"wdth", wdth)],
+                &FontSpec {
+                    family: Some("Bahnschrift".to_string()),
+                    vars: vec![(*b"wdth", wdth)],
+                },
             )
             .width()
         };
@@ -638,5 +701,16 @@ mod tests {
             narrow < wide,
             "wdth 75 must shape narrower than wdth 100: {narrow} vs {wide}"
         );
+    }
+
+    #[test]
+    fn font_spec_parse_keeps_valid_axes_drops_garbage() {
+        let s = FontSpec::parse(Some("Bahnschrift"), Some("wdth 75, bogus, opsz nope, toolongtag 1, wght 700"));
+        assert_eq!(s.family.as_deref(), Some("Bahnschrift"));
+        assert_eq!(s.vars, vec![(*b"wdth", 75.0), (*b"wght", 700.0)]);
+        let empty = FontSpec::parse(None, None);
+        assert!(empty.family.is_none() && empty.vars.is_empty());
+        // Fingerprint distinguishes shaping configurations.
+        assert_ne!(s.fingerprint(), empty.fingerprint());
     }
 }

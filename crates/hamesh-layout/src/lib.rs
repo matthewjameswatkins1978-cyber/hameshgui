@@ -18,6 +18,10 @@ pub struct TextMeasure {
     pub text: String,
     pub font_size: f32,
     pub line_height: Option<f32>,
+    /// Font selection for shaping: resolved from the component's
+    /// `font` / `font_vars` props at build time, so measurement and
+    /// render use the identical spec (see FontSpec).
+    pub shaping: hamesh_text::FontSpec,
 }
 
 /// Measure a text leaf: known dimensions win, otherwise parley.
@@ -47,10 +51,20 @@ fn measure_text(
         AvailableSpace::MinContent => tm
             .text
             .split_whitespace()
-            .map(|wd| hamesh_text::TextLayout::new(wd, f32::INFINITY, tm.font_size, lh).width())
+            .map(|wd| {
+                hamesh_text::TextLayout::new_varied(
+                    wd,
+                    f32::INFINITY,
+                    tm.font_size,
+                    lh,
+                    &tm.shaping,
+                )
+                .width()
+            })
             .fold(0.0, f32::max),
     };
-    let lay = hamesh_text::TextLayout::new(&tm.text, max_w.max(0.0), tm.font_size, lh);
+    let lay =
+        hamesh_text::TextLayout::new_varied(&tm.text, max_w.max(0.0), tm.font_size, lh, &tm.shaping);
     // Pixel containment: fractional advances need the next whole pixel
     // (raster floors origins). Without ceil, rect.w - inset can land a
     // fraction short of the advance and paint wraps what layout kept
@@ -286,6 +300,10 @@ pub fn compute(app: &App, viewport_w: f32, viewport_h: f32) -> LayoutOutput {
                         text,
                         font_size,
                         line_height,
+                        shaping: hamesh_text::FontSpec::parse(
+                            comp.props.get("font").map(String::as_str),
+                            comp.props.get("font_vars").map(String::as_str),
+                        ),
                     }),
                 )
                 .expect("taffy text leaf")

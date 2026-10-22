@@ -123,7 +123,16 @@ fn blit_text(pix: &mut Pixmap, node: &hamesh_scene::SceneNode) {
     } else {
         avail_w
     };
-    let layout = hamesh_text::TextLayout::new(&node.text, wrap_w, node.font_size, node.line_height);
+    let layout = hamesh_text::TextLayout::new_varied(
+        &node.text,
+        wrap_w,
+        node.font_size,
+        node.line_height,
+        &hamesh_text::FontSpec {
+            family: node.font_family.clone(),
+            vars: node.font_vars.clone(),
+        },
+    );
     // Empty text still gets a line box: the caret must render in an
     // empty focused composer (this early-return once ate the caret).
     let line_h = if node.text.is_empty() {
@@ -137,7 +146,16 @@ fn blit_text(pix: &mut Pixmap, node: &hamesh_scene::SceneNode) {
     let glyphs = if layout.height() > 0.0 {
         // Cached raster: identical text shapes identically, so steady
         // frames skip swash (the layout above is only for the line box).
-        hamesh_text::glue::rasterize_cached(&node.text, wrap_w, node.font_size, node.line_height)
+        hamesh_text::glue::rasterize_cached(
+            &node.text,
+            wrap_w,
+            node.font_size,
+            node.line_height,
+            &hamesh_text::FontSpec {
+                family: node.font_family.clone(),
+                vars: node.font_vars.clone(),
+            },
+        )
     } else {
         Vec::new()
     };

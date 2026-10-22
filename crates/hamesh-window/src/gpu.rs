@@ -155,15 +155,26 @@ fn build_vscene(
                 avail
             };
             let key = format!(
-                "{}|{:.0}|{:.0}|{:?}|{}|{}",
-                node.id, avail, node.font_size, node.line_height, node.lines, node.text
+                "{}|{:.0}|{:.0}|{:?}|{}|{}|{:?}|{:?}",
+                node.id,
+                avail,
+                node.font_size,
+                node.line_height,
+                node.lines,
+                node.text,
+                node.font_family,
+                node.font_vars
             );
             if !cache.contains_key(&key) {
-                let layout = hamesh_text::TextLayout::new(
+                let layout = hamesh_text::TextLayout::new_varied(
                     &node.text,
                     wrap_w,
                     node.font_size,
                     node.line_height,
+                    &hamesh_text::FontSpec {
+                        family: node.font_family.clone(),
+                        vars: node.font_vars.clone(),
+                    },
                 );
                 cache.insert(key.clone(), layout);
             }

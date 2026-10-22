@@ -78,6 +78,12 @@ pub struct SceneNode {
     /// renderers (and the Eye) agree on where editing happens.
     pub caret_x: Option<f32>,
     pub focused: bool,
+    /// Font family from the `font` prop (`None` = default UI font).
+    /// Part of scene truth so both renderers shape identically.
+    pub font_family: Option<String>,
+    /// OpenType variation axes from the `font_vars` prop
+    /// (`"wdth 75, opsz 16"`). Empty = no variations.
+    pub font_vars: Vec<([u8; 4], f32)>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -181,20 +187,27 @@ pub fn build(app: &App, layout: &LayoutOutput, scene_revision: u64) -> Scene {
                 .and_then(|v| v.parse::<f32>().ok())
                 .filter(|v| *v >= 0.0)
                 .unwrap_or(if is_text_role { 0.0 } else { 12.0 });
+            // Optional typeface selection: `font` names the family,
+            // `font_vars` lists axis settings. Parsed once per node;
+            // every text consumer below shapes with the same spec.
+            let font_spec = hamesh_text::FontSpec::parse(
+                c.props.get("font").map(String::as_str),
+                c.props.get("font_vars").map(String::as_str),
+            );
             let avail_w = (l.rect.w - 2.0 * hamesh_text::TEXT_INSET_X).max(8.0);
             // Wrap rule shared with both renderers: wrap iff the final
             // width wraps. Single-line nodes lay out unwrapped so paint
             // can never re-wrap what layout kept whole.
             let avail_lines =
-                hamesh_text::TextLayout::new(&text, avail_w, font_size, line_height).line_count();
+                hamesh_text::TextLayout::new_varied(&text, avail_w, font_size, line_height, &font_spec).line_count();
             let wrap_w = if text.is_empty() || avail_lines <= 1 {
                 f32::INFINITY
             } else {
                 avail_w
             };
-            let lay = hamesh_text::TextLayout::new(&text, wrap_w, font_size, line_height);
+            let lay = hamesh_text::TextLayout::new_varied(&text, wrap_w, font_size, line_height, &font_spec);
             let oy = hamesh_text::run_oy(l.rect.h, text.is_empty(), lay.height());
-            let advance = hamesh_text::trim_box(&text, wrap_w, font_size, line_height)
+            let advance = hamesh_text::trim_box(&text, wrap_w, font_size, line_height, &font_spec)
                 .map(|t| t.advance)
                 .unwrap_or(lay.width());
             let halign = if avail_lines <= 1 {
@@ -214,7 +227,7 @@ pub fn build(app: &App, layout: &LayoutOutput, scene_revision: u64) -> Scene {
             };
             let tx = hamesh_text::align_origin_x(eff_align, pad, l.rect.w, advance);
             // Optical vertical shift from the final trim (None-safe).
-            let ty = match hamesh_text::trim_box(&text, wrap_w, font_size, line_height) {
+            let ty = match hamesh_text::trim_box(&text, wrap_w, font_size, line_height, &font_spec) {
                 Some(t) => {
                     let (y0, y1) = (t.top + oy, t.bottom + oy);
                     oy + (l.rect.h / 2.0 - (y0 + y1) / 2.0)
@@ -222,10 +235,10 @@ pub fn build(app: &App, layout: &LayoutOutput, scene_revision: u64) -> Scene {
                 None => oy,
             };
             let shift = ty - oy;
-            let ink = hamesh_text::ink_box(&text, wrap_w, font_size, line_height)
+            let ink = hamesh_text::ink_box(&text, wrap_w, font_size, line_height, &font_spec)
                 .map(|b| [b.x0 + tx, b.y0 + oy + shift, b.x1 + tx, b.y1 + oy + shift]);
             let (trim, metrics, baseline) =
-                match hamesh_text::trim_box(&text, wrap_w, font_size, line_height) {
+                match hamesh_text::trim_box(&text, wrap_w, font_size, line_height, &font_spec) {
                     Some(t) => (
                         Some([
                             tx,
@@ -294,6 +307,8 @@ pub fn build(app: &App, layout: &LayoutOutput, scene_revision: u64) -> Scene {
                 advance,
                 caret_x,
                 focused,
+                font_family: font_spec.family.clone(),
+                font_vars: font_spec.vars.clone(),
             })
         })
         .collect();
@@ -321,6 +336,60 @@ mod tests {
         assert_eq!(scene.app_revision, app.revision);
         assert_eq!(scene.scene_revision, 7);
         assert!(scene.nodes.iter().any(|n| n.id == "b1"));
+    }
+
+    #[test]
+    fn font_props_flow_into_scene_truth() {
+        // `font` / `font_vars` resolve once per node and every text
+        // consumer (advance, trim, ink, measure, render) shapes with
+        // the same spec — boxes and paint cannot disagree.
+        let mut app = App::new("win");
+        app.add(
+            "win",
+            Component::new("b", Role::Status, "badge")
+                .with_prop("text", "Connected")
+                .with_prop("font_size", "13")
+                .with_prop("pad", "8")
+                .with_prop("w", "200")
+                .with_prop("halign", "center")
+                .with_prop("font", "Bahnschrift")
+                .with_prop("font_vars", "wdth 75"),
+        );
+        let layout = hamesh_layout::compute(&app, 800.0, 600.0);
+        let scene = build(&app, &layout, 1);
+        let n = scene.nodes.iter().find(|n| n.id == "b").unwrap();
+        assert_eq!(n.font_family.as_deref(), Some("Bahnschrift"));
+        assert_eq!(n.font_vars, vec![(*b"wdth", 75.0)]);
+        // Scene truth matches the public API on identical inputs.
+        let spec = hamesh_text::FontSpec {
+            family: Some("Bahnschrift".to_string()),
+            vars: vec![(*b"wdth", 75.0)],
+        };
+        let direct =
+            hamesh_text::trim_box("Connected", f32::INFINITY, 13.0, None, &spec)
+                .expect("trim");
+        assert!(
+            (n.advance - direct.advance).abs() < 0.01,
+            "scene advance {} vs API {}",
+            n.advance,
+            direct.advance
+        );
+    }
+
+    #[test]
+    fn malformed_font_vars_are_skipped_not_fatal() {
+        let mut app = App::new("win");
+        app.add(
+            "win",
+            Component::new("b", Role::Status, "badge")
+                .with_prop("text", "Hi")
+                .with_prop("font", "Bahnschrift")
+                .with_prop("font_vars", "bogus, wdth nope, toolongtag 1, opsz 16"),
+        );
+        let layout = hamesh_layout::compute(&app, 800.0, 600.0);
+        let scene = build(&app, &layout, 1);
+        let n = scene.nodes.iter().find(|n| n.id == "b").unwrap();
+        assert_eq!(n.font_vars, vec![(*b"opsz", 16.0)]);
     }
 
     #[test]
