@@ -17,6 +17,7 @@ const SMOKE_SECS: u64 = 45;
 const DISCOVERY: &str = "target/hamesh-inspect.json";
 const TRACE: &str = "target/hamesh-window-trace.json";
 const SNAPSHOT: &str = "target/hamesh-blocks-drill-snapshot.png";
+const OVERLAY_SNAPSHOT: &str = "target/hamesh-blocks-drill-overlay.png";
 const WINDOW_LOG: &str = "target/hamesh-blocks-drill-window.log";
 
 fn exe(name: &str) -> String {
@@ -81,6 +82,60 @@ fn detail_prop(child: &mut Child, id: &str, key: &str) -> String {
         .and_then(|p| p.get(key))
         .and_then(|p| p.as_str().map(|s| s.to_string()))
         .unwrap_or_else(|| fail(format!("detail {id} has no prop {key}: {out}")))
+}
+
+/// Resolved text geometry: (rect width, origin x, advance, halign).
+/// Everything the alignment check needs, from one detail call.
+fn detail_geom(child: &mut Child, id: &str) -> (f32, f32, f32, String) {
+    let (code, out) = cli(child, &["detail", id]);
+    if code != 0 {
+        fail(format!("detail {id} failed with code {code}: {out}"));
+    }
+    let v: serde_json::Value =
+        serde_json::from_str(&out).unwrap_or_else(|_| fail(format!("detail not JSON: {out}")));
+    let r = v
+        .get("result")
+        .unwrap_or_else(|| fail(format!("detail {id} has no result")));
+    let w = r
+        .get("rect")
+        .and_then(|q| q.get("w"))
+        .and_then(|x| x.as_f64())
+        .unwrap_or_else(|| fail(format!("detail {id} has no rect.w"))) as f32;
+    let g = r
+        .get("text_geom")
+        .unwrap_or_else(|| fail(format!("detail {id} has no text_geom")));
+    let ox = g
+        .get("origin")
+        .and_then(|o| o.get(0))
+        .and_then(|x| x.as_f64())
+        .unwrap_or_else(|| fail(format!("detail {id} has no origin"))) as f32;
+    let adv = g
+        .get("advance")
+        .and_then(|x| x.as_f64())
+        .unwrap_or_else(|| fail(format!("detail {id} has no advance"))) as f32;
+    let halign = g
+        .get("halign")
+        .and_then(|x| x.as_str())
+        .unwrap_or_else(|| fail(format!("detail {id} has no halign")))
+        .to_string();
+    (w, ox, adv, halign)
+}
+
+/// Machine alignment check (§H4): shaped advance centred in the box.
+/// Fails on the old left-biased renderer (offset ~9px) and passes on
+/// the resolved contract (offset < 1px) — the drill detects the bug.
+fn check_centered(child: &mut Child, id: &str, ctx: &str) {
+    let (w, ox, adv, halign) = detail_geom(child, id);
+    if halign != "center" {
+        fail(format!("{ctx}: {id} halign is {halign}, want center"));
+    }
+    let off = (ox + adv / 2.0 - w / 2.0).abs();
+    println!("DRILL-GEOM {ctx}: {id} offset_px={off:.2} (w={w:.1} ox={ox:.1} adv={adv:.1})");
+    if off > 1.0 {
+        fail(format!(
+            "{ctx}: {id} off-centre by {off:.2}px (tolerance 1.0)"
+        ));
+    }
 }
 
 fn main() {
@@ -172,7 +227,11 @@ fn main() {
         fail("dash-action has no inspect_design action".to_string());
     }
 
-    step(6, "click Inspect design through hit-testing");
+    step(6, "text alignment: badge and button are centred pre-click");
+    check_centered(&mut child, "dash-status", "pre-click");
+    check_centered(&mut child, "dash-action", "pre-click");
+
+    step(7, "click Inspect design through hit-testing");
     let (code, out) = cli(
         &mut child,
         &["--expect-rev", &r1.to_string(), "click", "dash-action"],
@@ -188,12 +247,18 @@ fn main() {
         fail(format!("click hit the wrong node: {out}"));
     }
 
-    step(7, "binding updated: the label follows state");
+    step(8, "binding updated: the label follows state");
     if detail_prop(&mut child, "dash-action", "text") != "Inspected ✓" {
         fail("dash-action label did not follow the inspected state".to_string());
     }
 
-    step(8, "stale click on the old rev is refused");
+    step(9, "text alignment: relabelled button is still centred");
+    // The label changed (and the box resized); centering must hold
+    // with no per-content offsets — the dynamic-update regression.
+    check_centered(&mut child, "dash-action", "post-relabel");
+    check_centered(&mut child, "dash-status", "post-relabel");
+
+    step(10, "stale click on the old rev is refused");
     let (code, out) = cli(
         &mut child,
         &["--expect-rev", &r1.to_string(), "click", "dash-action"],
@@ -202,7 +267,7 @@ fn main() {
         fail(format!("stale click should be STALE/2, got {code}: {out}"));
     }
 
-    step(9, "snapshot evidence");
+    step(11, "snapshot evidence");
     let (code, out) = cli(&mut child, &["snapshot", SNAPSHOT]);
     if code != 0 {
         fail(format!("snapshot failed with code {code}: {out}"));
@@ -213,7 +278,40 @@ fn main() {
         fail("snapshot file is empty".to_string());
     }
 
-    step(10, "wait for the smoke clock, check the window's trace");
+    step(12, "overlay capture: guides match the reported geometry");
+    // The diagnostic image must carry the same resolved geometry the
+    // Eye reports for the same revision — no second geometry model.
+    let (code, out) = cli(&mut child, &["snapshot", OVERLAY_SNAPSHOT, "dash-status"]);
+    if code != 0 {
+        fail(format!("overlay snapshot failed with code {code}: {out}"));
+    }
+    let v: serde_json::Value = serde_json::from_str(&out)
+        .unwrap_or_else(|_| fail(format!("overlay reply not JSON: {out}")));
+    let ov = v
+        .get("result")
+        .and_then(|r| r.get("overlay"))
+        .unwrap_or_else(|| fail(format!("overlay reply has no overlay geometry: {out}")));
+    let ov_origin = ov
+        .get("text_geom")
+        .and_then(|g| g.get("origin"))
+        .and_then(|o| o.get(0))
+        .and_then(|x| x.as_f64())
+        .unwrap_or_else(|| fail(format!("overlay geometry has no origin: {out}")));
+    // Same revision, same numbers as the detail path asserted above.
+    let (w, ox, adv, _) = detail_geom(&mut child, "dash-status");
+    if (ov_origin - ox as f64).abs() > 0.01 {
+        fail(format!(
+            "overlay origin {ov_origin} disagrees with detail {ox}"
+        ));
+    }
+    let _ = (w, adv);
+    let ometa = std::fs::metadata(OVERLAY_SNAPSHOT)
+        .unwrap_or_else(|e| fail(format!("overlay snapshot file missing: {e}")));
+    if ometa.len() == 0 {
+        fail("overlay snapshot file is empty".to_string());
+    }
+
+    step(13, "wait for the smoke clock, check the window's trace");
     let status = child
         .wait()
         .unwrap_or_else(|e| fail(format!("waiting for window failed: {e}")));
@@ -239,5 +337,5 @@ fn main() {
         fail("trace has no ext.click record for dash-action".to_string());
     }
 
-    println!("DRILL-PASS blocks map -> semantics -> click -> binding -> stale -> snapshot (revs {r1}->{r2})");
+    println!("DRILL-PASS blocks map -> semantics -> align -> click -> binding -> align -> stale -> snapshot -> overlay (revs {r1}->{r2})");
 }

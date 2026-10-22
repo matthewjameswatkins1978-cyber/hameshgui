@@ -60,6 +60,9 @@ pub enum Op {
     },
     Snapshot {
         path: String,
+        /// Optional component id: paint its diagnostic guides into
+        /// this capture only. Normal rendering stays overlay-free.
+        overlay: Option<String>,
     },
     Wait {
         app_rev: u64,
@@ -172,6 +175,7 @@ fn parse_op(v: &serde_json::Value) -> Result<Op, String> {
             path: get("path")
                 .and_then(|p| p.as_str().map(str::to_string))
                 .unwrap_or_else(|| "target/hamesh-ext-snapshot.png".to_string()),
+            overlay: get("overlay").and_then(|o| o.as_str().map(str::to_string)),
         }),
         "wait" => Ok(Op::Wait {
             app_rev: get("app_rev").and_then(|r| r.as_u64()).unwrap_or(0),

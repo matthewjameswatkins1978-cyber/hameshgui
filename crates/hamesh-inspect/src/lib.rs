@@ -87,6 +87,15 @@ pub struct TextGeom {
     /// Measured line count at the final width. 1 = paint lays the
     /// run unwrapped (never re-wraps layout); >1 = intentional wrap.
     pub lines: usize,
+    /// Resolved glyph-run origin (node-local): FINAL painted placement
+    /// shared by CPU/GPU. Agents check centering against this.
+    pub origin: Option<[f32; 2]>,
+    /// Content rectangle (node-local): padding-declared usable area.
+    pub content: Option<[f32; 4]>,
+    /// Resolved horizontal alignment: start|center|end.
+    pub halign: Option<String>,
+    /// Shaped advance width (px) the origin was resolved against.
+    pub advance: Option<f32>,
 }
 
 pub fn detail(
@@ -145,6 +154,10 @@ pub fn detail(
             metrics: n.metrics,
             baseline: n.baseline,
             lines: n.lines,
+            origin: Some(n.origin),
+            content: Some(n.content),
+            halign: Some(n.halign.clone()),
+            advance: Some(n.advance),
         }),
         state_keys: app.state.keys().cloned().collect(),
         diagnostics,

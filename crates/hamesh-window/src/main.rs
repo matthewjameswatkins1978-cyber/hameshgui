@@ -1048,12 +1048,48 @@ impl HameshWindowApp {
                     })))
                 }
             }
-            Op::Snapshot { path } => {
+            Op::Snapshot { path, overlay } => {
                 let (_layout, scene) = self.layout_and_scene();
-                let frame = hamesh_render::render(&scene);
-                match hamesh_render::save_png(&frame, &path) {
-                    Ok(()) => Some(self.stamped(serde_json::json!({ "path": path }))),
-                    Err(e) => Some(self.err("IO", e)),
+                let mut frame = hamesh_render::render(&scene);
+                // Diagnostic overlay: guides for one node, painted
+                // into this capture only. App state, hit-testing and
+                // normal rendering are untouched.
+                let geom = overlay.as_deref().and_then(|id| {
+                    scene.nodes.iter().find(|n| n.id == id).map(|n| {
+                        hamesh_render::overlay::draw_guides(&mut frame.pixmap, n);
+                        serde_json::json!({
+                            "id": n.id,
+                            "rect": n.rect,
+                            "text_geom": {
+                                "origin": n.origin,
+                                "content": n.content,
+                                "halign": n.halign,
+                                "advance": n.advance,
+                                "ink": n.ink,
+                                "trim": n.trim,
+                                "metrics": n.metrics,
+                                "baseline": n.baseline,
+                                "lines": n.lines,
+                            },
+                        })
+                    })
+                });
+                if overlay.is_some() && geom.is_none() {
+                    Some(self.err(
+                        "NOT_FOUND",
+                        format!(
+                            "no scene node for overlay {}",
+                            overlay.as_deref().unwrap_or("?")
+                        ),
+                    ))
+                } else {
+                    match hamesh_render::save_png(&frame, &path) {
+                        Ok(()) => Some(self.stamped(serde_json::json!({
+                            "path": path,
+                            "overlay": geom,
+                        }))),
+                        Err(e) => Some(self.err("IO", e)),
+                    }
                 }
             }
             Op::Wait {

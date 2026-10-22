@@ -94,6 +94,19 @@ pub fn build_dashboard() -> App {
                         ButtonOpts::new(ButtonVariant::Outline, "inspect_design"),
                     );
                 });
+                // Activity section: fills the lower panel with live
+                // status content instead of empty charcoal.
+                divider(t, "dash-act-sep");
+                col(t, "dash-act", LayoutOpts::tight(), |c| {
+                    row(c, "dash-act-head", LayoutOpts::flat(), |r| {
+                        heading(r, "dash-act-title", "Recent activity");
+                        spacer(r, "dash-act-sp");
+                        caption(r, "dash-act-live", "Live");
+                    });
+                    activity(c, "a1", "Deployment queued", "agent-3 · 2m ago");
+                    activity(c, "a2", "Task batch completed", "12 tasks · 18m ago");
+                    activity(c, "a3", "Error budget healthy", "0 errors · 1h ago");
+                });
             },
         );
     }
@@ -205,8 +218,10 @@ mod tests {
     fn composition_audit_reads_as_groups() {
         // Machine-checked composition (§4): real measurements over
         // the canonical geometry. Errors fail; observations stay out.
+        // Viewport is the real window size (800x600): the reference
+        // composition must fit its window without clipping.
         let app = build_dashboard();
-        let layout = hamesh_layout::compute(&app, 760.0, 560.0);
+        let layout = hamesh_layout::compute(&app, 800.0, 600.0);
         let scene = hamesh_scene::build(&app, &layout, 1);
         let r = |id: &str| layout.get(id).unwrap().rect.clone();
         let sn = |id: &str| scene.nodes.iter().find(|n| n.id == id).unwrap();
@@ -219,6 +234,30 @@ mod tests {
         let pt = sn("dash-prog-title");
         assert_eq!(pt.lines, 1, "prog heading must not wrap");
         assert!(pt.trim.is_some(), "prog heading needs trim");
+        // 2b. Badge + button contents are centered AND right-anchored:
+        // independent layout relationships, verified together.
+        for id in ["dash-status", "dash-action"] {
+            let n = sn(id);
+            assert_eq!(n.halign, "center", "{id} declares center");
+            let cx = n.origin[0] + n.advance / 2.0;
+            let w = layout.get(id).unwrap().rect.w;
+            assert!(
+                (cx - w / 2.0).abs() < 1.0,
+                "{id} content not centered: {cx} vs {w}"
+            );
+        }
+        let hdr = r("dash-header");
+        let st = r("dash-status");
+        assert!(
+            (st.x + st.w - (hdr.x + hdr.w)).abs() < 1.0,
+            "badge right-anchored"
+        );
+        let ar = r("dash-action-row");
+        let ab = r("dash-action");
+        assert!(
+            (ab.x + ab.w - (ar.x + ar.w)).abs() < 1.0,
+            "button right-anchored"
+        );
         // 3. Tiles equal, aligned in one row.
         let (a, b, c) = (r("m-agents"), r("m-tasks"), r("m-errors"));
         assert!(
@@ -289,6 +328,23 @@ mod tests {
             layout.get("m-tasks").unwrap(),
         );
         assert_eq!(a.rect.y, b.rect.y, "560px: one row");
+    }
+
+    #[test]
+    fn frame_pipeline_stays_interactive() {
+        // Perf guard (§H2): geometry + raster for the whole dashboard
+        // must stay far below a frame budget. Catches 10x regressions
+        // (e.g. uncached shaping per frame), not machine noise.
+        let app = build_dashboard();
+        let layout = hamesh_layout::compute(&app, 760.0, 560.0);
+        let t0 = std::time::Instant::now();
+        for _ in 0..5 {
+            let scene = hamesh_scene::build(&app, &layout, 1);
+            let _ = hamesh_render::render(&scene);
+        }
+        let ms = t0.elapsed().as_millis();
+        println!("5x scene+render (layout once): {ms}ms");
+        assert!(ms < 5000, "frame pipeline too slow: {ms}ms for 5 frames");
     }
 
     #[test]

@@ -32,8 +32,24 @@ Two transports speak it: the `hamesh` CLI (TCP) and `hamesh-mcp`
   state_keys, diagnostics[]}` or `NOT_FOUND`. `props` carries live
   values (`text`, `caret_x`, `preedit`, `focus`, `count`).
   Diagnostics are observations, never invented causes.
-- `snapshot {"path"?}` → renders the current frame to PNG.
-  Replies with the path + revs.
+  Text nodes also carry `text_geom`: the resolved placement
+  contract — `origin` (glyph origin, node-local px), `content`
+  (usable area inside padding), `halign` (as declared:
+  `start|center|end`; effective Start/End flip for RTL paragraphs),
+  `advance` (shaped advance width), `ink` (raster-ink bounds),
+  `trim` (font-relative trim box), `metrics` (ascent/descent/…),
+  `baseline`, `lines`. This is the final truth: both renderers
+  and the Eye consume it verbatim.
+  Recipe for centered text: `|origin.x + advance/2 −
+  (content.left+content.right)/2| < 1.0px` ⇒ centered.
+  Multiline nodes fall back to `start`; check `lines == 1` first.
+- `snapshot {"path"?, "overlay"?}` → renders the current frame to PNG.
+  Replies with the path + revs. With `overlay` set to a component
+  id, paints that component's diagnostic guides into the capture
+  ONLY (white bounds, gray content, teal trim, amber ink, blue
+  baseline + content-centre cross) and returns the same resolved
+  `rect` + `text_geom` the Eye reports — image and numbers cannot
+  disagree. Normal rendering, state and hit-testing stay overlay-free.
 
 ## Hand ops (mutating, honor `expect_rev`)
 

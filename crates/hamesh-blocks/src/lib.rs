@@ -153,6 +153,8 @@ pub fn spacer(s: &mut Scope, id: &str) {
 pub fn divider(s: &mut Scope, id: &str) {
     let mut c = styled(Role::Panel, id, "divider", "Divider");
     c.props.insert("surface".to_string(), "border".to_string());
+    // Flush: default padding would turn the 1px rule into a bar.
+    c.props.insert("pad".to_string(), "0".to_string());
     c.props.insert("h".to_string(), "1".to_string());
     s.leaf(c);
 }
@@ -361,6 +363,9 @@ pub fn badge(s: &mut Scope, id: &str, text: &str, v: Variant) {
     // Shared 16px text origin with buttons (pad 8 + inset 8): pill
     // and button first letters sit on the same invisible line.
     c.props.insert("pad".to_string(), "8".to_string());
+    // Internal text alignment (distinct from Taffy cross-axis `align`
+    // below): the label centers inside the pill's content box.
+    c.props.insert("halign".to_string(), "center".to_string());
     // Pills center on the cross axis instead of stretching tall.
     c.props.insert("align".to_string(), "center".to_string());
     s.leaf(c);
@@ -401,6 +406,16 @@ impl MetricOpts {
             icon_token: "text_dim".to_string(),
         }
     }
+}
+
+/// Activity row: a status line with its time pushed right. One line
+/// per event keeps the section compact enough to fit the window.
+pub fn activity(s: &mut Scope, id: &str, main: &str, sub: &str) {
+    row(s, id, LayoutOpts::flat(), |t| {
+        body(t, &format!("{id}-main"), main);
+        spacer(t, &format!("{id}-sp"));
+        caption(t, &format!("{id}-sub"), sub);
+    });
 }
 
 /// Statistic tile: icon, prominent value, muted label. Tiles in a
@@ -558,6 +573,8 @@ pub fn button(s: &mut Scope, id: &str, label: &str, o: ButtonOpts) {
     c.props
         .insert("h".to_string(), hamesh_theme::control::H.to_string());
     c.props.insert("pad".to_string(), "8".to_string());
+    // Internal text alignment: the label centers in the button.
+    c.props.insert("halign".to_string(), "center".to_string());
     c.props
         .insert("variant".to_string(), o.variant.as_str().to_string());
     c.props.insert("action".to_string(), o.action.clone());

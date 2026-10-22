@@ -63,6 +63,16 @@ pub struct SceneNode {
     pub metrics: Option<[f32; 4]>,
     /// First baseline (node-local y), for cross-node baseline checks.
     pub baseline: Option<f32>,
+    /// Resolved glyph-run origin (node-local): the single placement
+    /// both renderers paint at, verbatim. Includes halign, content
+    /// inset and the optical vertical shift — FINAL, not an estimate.
+    pub origin: [f32; 2],
+    /// Content rectangle (node-local): padding-declared usable area.
+    pub content: [f32; 4],
+    /// Resolved horizontal alignment: start|center|end.
+    pub halign: String,
+    /// Shaped advance width (px) the origin was resolved against.
+    pub advance: f32,
     /// Caret x (layout-space, relative to the text origin) for a focused
     /// text input. `None` = no caret. Part of scene truth so CPU and GPU
     /// renderers (and the Eye) agree on where editing happens.
@@ -145,17 +155,32 @@ pub fn build(app: &App, layout: &LayoutOutput, scene_revision: u64) -> Scene {
             } else {
                 None
             };
-            // Ink + trim in node-local space. Ink is what the glyphs
-            // paint (Eye object bounds); trim is the font-relative
-            // cap-to-baseline box (renderer alignment target). Same
-            // line origin both sides: +inset horizontally, +run origin
-            // vertically. Trim x spans the advance width (stable).
+            // Final placement is resolved ONCE here and shared by CPU,
+            // GPU and Eye (decision: Eye describes what appears, not an
+            // intermediate estimate). Horizontal: `halign` positions the
+            // shaped advance in the content box (single-line only;
+            // multiline stays Start). Vertical: the font-relative trim
+            // centers on the box; ink/trim/baseline below are FINAL
+            // (optical shift already applied). Renderers place glyphs
+            // at `origin` verbatim; the caret stays line-anchored.
             let font_size = num("font_size", 16.0).max(8.0);
             let line_height = c
                 .props
                 .get("lh")
                 .and_then(|v| v.parse::<f32>().ok())
                 .filter(|v| *v > 0.0);
+            // Same pad default as layout (text hugs, containers pad):
+            // the content box must agree or placement diverges.
+            let is_text_role = matches!(
+                c.role,
+                hamesh_core::Role::Text | hamesh_core::Role::Status | hamesh_core::Role::Button
+            );
+            let pad = c
+                .props
+                .get("pad")
+                .and_then(|v| v.parse::<f32>().ok())
+                .filter(|v| *v >= 0.0)
+                .unwrap_or(if is_text_role { 0.0 } else { 12.0 });
             let avail_w = (l.rect.w - 2.0 * hamesh_text::TEXT_INSET_X).max(8.0);
             // Wrap rule shared with both renderers: wrap iff the final
             // width wraps. Single-line nodes lay out unwrapped so paint
@@ -169,28 +194,62 @@ pub fn build(app: &App, layout: &LayoutOutput, scene_revision: u64) -> Scene {
             };
             let lay = hamesh_text::TextLayout::new(&text, wrap_w, font_size, line_height);
             let oy = hamesh_text::run_oy(l.rect.h, text.is_empty(), lay.height());
-            let ink = hamesh_text::ink_box(&text, wrap_w, font_size, line_height).map(|b| {
-                [
-                    b.x0 + hamesh_text::TEXT_INSET_X,
-                    b.y0 + oy,
-                    b.x1 + hamesh_text::TEXT_INSET_X,
-                    b.y1 + oy,
-                ]
-            });
+            let advance = hamesh_text::trim_box(&text, wrap_w, font_size, line_height)
+                .map(|t| t.advance)
+                .unwrap_or(lay.width());
+            let halign = if avail_lines <= 1 {
+                hamesh_text::parse_halign(c.props.get("halign").map(|s| s.as_str()))
+            } else {
+                hamesh_text::HAlign::Start
+            };
+            // Logical direction: parley shapes BiDi itself; Start/End
+            // follow the paragraph's dominant direction (RTL flips
+            // them). Center is direction-independent. Reported halign
+            // stays as declared (intent); the origin is the physical
+            // result.
+            let eff_align = match (halign, lay.is_rtl()) {
+                (hamesh_text::HAlign::Start, true) => hamesh_text::HAlign::End,
+                (hamesh_text::HAlign::End, true) => hamesh_text::HAlign::Start,
+                (h, _) => h,
+            };
+            let tx = hamesh_text::align_origin_x(eff_align, pad, l.rect.w, advance);
+            // Optical vertical shift from the final trim (None-safe).
+            let ty = match hamesh_text::trim_box(&text, wrap_w, font_size, line_height) {
+                Some(t) => {
+                    let (y0, y1) = (t.top + oy, t.bottom + oy);
+                    oy + (l.rect.h / 2.0 - (y0 + y1) / 2.0)
+                }
+                None => oy,
+            };
+            let shift = ty - oy;
+            let ink = hamesh_text::ink_box(&text, wrap_w, font_size, line_height)
+                .map(|b| [b.x0 + tx, b.y0 + oy + shift, b.x1 + tx, b.y1 + oy + shift]);
             let (trim, metrics, baseline) =
                 match hamesh_text::trim_box(&text, wrap_w, font_size, line_height) {
                     Some(t) => (
                         Some([
-                            hamesh_text::TEXT_INSET_X,
-                            t.top + oy,
-                            hamesh_text::TEXT_INSET_X + t.advance,
-                            t.bottom + oy,
+                            tx,
+                            t.top + oy + shift,
+                            tx + t.advance,
+                            t.bottom + oy + shift,
                         ]),
                         Some([t.ascent, t.descent, t.cap, t.line_height]),
-                        Some(t.baseline + oy),
+                        Some(t.baseline + oy + shift),
                     ),
                     None => (None, None, None),
                 };
+            // Content box (node-local): what padding declared.
+            let content = [
+                pad,
+                pad,
+                (l.rect.w - pad).max(pad),
+                (l.rect.h - pad).max(pad),
+            ];
+            let halign_name = match halign {
+                hamesh_text::HAlign::Center => "center",
+                hamesh_text::HAlign::End => "end",
+                hamesh_text::HAlign::Start => "start",
+            };
             Some(SceneNode {
                 id: c.id.0.clone(),
                 role: role.clone(),
@@ -229,6 +288,10 @@ pub fn build(app: &App, layout: &LayoutOutput, scene_revision: u64) -> Scene {
                 trim,
                 metrics,
                 baseline,
+                origin: [tx, oy + shift],
+                content,
+                halign: halign_name.to_string(),
+                advance,
                 caret_x,
                 focused,
             })
@@ -293,5 +356,176 @@ mod tests {
         let bar = scene.nodes.iter().find(|n| n.id == "bar").unwrap();
         assert_eq!(bar.fill_frac, Some(0.75));
         assert_eq!(bar.fill_rgba, hamesh_theme::resolve("success"));
+    }
+
+    fn centered_badge(text: &str, w: f32) -> (App, SceneNode) {
+        let mut app = App::new("win");
+        app.add(
+            "win",
+            Component::new("b", Role::Status, "badge")
+                .with_prop("text", text)
+                .with_prop("font_size", "13")
+                .with_prop("lh", "18")
+                .with_prop("pad", "8")
+                .with_prop("w", &w.to_string())
+                .with_prop("halign", "center"),
+        );
+        let layout = hamesh_layout::compute(&app, 800.0, 600.0);
+        let scene = build(&app, &layout, 1);
+        let node = scene.nodes.iter().find(|n| n.id == "b").unwrap().clone();
+        (app, node)
+    }
+
+    #[test]
+    fn halign_center_resolves_to_content_center() {
+        // Live badge geometry: 95px box must center the advance.
+        for (text, w) in [
+            ("Connected", 95.0),
+            ("Disconnected", 200.0),
+            ("Caf\u{e9}", 140.0),
+            ("Inspect design", 260.0),
+        ] {
+            let (_, n) = centered_badge(text, w);
+            assert_eq!(n.halign, "center");
+            let cx = n.origin[0] + n.advance / 2.0;
+            assert!((cx - w / 2.0).abs() < 0.5, "{text}: center {cx} vs {w}");
+        }
+    }
+
+    #[test]
+    fn relabel_keeps_center_without_content_offsets() {
+        // Dynamic labels: changing text re-resolves; no per-word tweak.
+        let (mut app, _) = centered_badge("Connected", 200.0);
+        let w = 200.0;
+        for text in [
+            "Connected",
+            "Disconnected",
+            "Inspected \u{2713}",
+            "Caf\u{e9}",
+            "Errors",
+        ] {
+            app.get_mut("b")
+                .unwrap()
+                .props
+                .insert("text".to_string(), text.to_string());
+            let layout = hamesh_layout::compute(&app, 800.0, 600.0);
+            let scene = build(&app, &layout, 1);
+            let n = scene.nodes.iter().find(|n| n.id == "b").unwrap();
+            let cx = n.origin[0] + n.advance / 2.0;
+            assert!((cx - w / 2.0).abs() < 0.5, "{text}: center {cx}");
+        }
+    }
+
+    #[test]
+    fn left_biased_placement_trips_the_centering_check() {
+        // The drill's machine check must FAIL on the old behaviour:
+        // resolve the same badge with Start and prove the offset the
+        // drill asserts against exceeds its 1px tolerance.
+        let mut app = App::new("win");
+        app.add(
+            "win",
+            Component::new("b", Role::Status, "badge")
+                .with_prop("text", "Connected")
+                .with_prop("font_size", "13")
+                .with_prop("lh", "18")
+                .with_prop("pad", "8")
+                .with_prop("w", "95")
+                .with_prop("halign", "start"),
+        );
+        let layout = hamesh_layout::compute(&app, 800.0, 600.0);
+        let scene = build(&app, &layout, 1);
+        let n = scene.nodes.iter().find(|n| n.id == "b").unwrap();
+        let off = (n.origin[0] + n.advance / 2.0 - 95.0 / 2.0).abs();
+        assert!(
+            off > 1.0,
+            "start-aligned badge must read off-centre, got {off}"
+        );
+    }
+
+    #[test]
+    fn rtl_start_means_right() {
+        // Parley shapes the BiDi run; logical Start resolves to the
+        // physical right for RTL paragraphs (Hebrew for "connected").
+        let mut app = App::new("win");
+        app.add(
+            "win",
+            Component::new("h", Role::Status, "he")
+                .with_prop("text", "מחובר")
+                .with_prop("font_size", "13")
+                .with_prop("pad", "8")
+                .with_prop("w", "200")
+                .with_prop("halign", "start"),
+        );
+        let layout = hamesh_layout::compute(&app, 800.0, 600.0);
+        let scene = build(&app, &layout, 1);
+        let n = scene.nodes.iter().find(|n| n.id == "h").unwrap();
+        assert!(n.advance > 10.0, "Hebrew must shape, got {:?}", n.advance);
+        assert!(
+            (n.origin[0] + n.advance - (200.0 - 8.0)).abs() < 1.0,
+            "RTL start at right edge: {:?}",
+            n.origin
+        );
+    }
+
+    #[test]
+    fn multiline_falls_back_to_start() {
+        // Wrapping text never gets a single-line shortcut: the run
+        // stays left-anchored and paint wraps identically.
+        let mut app = App::new("win");
+        app.add(
+            "win",
+            Component::new("m", Role::Text, "multi")
+                .with_prop("text", "aaa bbb ccc ddd eee fff ggg hhh")
+                .with_prop("font_size", "16")
+                .with_prop("w", "120")
+                .with_prop("halign", "center"),
+        );
+        let layout = hamesh_layout::compute(&app, 800.0, 600.0);
+        let scene = build(&app, &layout, 1);
+        let n = scene.nodes.iter().find(|n| n.id == "m").unwrap();
+        assert!(n.lines > 1, "must wrap, got {}", n.lines);
+        assert_eq!(n.origin[0], 8.0, "wrapped text stays left-anchored");
+    }
+
+    #[test]
+    fn start_and_end_have_defined_semantics() {
+        let mut app = App::new("win");
+        app.add(
+            "win",
+            Component::new("s", Role::Status, "s")
+                .with_prop("text", "Hi")
+                .with_prop("font_size", "13")
+                .with_prop("pad", "8")
+                .with_prop("w", "200")
+                .with_prop("halign", "start"),
+        );
+        app.add(
+            "win",
+            Component::new("e", Role::Status, "e")
+                .with_prop("text", "Hi")
+                .with_prop("font_size", "13")
+                .with_prop("pad", "8")
+                .with_prop("w", "200")
+                .with_prop("halign", "end"),
+        );
+        app.add(
+            "win",
+            Component::new("u", Role::Status, "u")
+                .with_prop("text", "Hi")
+                .with_prop("font_size", "13")
+                .with_prop("pad", "8")
+                .with_prop("w", "200")
+                .with_prop("halign", "sideways"),
+        );
+        let layout = hamesh_layout::compute(&app, 800.0, 600.0);
+        let scene = build(&app, &layout, 1);
+        let g = |id: &str| scene.nodes.iter().find(|n| n.id == id).unwrap();
+        assert_eq!(g("s").origin[0], 8.0, "start = content left");
+        assert_eq!(g("u").halign, "start", "unknown falls back to start");
+        let adv = g("e").advance;
+        assert!(
+            (g("e").origin[0] - (200.0 - 8.0 - adv)).abs() < 0.01,
+            "end mirrors start"
+        );
     }
 }

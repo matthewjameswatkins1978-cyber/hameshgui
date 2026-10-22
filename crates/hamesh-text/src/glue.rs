@@ -44,6 +44,40 @@ pub fn rasterize_parley(text: &str, max_width: f32) -> Vec<RasterGlyph> {
     rasterize_layout(&TextLayout::new(text, max_width, 16.0, None))
 }
 
+/// Bounded raster memoization: identical (text, width, size, lh)
+/// shapes identically, so steady-state frames hit instead of
+/// re-running swash per node per frame. Same 512-entry wholesale
+/// eviction as the ink/trim caches. Cloned on hit (cheap vs raster).
+type RasterCache =
+    std::sync::Mutex<std::collections::HashMap<(String, u32, u32, Option<u32>), Vec<RasterGlyph>>>;
+static RASTER_CACHE: std::sync::OnceLock<RasterCache> = std::sync::OnceLock::new();
+
+pub fn rasterize_cached(
+    text: &str,
+    max_width: f32,
+    font_size: f32,
+    line_height: Option<f32>,
+) -> Vec<RasterGlyph> {
+    let key = (
+        text.to_string(),
+        max_width.to_bits(),
+        font_size.to_bits(),
+        line_height.map(|v| v.to_bits()),
+    );
+    let cache =
+        RASTER_CACHE.get_or_init(|| std::sync::Mutex::new(std::collections::HashMap::new()));
+    if let Some(hit) = cache.lock().expect("raster cache").get(&key) {
+        return hit.clone();
+    }
+    let v = rasterize_layout(&TextLayout::new(text, max_width, font_size, line_height));
+    let mut c = cache.lock().expect("raster cache");
+    if c.len() >= 512 {
+        c.clear();
+    }
+    c.insert(key, v.clone());
+    v
+}
+
 /// Rasterize owned positioned runs (CPU path). The swash `FontRef`
 /// borrows the Arc-backed font data owned by each `TextRun`, so this
 /// is lifetime-clean for both CPU and GPU consumers.

@@ -176,6 +176,8 @@ struct SnapshotArgs {
     conn: Conn,
     /// PNG path. Defaults to target/hamesh-ext-snapshot.png.
     path: Option<String>,
+    /// Component id: paint its diagnostic guides into this capture only.
+    overlay: Option<String>,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -270,13 +272,19 @@ impl HameshMcp {
     }
 
     /// Render the current frame to a PNG; replies with the path + revs.
+    /// With `overlay` set to a component id, paints that component's
+    /// diagnostic guides into the capture only.
     #[tool(name = "hamesh_snapshot")]
     async fn snapshot(&self, p: Parameters<SnapshotArgs>) -> CallToolResult {
         let a = p.0;
         let path = a
             .path
             .unwrap_or_else(|| "target/hamesh-ext-snapshot.png".to_string());
-        call("snapshot", serde_json::json!({"path": path}), a.conn).await
+        let mut v = serde_json::json!({"path": path});
+        if let Some(id) = a.overlay {
+            v["overlay"] = serde_json::Value::String(id);
+        }
+        call("snapshot", v, a.conn).await
     }
 
     /// Block until app_rev changes or timeout_ms elapses (default 5000).

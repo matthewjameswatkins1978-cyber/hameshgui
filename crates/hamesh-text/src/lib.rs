@@ -31,6 +31,44 @@ pub fn run_oy(node_h: f32, text_empty: bool, natural_h: f32) -> f32 {
     };
     ((node_h - lh) / 2.0).max(0.0)
 }
+
+/// Horizontal text alignment contract (single-line controls).
+/// Start/Center/End position the shaped advance inside the content
+/// box; multiline nodes always use Start.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum HAlign {
+    Start,
+    Center,
+    End,
+}
+
+/// Parse a `halign` prop; unknown or missing values are Start.
+/// (Explicit fallback keeps old screens stable by construction.)
+pub fn parse_halign(s: Option<&str>) -> HAlign {
+    match s {
+        Some("center") => HAlign::Center,
+        Some("end") => HAlign::End,
+        _ => HAlign::Start,
+    }
+}
+
+/// Resolve the node-local glyph-run x origin for single-line text.
+/// Effective inset `E = max(pad, TEXT_INSET_X)`: padding the host
+/// asked for, but never less than bearing protection, so Start
+/// rendering is pixel-identical to the historical fixed origin.
+/// Center/End use the shaped advance (never the ink silhouette,
+/// which would jump with content): Center lands exactly centered
+/// for any pad. Overflow (advance wider than content) extends past
+/// the content edge and clips at the node rect.
+pub fn align_origin_x(align: HAlign, pad: f32, node_w: f32, advance: f32) -> f32 {
+    let e = pad.max(TEXT_INSET_X);
+    let content_w = (node_w - 2.0 * e).max(0.0);
+    match align {
+        HAlign::Start => e,
+        HAlign::Center => e + (content_w - advance) / 2.0,
+        HAlign::End => node_w - e - advance,
+    }
+}
 pub use glue::{glyph_origin, proof_png, rasterize_layout, rasterize_parley, RasterGlyph};
 
 #[derive(Clone, Debug, PartialEq)]
@@ -45,6 +83,17 @@ pub struct TextMetrics {
 }
 
 pub const SAMPLE: &str = "Hello Hamesh — the Eye and the Hand 世界";
+
+// Shared shaping contexts (thread-local): `FontContext::new` scans
+// system fonts, which dominated frame time when built per layout
+// (~900ms/frame for the dashboard). Layouts still own their data
+// (Arc-backed), so sharing contexts changes nothing observable.
+thread_local! {
+    static FONT_CX: std::cell::RefCell<FontContext> =
+        std::cell::RefCell::new(FontContext::new());
+    static LAYOUT_CX: std::cell::RefCell<LayoutContext<peniko::Brush>> =
+        std::cell::RefCell::new(LayoutContext::new());
+}
 
 /// Owned parley layout: safe to hand to CPU (swash) and GPU (vello)
 /// consumers. The `Layout` owns its font data (Arc-backed), so no
@@ -68,18 +117,22 @@ impl TextLayout {
     /// preferred metrics. Builders declare it from the type ramp so
     /// tokens and rendering agree; legacy nodes omit it.
     pub fn new(text: &str, max_width: f32, font_size: f32, line_height: Option<f32>) -> Self {
-        let mut fcx = FontContext::new();
-        let mut lcx: LayoutContext<peniko::Brush> = LayoutContext::new();
-        let mut builder = lcx.ranged_builder(&mut fcx, text, 1.0, false);
-        builder.push_default(StyleProperty::FontSize(font_size));
-        if let Some(lh) = line_height {
-            builder.push_default(StyleProperty::LineHeight(
-                parley::style::LineHeight::Absolute(lh),
-            ));
-        }
-        let mut layout = builder.build(text);
-        layout.break_all_lines(Some(max_width));
-        Self { layout }
+        FONT_CX.with(|fcx| {
+            LAYOUT_CX.with(|lcx| {
+                let mut fcx = fcx.borrow_mut();
+                let mut lcx = lcx.borrow_mut();
+                let mut builder = lcx.ranged_builder(&mut fcx, text, 1.0, false);
+                builder.push_default(StyleProperty::FontSize(font_size));
+                if let Some(lh) = line_height {
+                    builder.push_default(StyleProperty::LineHeight(
+                        parley::style::LineHeight::Absolute(lh),
+                    ));
+                }
+                let mut layout = builder.build(text);
+                layout.break_all_lines(Some(max_width));
+                Self { layout }
+            })
+        })
     }
 
     pub fn width(&self) -> f32 {
@@ -100,6 +153,12 @@ impl TextLayout {
     /// baseline alignment checks (the CorelDRAW-style invisible lines).
     pub fn first_baseline(&self) -> Option<f32> {
         self.layout.lines().next().map(|l| l.metrics().baseline)
+    }
+
+    /// Dominant paragraph direction from parley's own BiDi analysis
+    /// (BaseDirection::Auto infers it). Start/End resolve against it.
+    pub fn is_rtl(&self) -> bool {
+        self.layout.is_rtl()
     }
 
     /// Owned per-run positioned glyphs. Coordinates are layout-absolute
@@ -286,6 +345,35 @@ pub fn trim_box(
     font_size: f32,
     line_height: Option<f32>,
 ) -> Option<FontTrim> {
+    let key = (
+        text.to_string(),
+        max_width.to_bits(),
+        font_size.to_bits(),
+        line_height.map(|v| v.to_bits()),
+    );
+    let cache = TRIM_CACHE.get_or_init(|| std::sync::Mutex::new(std::collections::HashMap::new()));
+    if let Some(hit) = cache.lock().expect("trim cache").get(&key) {
+        return *hit;
+    }
+    let v = trim_uncached(text, max_width, font_size, line_height);
+    let mut c = cache.lock().expect("trim cache");
+    if c.len() >= 512 {
+        c.clear();
+    }
+    c.insert(key, v);
+    v
+}
+
+type TrimCache =
+    std::sync::Mutex<std::collections::HashMap<(String, u32, u32, Option<u32>), Option<FontTrim>>>;
+static TRIM_CACHE: std::sync::OnceLock<TrimCache> = std::sync::OnceLock::new();
+
+fn trim_uncached(
+    text: &str,
+    max_width: f32,
+    font_size: f32,
+    line_height: Option<f32>,
+) -> Option<FontTrim> {
     if text.trim().is_empty() {
         return None;
     }
@@ -415,6 +503,38 @@ mod tests {
         // Descenders extend ink below the baseline.
         let desc = ink_box("Inspected", 400.0, 13.0, None).expect("ink");
         assert!(desc.y1 > desc.baseline, "p tail should pass the baseline");
+    }
+
+    #[test]
+    fn halign_centers_arbitrary_labels() {
+        // Live badge numbers: rect w=95 pad=8, advance 62.88.
+        let x = align_origin_x(HAlign::Center, 8.0, 95.0, 62.88);
+        assert!((x - 16.06).abs() < 0.01, "badge origin {x}");
+        // Right gap equals left gap: actually centered.
+        assert!(((95.0 - (x + 62.88)) - x).abs() < 0.01, "badge symmetric");
+        // Start is the historical fixed origin for any pad.
+        assert_eq!(align_origin_x(HAlign::Start, 0.0, 200.0, 50.0), 8.0);
+        assert_eq!(align_origin_x(HAlign::Start, 8.0, 95.0, 62.88), 8.0);
+        assert_eq!(align_origin_x(HAlign::Start, 16.0, 200.0, 50.0), 16.0);
+        // End mirrors Start against the right content edge.
+        assert_eq!(
+            align_origin_x(HAlign::End, 8.0, 116.0, 82.0),
+            116.0 - 8.0 - 82.0
+        );
+        // Unknown props fall back to Start (old screens unchanged).
+        assert_eq!(parse_halign(None), HAlign::Start);
+        assert_eq!(parse_halign(Some("center")), HAlign::Center);
+        assert_eq!(parse_halign(Some("end")), HAlign::End);
+        assert_eq!(parse_halign(Some("middle")), HAlign::Start);
+        // Center is exact for any pad, including pad < inset.
+        for pad in [0.0f32, 4.0, 8.0, 16.0] {
+            let e = pad.max(TEXT_INSET_X);
+            let x = align_origin_x(HAlign::Center, pad, 200.0, 60.0);
+            assert!(
+                ((x - e) + 30.0 - (200.0 - 2.0 * e) / 2.0).abs() < 0.01,
+                "pad {pad}: {x}"
+            );
+        }
     }
 
     #[test]

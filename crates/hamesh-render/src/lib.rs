@@ -12,6 +12,91 @@ use tiny_skia::{
 
 pub mod icons;
 
+/// Diagnostic overlay: CorelDRAW-style guides for one inspected node,
+/// drawn as a pure pixmap post-pass. Only ever applied to an explicit
+/// diagnostic capture — never to normal rendering, hit-testing, state
+/// or exported artwork. Every guide derives from the scene's resolved
+/// geometry (the same values the Eye reports), so the image and the
+/// geometry record cannot disagree.
+pub mod overlay {
+    use super::*;
+
+    fn dot(pix: &mut Pixmap, x: i32, y: i32, rgba: [u8; 4]) {
+        if x < 0 || y < 0 || x >= pix.width() as i32 || y >= pix.height() as i32 {
+            return;
+        }
+        let mut p = Paint::default();
+        p.set_color(Color::from_rgba8(rgba[0], rgba[1], rgba[2], 255));
+        if let Some(r) = SkRect::from_xywh(x as f32, y as f32, 1.0, 1.0) {
+            pix.fill_rect(r, &p, Transform::identity(), None);
+        }
+    }
+
+    fn rect_outline(pix: &mut Pixmap, r: [f32; 4], rgba: [u8; 4]) {
+        let (x0, y0, x1, y1) = (r[0] as i32, r[1] as i32, r[2] as i32, r[3] as i32);
+        for x in x0..=x1 {
+            dot(pix, x, y0, rgba);
+            dot(pix, x, y1, rgba);
+        }
+        for y in y0..=y1 {
+            dot(pix, x0, y, rgba);
+            dot(pix, x1, y, rgba);
+        }
+    }
+
+    fn hline(pix: &mut Pixmap, x0: i32, x1: i32, y: i32, rgba: [u8; 4]) {
+        for x in x0.min(x1)..=x0.max(x1) {
+            dot(pix, x, y, rgba);
+        }
+    }
+
+    fn vline(pix: &mut Pixmap, x: i32, y0: i32, y1: i32, rgba: [u8; 4]) {
+        for y in y0.min(y1)..=y0.max(y1) {
+            dot(pix, x, y, rgba);
+        }
+    }
+
+    /// Paint guides for `node` (screen space = node-local + rect
+    /// origin). No-ink / no-trim nodes still get bounds + content.
+    pub fn draw_guides(pix: &mut Pixmap, node: &hamesh_scene::SceneNode) {
+        const BOUNDS: [u8; 4] = [235, 245, 243, 255];
+        const CONTENT: [u8; 4] = [122, 142, 140, 255];
+        const TRIM: [u8; 4] = [120, 220, 200, 255];
+        const INK: [u8; 4] = [218, 170, 84, 255];
+        const GUIDE: [u8; 4] = [110, 170, 255, 255];
+        let (ox, oy) = (node.rect.x, node.rect.y);
+        let at = |b: [f32; 4]| [b[0] + ox, b[1] + oy, b[2] + ox, b[3] + oy];
+        rect_outline(
+            pix,
+            [ox, oy, ox + node.rect.w - 1.0, oy + node.rect.h - 1.0],
+            BOUNDS,
+        );
+        rect_outline(pix, at(node.content), CONTENT);
+        // Ink first, trim over it: where observation meets contract,
+        // the contract wins the pixel.
+        if let Some(b) = node.ink {
+            rect_outline(pix, at(b), INK);
+        }
+        if let Some(t) = node.trim {
+            rect_outline(pix, at(t), TRIM);
+        }
+        if let Some(base) = node.baseline {
+            hline(
+                pix,
+                ox as i32,
+                (ox + node.rect.w) as i32,
+                (oy + base) as i32,
+                GUIDE,
+            );
+        }
+        // Content-centre cross: the alignment target.
+        let cx = (node.content[0] + node.content[2]) / 2.0 + ox;
+        let cy = (node.content[1] + node.content[3]) / 2.0 + oy;
+        vline(pix, cx as i32, oy as i32, (oy + node.rect.h) as i32, GUIDE);
+        hline(pix, ox as i32, (ox + node.rect.w) as i32, cy as i32, GUIDE);
+    }
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct FrameRef {
     pub scene_revision: u64,
@@ -26,12 +111,9 @@ pub struct Frame {
 }
 
 /// Blit parley/swash glyph coverage for a node's text, clipped to the
-/// node's own rect so text never bleeds into siblings. Glyphs are
-/// placed from the scene trim box (font-relative optical centering):
-/// the run origin shifts so the cap-to-baseline trim — not the line
-/// box, never the per-string ink silhouette — sits centered. Stable
-/// across Connected/Disconnected by construction. The caret stays
-/// line-anchored for editing affordance.
+/// node's own rect so text never bleeds into siblings. Placement is
+/// the scene's resolved origin, verbatim — this function performs no
+/// positioning math of its own (one geometry contract, §H2).
 fn blit_text(pix: &mut Pixmap, node: &hamesh_scene::SceneNode) {
     let avail_w = (node.rect.w - 2.0 * hamesh_text::TEXT_INSET_X).max(8.0);
     // Same wrap rule as scene build: single-line nodes lay out
@@ -50,16 +132,12 @@ fn blit_text(pix: &mut Pixmap, node: &hamesh_scene::SceneNode) {
         layout.height().max(1.0)
     };
     let oy_line = node.rect.y + ((node.rect.h - line_h) / 2.0).max(0.0);
-    let ox = node.rect.x + hamesh_text::TEXT_INSET_X;
-    // Optical shift: trim center onto box center (0 when no trim:
-    // empty text, wrapped text, icon-only nodes).
-    let shift = match node.trim {
-        Some([_, y0, _, y1]) => node.rect.h / 2.0 - (y0 + y1) / 2.0,
-        None => 0.0,
-    };
-    let oy = oy_line + shift;
+    // Resolved origin from the scene (halign + inset + optical shift).
+    let (ox, oy) = (node.rect.x + node.origin[0], node.rect.y + node.origin[1]);
     let glyphs = if layout.height() > 0.0 {
-        hamesh_text::rasterize_layout(&layout)
+        // Cached raster: identical text shapes identically, so steady
+        // frames skip swash (the layout above is only for the line box).
+        hamesh_text::glue::rasterize_cached(&node.text, wrap_w, node.font_size, node.line_height)
     } else {
         Vec::new()
     };
@@ -140,6 +218,57 @@ fn rounded_path(rect: &hamesh_layout::Rect, radius: f32) -> Option<Path> {
 pub fn render(scene: &Scene) -> Frame {
     let w = scene.viewport_w.max(1.0) as u32;
     let h = scene.viewport_h.max(1.0) as u32;
+    // Steady-state frames are identical: same revisions + viewport =
+    // same pixels. Skip the whole paint on repeat (bounded LRU).
+    // Correctness: the key covers everything paint reads from the
+    // scene (revisions bind app+scene truth, size binds the frame).
+    let key = (scene.scene_revision, scene.app_revision, w, h);
+    {
+        let cache =
+            FRAME_CACHE.get_or_init(|| std::sync::Mutex::new(std::collections::VecDeque::new()));
+        if let Some(pix) = cache
+            .lock()
+            .expect("frame cache")
+            .iter()
+            .find(|(k, _)| *k == key)
+            .map(|(_, p)| p.clone())
+        {
+            return Frame {
+                frame_ref: FrameRef {
+                    scene_revision: scene.scene_revision,
+                    app_revision: scene.app_revision,
+                    width: w,
+                    height: h,
+                },
+                pixmap: pix,
+            };
+        }
+    }
+    let pix = render_uncached(scene, w, h);
+    {
+        let cache =
+            FRAME_CACHE.get_or_init(|| std::sync::Mutex::new(std::collections::VecDeque::new()));
+        let mut c = cache.lock().expect("frame cache");
+        while c.len() >= 4 {
+            c.pop_front();
+        }
+        c.push_back((key, pix.clone()));
+    }
+    Frame {
+        frame_ref: FrameRef {
+            scene_revision: scene.scene_revision,
+            app_revision: scene.app_revision,
+            width: w,
+            height: h,
+        },
+        pixmap: pix,
+    }
+}
+
+type FrameCache = std::sync::Mutex<std::collections::VecDeque<((u64, u64, u32, u32), Pixmap)>>;
+static FRAME_CACHE: std::sync::OnceLock<FrameCache> = std::sync::OnceLock::new();
+
+fn render_uncached(scene: &Scene, w: u32, h: u32) -> Pixmap {
     let mut pix = Pixmap::new(w, h).expect("pixmap");
     // Background.
     pix.fill(Color::from_rgba8(10, 15, 17, 255));
@@ -262,15 +391,7 @@ pub fn render(scene: &Scene) -> Frame {
         blit_text(&mut pix, node);
     }
 
-    Frame {
-        frame_ref: FrameRef {
-            scene_revision: scene.scene_revision,
-            app_revision: scene.app_revision,
-            width: w,
-            height: h,
-        },
-        pixmap: pix,
-    }
+    pix
 }
 
 pub fn save_png(frame: &Frame, path: &str) -> Result<(), String> {
@@ -373,8 +494,9 @@ mod tests {
         assert!(node.focused);
         assert_eq!(node.caret_x, Some(10.0));
         let f = render(&scene);
-        // Caret bar: x in [ox+10, ox+12), spanning the node height.
-        let ox = node.rect.x + 8.0;
+        // Caret bar: x in [ox+10, ox+12) at the scene-resolved origin
+        // (composer pad 12: origin x = 12, not the old fixed 8).
+        let ox = node.rect.x + node.origin[0];
         let mut caret_pixels = 0;
         let data = f.pixmap.data();
         let w = f.pixmap.width() as usize;
@@ -397,6 +519,50 @@ mod tests {
         let o = (y * pix.width() as usize + x) * 4;
         let d = pix.data();
         [d[o], d[o + 1], d[o + 2], d[o + 3]]
+    }
+
+    #[test]
+    fn overlay_guides_match_reported_geometry() {
+        // H3 contract: guides derive from the scene's resolved geometry
+        // (the same values the Eye reports); normal rendering stays
+        // overlay-free. Bounds corner pixel carries the guide color in
+        // the diagnostic frame and the surface color in the clean one.
+        let mut app = App::new("win");
+        app.add(
+            "win",
+            Component::new("b", Role::Status, "badge")
+                .with_prop("text", "Connected")
+                .with_prop("font_size", "13")
+                .with_prop("lh", "18")
+                .with_prop("pad", "8")
+                .with_prop("w", "200")
+                .with_prop("halign", "center"),
+        );
+        let layout = hamesh_layout::compute(&app, 800.0, 600.0);
+        let scene = hamesh_scene::build(&app, &layout, 1);
+        let node = scene.nodes.iter().find(|n| n.id == "b").unwrap();
+        let clean = render(&scene);
+        let (cx, cy) = (node.rect.x as usize, node.rect.y as usize);
+        assert_ne!(
+            px(&clean.pixmap, cx, cy),
+            [235, 245, 243, 255],
+            "clean frame must be overlay-free"
+        );
+        let mut diag = render(&scene);
+        overlay::draw_guides(&mut diag.pixmap, node);
+        assert_eq!(
+            px(&diag.pixmap, cx, cy),
+            [235, 245, 243, 255],
+            "bounds guide missing at reported rect"
+        );
+        // Trim guide (teal) sits at the reported trim top edge.
+        let t = node.trim.expect("trim");
+        let (tx, ty) = ((node.rect.x + t[0]) as usize, (node.rect.y + t[1]) as usize);
+        assert_eq!(
+            px(&diag.pixmap, tx + 4, ty),
+            [120, 220, 200, 255],
+            "trim guide missing at reported trim"
+        );
     }
 
     #[test]
@@ -521,6 +687,59 @@ mod tests {
         assert!(
             stroke_pixels > 20,
             "users glyph missing: {stroke_pixels} ink pixels"
+        );
+    }
+
+    #[test]
+    fn centered_label_paints_centered() {
+        // Standing anti-regression: a centered control must paint its
+        // ink centered, not left-biased. Ink centroid x within 1.5px
+        // of box center; left and right gaps agree within 2px.
+        let mut app = App::new("win");
+        app.add(
+            "win",
+            Component::new("b", Role::Status, "badge")
+                .with_prop("text", "Connected")
+                .with_prop("font_size", "13")
+                .with_prop("lh", "18")
+                .with_prop("pad", "8")
+                .with_prop("w", "200")
+                .with_prop("halign", "center"),
+        );
+        let layout = hamesh_layout::compute(&app, 800.0, 600.0);
+        let scene = hamesh_scene::build(&app, &layout, 1);
+        let node = scene.nodes.iter().find(|n| n.id == "b").unwrap();
+        let f = render(&scene);
+        let (tw, th) = (f.pixmap.width() as i32, f.pixmap.height() as i32);
+        let (mut sx, mut n) = (0i64, 0i64);
+        let (mut lo, mut hi) = (i32::MAX, i32::MIN);
+        for y in 0..th {
+            for x in 0..tw {
+                let o = ((y * tw + x) * 4) as usize;
+                let d = f.pixmap.data();
+                // Text ink: near-white glyph pixels on dark surfaces.
+                if d[o] > 180 && d[o + 1] > 180 && d[o + 2] > 180 {
+                    sx += x as i64;
+                    n += 1;
+                    lo = lo.min(x);
+                    hi = hi.max(x);
+                }
+            }
+        }
+        assert!(n > 50, "no text ink painted");
+        let cx = sx as f32 / n as f32;
+        let box_cx = node.rect.x + node.rect.w / 2.0;
+        assert!(
+            (cx - box_cx).abs() < 1.5,
+            "ink centroid {cx} vs box {box_cx}"
+        );
+        let (lg, rg) = (
+            lo as f32 - node.rect.x,
+            node.rect.x + node.rect.w - hi as f32,
+        );
+        assert!(
+            (lg - rg).abs() < 2.0,
+            "gaps asymmetric: left {lg} right {rg}"
         );
     }
 }

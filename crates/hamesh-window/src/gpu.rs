@@ -179,16 +179,12 @@ fn draw_text(
     node: &hamesh_scene::SceneNode,
     layout: Option<&hamesh_text::TextLayout>,
 ) {
-    // Empty text still lays out nothing, but the caret needs a line box.
-    // Glyphs ride the font-relative trim (mirrors the CPU renderer);
-    // the caret stays line-anchored at dy_line.
+    // Placement is the scene's resolved origin, verbatim — no local
+    // positioning math (one geometry contract, §H2). The caret stays
+    // line-anchored at dy_line (mirrors the CPU renderer).
     let lh = layout.map(|l| l.height()).unwrap_or(0.0).max(18.0);
     let dy_line = node.rect.y + ((node.rect.h - lh) / 2.0).max(0.0);
-    let shift = match node.trim {
-        Some([_, y0, _, y1]) => node.rect.h / 2.0 - (y0 + y1) / 2.0,
-        None => 0.0,
-    };
-    let dy = dy_line + shift;
+    let (dx, dy) = (node.rect.x + node.origin[0], node.rect.y + node.origin[1]);
     let brush = Brush::Solid(node_color(node.text_rgba));
     if let Some(layout) = layout {
         for run in layout.runs() {
@@ -196,7 +192,7 @@ fn draw_text(
                 .font_size(run.size)
                 .hint(true)
                 .brush(&brush)
-                .transform(Affine::translate(((node.rect.x + 8.0) as f64, dy as f64)))
+                .transform(Affine::translate((dx as f64, dy as f64)))
                 .draw(
                     Fill::NonZero,
                     run.glyphs.iter().map(|(id, x, y)| vello::Glyph {
@@ -208,13 +204,13 @@ fn draw_text(
         }
     }
     // Caret bar for the focused composer (mirrors the CPU renderer).
-    // Line-anchored at dy_line; glyphs above ride the trim shift.
+    // Line-anchored at dy_line; glyph x follows the resolved origin.
     if node.focused {
         if let Some(cx) = node.caret_x {
             let care = RoundedRect::new(
-                (node.rect.x + 8.0 + cx) as f64,
+                (node.rect.x + node.origin[0] + cx) as f64,
                 dy_line as f64,
-                (node.rect.x + 8.0 + cx + 2.0) as f64,
+                (node.rect.x + node.origin[0] + cx + 2.0) as f64,
                 (dy + lh.max(8.0)) as f64,
                 1.0,
             );
