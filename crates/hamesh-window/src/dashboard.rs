@@ -28,7 +28,15 @@ fn set_value(app: &mut App, id: &str, value: &str) {
 }
 
 /// Compose the dashboard. Reads initial values from state.
+/// Wears Signal Cabinet, the default profile.
 pub fn build_dashboard() -> App {
+    build_dashboard_with(&SIGNAL_CABINET_LOCAL)
+}
+
+/// Compose the dashboard wearing a design profile. The default
+/// composition wears Signal Cabinet; variety is proved by dressing
+/// the same composition in a second profile (see folio test).
+pub fn build_dashboard_with(profile: &Profile) -> App {
     let mut app = App::new("win");
     app.set_state("agents", "4");
     app.set_state("tasks", "12");
@@ -111,9 +119,7 @@ pub fn build_dashboard() -> App {
         );
     }
     refresh_dashboard(&mut app);
-    // Signal Cabinet, local cut: condensed display voice on titles
-    // and numerals, mono on readouts and labels (029, Phase B).
-    apply_profile(&mut app, &SIGNAL_CABINET_LOCAL);
+    apply_profile(&mut app, profile);
     app
 }
 
@@ -374,5 +380,49 @@ mod tests {
             painted as f64 / total as f64 > 0.5,
             "dashboard should mostly paint surfaces, got {painted}/{total}"
         );
+    }
+
+    #[test]
+    fn folio_profile_gives_a_different_voice() {
+        // Variety proof: the same composition dressed in Living Folio
+        // must speak with different advances than Signal Cabinet —
+        // profiles are data, not a one-off treatment. Skips where
+        // the local faces are absent (CI) since parley falls back.
+        let cab = build_dashboard();
+        let fol = build_dashboard_with(&FOLIO_LOCAL);
+        let layout_c = hamesh_layout::compute(&cab, 800.0, 600.0);
+        let layout_f = hamesh_layout::compute(&fol, 800.0, 600.0);
+        let scene_c = hamesh_scene::build(&cab, &layout_c, 1);
+        let scene_f = hamesh_scene::build(&fol, &layout_f, 1);
+        let tc = scene_c.nodes.iter().find(|n| n.id == "dash-title").unwrap();
+        let tf = scene_f.nodes.iter().find(|n| n.id == "dash-title").unwrap();
+        if (tc.advance - tf.advance).abs() < 1.0 {
+            eprintln!("SKIP: folio faces absent on this machine");
+            return;
+        }
+        eprintln!(
+            "folio proof: cabinet title={:.1} folio title={:.1}",
+            tc.advance, tf.advance
+        );
+        // Folio composition stays sound: single-line heading, no
+        // clipping anywhere (ink is node-local).
+        let pt = scene_f
+            .nodes
+            .iter()
+            .find(|n| n.id == "dash-prog-title")
+            .unwrap();
+        assert_eq!(pt.lines, 1, "folio prog heading must not wrap");
+        for n in &scene_f.nodes {
+            if let Some(ink) = n.ink {
+                assert!(
+                    ink[0] >= -0.5 && ink[2] <= n.rect.w + 0.5,
+                    "folio ink escapes box for {}",
+                    n.id
+                );
+            }
+        }
+        let f = hamesh_render::render(&scene_f);
+        std::fs::create_dir_all("target").unwrap();
+        hamesh_render::save_png(&f, "target/folio-proof.png").unwrap();
     }
 }

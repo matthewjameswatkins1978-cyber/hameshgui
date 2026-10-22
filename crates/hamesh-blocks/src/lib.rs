@@ -620,6 +620,21 @@ pub const SIGNAL_CABINET_LOCAL: Profile = Profile {
     },
 };
 
+/// Living Folio, local cut: Palatino standing in for Newsroom/
+/// Newsreader display, Courier New for the technical margin voice.
+/// Same mechanism as the Cabinet, opposite character — the pair
+/// proves profiles are data, not a one-off treatment.
+pub const FOLIO_LOCAL: Profile = Profile {
+    display: Voice {
+        family: "Palatino Linotype",
+        vars: "",
+    },
+    technical: Voice {
+        family: "Courier New",
+        vars: "",
+    },
+};
+
 /// Voice a whole composition: Title + MetricValue speak display,
 /// Caption + MetricLabel speak technical. Everything else keeps
 /// the default face. Idempotent: re-applying changes nothing.
