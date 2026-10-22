@@ -49,7 +49,7 @@ pub fn rasterize_parley(text: &str, max_width: f32) -> Vec<RasterGlyph> {
 /// re-running swash per node per frame. Same 512-entry wholesale
 /// eviction as the ink/trim caches. Cloned on hit (cheap vs raster).
 type RasterCache = std::sync::Mutex<
-    std::collections::HashMap<(String, u32, u32, Option<u32>, u64), Vec<RasterGlyph>>
+    std::collections::HashMap<(String, u32, u32, Option<u32>, u64), Vec<RasterGlyph>>,
 >;
 static RASTER_CACHE: std::sync::OnceLock<RasterCache> = std::sync::OnceLock::new();
 
@@ -72,7 +72,13 @@ pub fn rasterize_cached(
     if let Some(hit) = cache.lock().expect("raster cache").get(&key) {
         return hit.clone();
     }
-    let v = rasterize_layout(&TextLayout::new_varied(text, max_width, font_size, line_height, spec));
+    let v = rasterize_layout(&TextLayout::new_varied(
+        text,
+        max_width,
+        font_size,
+        line_height,
+        spec,
+    ));
     let mut c = cache.lock().expect("raster cache");
     if c.len() >= 512 {
         c.clear();

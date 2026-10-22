@@ -169,7 +169,13 @@ impl TextLayout {
     /// preferred metrics. Builders declare it from the type ramp so
     /// tokens and rendering agree; legacy nodes omit it.
     pub fn new(text: &str, max_width: f32, font_size: f32, line_height: Option<f32>) -> Self {
-        Self::new_varied(text, max_width, font_size, line_height, &FontSpec::default())
+        Self::new_varied(
+            text,
+            max_width,
+            font_size,
+            line_height,
+            &FontSpec::default(),
+        )
     }
 
     /// Lay out text with the given font selection: optional family plus
@@ -340,7 +346,7 @@ fn ink_uncached(
 /// live frames re-query the same strings constantly. 512 entries,
 /// cleared wholesale when full (simplest correct eviction).
 type InkCache = std::sync::Mutex<
-    std::collections::HashMap<(String, u32, u32, Option<u32>, u64), Option<InkBox>>
+    std::collections::HashMap<(String, u32, u32, Option<u32>, u64), Option<InkBox>>,
 >;
 static INK_CACHE: std::sync::OnceLock<InkCache> = std::sync::OnceLock::new();
 
@@ -456,7 +462,7 @@ pub fn trim_box(
 }
 
 type TrimCache = std::sync::Mutex<
-    std::collections::HashMap<(String, u32, u32, Option<u32>, u64), Option<FontTrim>>
+    std::collections::HashMap<(String, u32, u32, Option<u32>, u64), Option<FontTrim>>,
 >;
 static TRIM_CACHE: std::sync::OnceLock<TrimCache> = std::sync::OnceLock::new();
 
@@ -592,7 +598,10 @@ mod tests {
             ink.y1
         );
         // Cached call agrees.
-        assert_eq!(ink_box("Connected", 400.0, 13.0, None, &FontSpec::default()), Some(ink));
+        assert_eq!(
+            ink_box("Connected", 400.0, 13.0, None, &FontSpec::default()),
+            Some(ink)
+        );
         // Descenders extend ink below the baseline.
         let desc = ink_box("Inspected", 400.0, 13.0, None, &FontSpec::default()).expect("ink");
         assert!(desc.y1 > desc.baseline, "p tail should pass the baseline");
@@ -705,7 +714,10 @@ mod tests {
 
     #[test]
     fn font_spec_parse_keeps_valid_axes_drops_garbage() {
-        let s = FontSpec::parse(Some("Bahnschrift"), Some("wdth 75, bogus, opsz nope, toolongtag 1, wght 700"));
+        let s = FontSpec::parse(
+            Some("Bahnschrift"),
+            Some("wdth 75, bogus, opsz nope, toolongtag 1, wght 700"),
+        );
         assert_eq!(s.family.as_deref(), Some("Bahnschrift"));
         assert_eq!(s.vars, vec![(*b"wdth", 75.0), (*b"wght", 700.0)]);
         let empty = FontSpec::parse(None, None);

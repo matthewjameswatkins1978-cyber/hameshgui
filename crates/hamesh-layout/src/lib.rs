@@ -63,8 +63,13 @@ fn measure_text(
             })
             .fold(0.0, f32::max),
     };
-    let lay =
-        hamesh_text::TextLayout::new_varied(&tm.text, max_w.max(0.0), tm.font_size, lh, &tm.shaping);
+    let lay = hamesh_text::TextLayout::new_varied(
+        &tm.text,
+        max_w.max(0.0),
+        tm.font_size,
+        lh,
+        &tm.shaping,
+    );
     // Pixel containment: fractional advances need the next whole pixel
     // (raster floors origins). Without ceil, rect.w - inset can land a
     // fraction short of the advance and paint wraps what layout kept

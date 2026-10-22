@@ -198,14 +198,26 @@ pub fn build(app: &App, layout: &LayoutOutput, scene_revision: u64) -> Scene {
             // Wrap rule shared with both renderers: wrap iff the final
             // width wraps. Single-line nodes lay out unwrapped so paint
             // can never re-wrap what layout kept whole.
-            let avail_lines =
-                hamesh_text::TextLayout::new_varied(&text, avail_w, font_size, line_height, &font_spec).line_count();
+            let avail_lines = hamesh_text::TextLayout::new_varied(
+                &text,
+                avail_w,
+                font_size,
+                line_height,
+                &font_spec,
+            )
+            .line_count();
             let wrap_w = if text.is_empty() || avail_lines <= 1 {
                 f32::INFINITY
             } else {
                 avail_w
             };
-            let lay = hamesh_text::TextLayout::new_varied(&text, wrap_w, font_size, line_height, &font_spec);
+            let lay = hamesh_text::TextLayout::new_varied(
+                &text,
+                wrap_w,
+                font_size,
+                line_height,
+                &font_spec,
+            );
             let oy = hamesh_text::run_oy(l.rect.h, text.is_empty(), lay.height());
             let advance = hamesh_text::trim_box(&text, wrap_w, font_size, line_height, &font_spec)
                 .map(|t| t.advance)
@@ -227,7 +239,8 @@ pub fn build(app: &App, layout: &LayoutOutput, scene_revision: u64) -> Scene {
             };
             let tx = hamesh_text::align_origin_x(eff_align, pad, l.rect.w, advance);
             // Optical vertical shift from the final trim (None-safe).
-            let ty = match hamesh_text::trim_box(&text, wrap_w, font_size, line_height, &font_spec) {
+            let ty = match hamesh_text::trim_box(&text, wrap_w, font_size, line_height, &font_spec)
+            {
                 Some(t) => {
                     let (y0, y1) = (t.top + oy, t.bottom + oy);
                     oy + (l.rect.h / 2.0 - (y0 + y1) / 2.0)
@@ -366,8 +379,7 @@ mod tests {
             vars: vec![(*b"wdth", 75.0)],
         };
         let direct =
-            hamesh_text::trim_box("Connected", f32::INFINITY, 13.0, None, &spec)
-                .expect("trim");
+            hamesh_text::trim_box("Connected", f32::INFINITY, 13.0, None, &spec).expect("trim");
         assert!(
             (n.advance - direct.advance).abs() < 0.01,
             "scene advance {} vs API {}",
