@@ -93,6 +93,38 @@ thread_local! {
         std::cell::RefCell::new(FontContext::new());
     static LAYOUT_CX: std::cell::RefCell<LayoutContext<peniko::Brush>> =
         std::cell::RefCell::new(LayoutContext::new());
+    static FONTS_LOADED: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// Directory holding Hamesh's vendored OFL profile faces
+/// (`assets/fonts` at the workspace root). Tests and apps resolve
+/// it from here so every crate shares one path.
+pub fn bundled_fonts_dir() -> std::path::PathBuf {
+    std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../assets/fonts")
+}
+
+/// Register additional fonts (e.g. [`bundled_fonts_dir`]) with this
+/// thread's shaping context. Must run before first shape on the
+/// thread; each thread loads once (guarded), so tests call this
+/// freely. Returns families added on the calling thread.
+pub fn register_fonts_from_dir(dir: &std::path::Path) -> usize {
+    FONT_CX.with(|fcx| {
+        let mut fcx = fcx.borrow_mut();
+        if FONTS_LOADED.get() {
+            return 0;
+        }
+        let before = fcx.collection.family_names().count();
+        fcx.collection.load_fonts_from_paths([dir]);
+        FONTS_LOADED.set(true);
+        fcx.collection.family_names().count().saturating_sub(before)
+    })
+}
+
+/// True when the shaping collection knows this family. False means
+/// shaping falls back — the interface stays correct, and the Eye
+/// reports the substitution via `font_resolved` (family-level).
+pub fn font_family_available(family: &str) -> bool {
+    FONT_CX.with(|fcx| fcx.borrow_mut().collection.family_id(family).is_some())
 }
 
 /// Owned parley layout: safe to hand to CPU (swash) and GPU (vello)
@@ -185,7 +217,7 @@ impl TextLayout {
     }
 
     /// Lay out text with the given font selection: optional family plus
-    /// OpenType variation axes (e.g. family `"Bahnschrift"`,
+    /// OpenType variation axes (e.g. family `"Instrument Sans"`,
     /// `vars: [(b"wdth", 75.0)]`). `FontSpec::default()` keeps the
     /// current behavior (default family, no variations). Axes the
     /// resolved font lacks are ignored by the shaper - check the
@@ -692,12 +724,11 @@ mod tests {
 
     #[test]
     fn variable_axes_reach_shaping_when_supported() {
-        // Phase B groundwork: design profiles need wdth/opsz and
-        // beyond. Shapes one word in Bahnschrift (variable, ships
-        // with Windows) at two widths through the public API.
+        // Design profiles need wdth/opsz and beyond. Shapes one word
+        // in the vendored Instrument Sans (variable) at two widths.
         // Advances MUST differ if family + axes work end to end.
-        // Skips (never fails) where the font is absent - CI makes no
-        // such guarantee, and absence is not a Hamesh defect.
+        // Registered first, so this holds on every machine.
+        register_fonts_from_dir(&bundled_fonts_dir());
         let probe = |wdth: f32| -> f32 {
             TextLayout::new_varied(
                 "Hamburg",
@@ -705,17 +736,17 @@ mod tests {
                 64.0,
                 None,
                 &FontSpec {
-                    family: Some("Bahnschrift".to_string()),
+                    family: Some("Instrument Sans".to_string()),
                     vars: vec![(*b"wdth", wdth)],
                 },
             )
             .width()
         };
         let (narrow, wide) = (probe(75.0), probe(100.0));
-        if (narrow - wide).abs() < 1.0 {
-            eprintln!("SKIP: no variable Bahnschrift on this machine");
-            return;
-        }
+        assert!(
+            (narrow - wide).abs() >= 1.0,
+            "vendored Instrument Sans must resolve, not substitute"
+        );
         assert!(
             narrow < wide,
             "wdth 75 must shape narrower than wdth 100: {narrow} vs {wide}"
@@ -727,17 +758,18 @@ mod tests {
         // Raster follow-up: the scaler must use the run's variation
         // coords, or default-instance outlines crowd into condensed
         // advances. Ink spans must track their own advance, not the
-        // other instance's. Skips where Bahnschrift is absent.
+        // other instance's. Vendored faces are registered first.
+        register_fonts_from_dir(&bundled_fonts_dir());
         let spec = |wdth: Option<f32>| FontSpec {
-            family: Some("Bahnschrift".to_string()),
+            family: Some("Instrument Sans".to_string()),
             vars: wdth.map(|w| vec![(*b"wdth", w)]).unwrap_or_default(),
         };
         let lay = |s: &FontSpec| TextLayout::new_varied("Hamburg", f32::INFINITY, 64.0, None, s);
         let (ld, lv) = (lay(&spec(None)), lay(&spec(Some(75.0))));
-        if (ld.width() - lv.width()).abs() < 1.0 {
-            eprintln!("SKIP: no variable Bahnschrift on this machine");
-            return;
-        }
+        assert!(
+            (ld.width() - lv.width()).abs() >= 1.0,
+            "vendored Instrument Sans must resolve, not substitute"
+        );
         let span = |l: &TextLayout| -> f32 {
             let g = glue::rasterize_layout(l);
             assert!(!g.is_empty(), "expected raster glyphs");
@@ -780,5 +812,23 @@ mod tests {
         assert!(empty.family.is_none() && empty.vars.is_empty());
         // Fingerprint distinguishes shaping configurations.
         assert_ne!(s.fingerprint(), empty.fingerprint());
+    }
+
+    #[test]
+    fn bundled_faces_register_and_resolve() {
+        // The vendored OFL faces must shape identically on every
+        // machine (including CI): register, then every profile
+        // voice resolves and a bogus family does not.
+        let n = register_fonts_from_dir(&bundled_fonts_dir());
+        eprintln!("test fonts: {n} families registered on this thread");
+        for f in [
+            "Barlow Condensed",
+            "IBM Plex Mono",
+            "Newsreader",
+            "Instrument Sans",
+        ] {
+            assert!(font_family_available(f), "missing vendored face {f}");
+        }
+        assert!(!font_family_available("NoSuchFaceXYZ"));
     }
 }

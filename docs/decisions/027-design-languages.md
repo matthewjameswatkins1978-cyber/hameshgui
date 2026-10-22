@@ -111,4 +111,17 @@ structural (width + texture), not decorative.
 
 Variable axes beyond wght (wdth/opsz/SOFT/WONK) need
 fontdb/Parley axis support verified before any profile depends
-on them — flagged as Phase B work, not assumed.
+on them — verified Phase B: shaping, measurement and the CPU
+rasterizer all carry variation coords end to end (regression
+tests prove spans track advances). The three profiles are live
+as `Profile` consts in hamesh-blocks, voiced by OFL faces
+vendored under `assets/fonts` (deterministic on every machine,
+including CI). Substitution is never silent: the Eye reports
+`font_resolved` per node (family-level).
+
+Not yet wired: italic styles (no `font_style` prop — the
+Newsreader Italic face is vendored but unreachable), tracking
+(no letter-spacing prop), SOFT/WONK axes (parsed, untested on a
+live face). Grid-vs-Cabinet reads quiet on the dashboard for
+ exactly this reason — both are condensed grotesques without
+their accents. Wire style/tracking, or accept the restraint.

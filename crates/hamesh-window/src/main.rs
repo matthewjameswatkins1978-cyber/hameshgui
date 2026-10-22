@@ -1070,6 +1070,9 @@ impl HameshWindowApp {
                                 "metrics": n.metrics,
                                 "baseline": n.baseline,
                                 "lines": n.lines,
+                                "font_family": n.font_family,
+                                "font_vars": n.font_vars,
+                                "font_resolved": n.font_resolved,
                             },
                         })
                     })
@@ -1501,6 +1504,10 @@ fn main() {
     // `--smoke-test=N`: open the real window, paint for N seconds, dump
     // Eye evidence (map + PNG + trace), exit 0. Proves the OS window opened
     // and presented frames without needing a human to click around.
+    // Vendored OFL profile faces load before first shape so every
+    // run (and every machine) voices profiles identically.
+    let loaded = hamesh_text::register_fonts_from_dir(&hamesh_text::bundled_fonts_dir());
+    eprintln!("profile fonts: {loaded} families from assets/fonts");
     let smoke_secs: Option<u64> =
         std::env::args().find_map(|a| a.strip_prefix("--smoke-test=").and_then(|v| v.parse().ok()));
     let event_loop = EventLoop::<UserEvent>::with_user_event()

@@ -869,10 +869,12 @@ mod tests {
 
     #[test]
     fn varied_font_renders_narrower_proof() {
-        // End-to-end demonstration: the same label in a variable face
-        // at wdth 75 vs the default face. Advances must differ (else
-        // skip — CI has no such font) and both inks must stay inside
-        // their boxes. Writes target/varied-proof.png for human eyes.
+        // End-to-end demonstration: the same label in the vendored
+        // Instrument Sans at wdth 75 vs the default face. Advances
+        // must differ and both inks must stay inside their boxes.
+        // Registered first, so this holds on every machine. Writes
+        // target/varied-proof.png for human eyes.
+        hamesh_text::register_fonts_from_dir(&hamesh_text::bundled_fonts_dir());
         let mut app = App::new("win");
         app.add(
             "win",
@@ -881,7 +883,7 @@ mod tests {
                 .with_prop("pad", "0")
                 .with_prop("gap", "8"),
         );
-        for (id, font, vars) in [("a", None, ""), ("b", Some("Bahnschrift"), "wdth 75")] {
+        for (id, font, vars) in [("a", None, ""), ("b", Some("Instrument Sans"), "wdth 75")] {
             let mut c = Component::new(id, Role::Status, id)
                 .with_prop("text", "Hamburg")
                 .with_prop("font_size", "40")
@@ -903,10 +905,10 @@ mod tests {
             scene.nodes.iter().find(|n| n.id == "a").unwrap(),
             scene.nodes.iter().find(|n| n.id == "b").unwrap(),
         );
-        if (a.advance - b.advance).abs() < 1.0 {
-            eprintln!("SKIP: no variable Bahnschrift on this machine");
-            return;
-        }
+        assert!(
+            (a.advance - b.advance).abs() >= 1.0,
+            "vendored Instrument Sans must resolve, not substitute"
+        );
         // Advances differ: the wdth axis moved shaping. (No direction is
         // asserted: cross-family width ordering depends on the fallback
         // face. The proof PNG shows the actual difference for human eyes.)

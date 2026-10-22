@@ -605,32 +605,44 @@ pub struct Profile {
     pub technical: Voice,
 }
 
-/// Signal Cabinet, local cut: Bahnschrift Condensed standing in
-/// for Barlow Condensed, Consolas for IBM Plex Mono. The web-font
-/// profiles in docs/decisions/027 are the target; this one proves
-/// the mechanism on faces present on the machine.
-pub const SIGNAL_CABINET_LOCAL: Profile = Profile {
+/// Signal Cabinet: Barlow Condensed display, IBM Plex Mono
+/// technical voice. Condensed bold carries density; mono carries
+/// precision. Faces vendored under assets/fonts (OFL).
+pub const SIGNAL_CABINET: Profile = Profile {
     display: Voice {
-        family: "Bahnschrift",
-        vars: "wdth 75",
+        family: "Barlow Condensed",
+        vars: "",
     },
     technical: Voice {
-        family: "Consolas",
+        family: "IBM Plex Mono",
         vars: "",
     },
 };
 
-/// Living Folio, local cut: Palatino standing in for Newsroom/
-/// Newsreader display, Courier New for the technical margin voice.
-/// Same mechanism as the Cabinet, opposite character — the pair
-/// proves profiles are data, not a one-off treatment.
-pub const FOLIO_LOCAL: Profile = Profile {
+/// Living Folio: Newsreader at display optical size for titles
+/// and numerals, Plex Mono for the margin voice. Optical size
+/// does the expressive work — never fake it by scaling up.
+pub const LIVING_FOLIO: Profile = Profile {
     display: Voice {
-        family: "Palatino Linotype",
-        vars: "",
+        family: "Newsreader",
+        vars: "opsz 72",
     },
     technical: Voice {
-        family: "Courier New",
+        family: "IBM Plex Mono",
+        vars: "",
+    },
+};
+
+/// Unquiet Grid: Instrument Sans narrowed and weighted for
+/// display, Plex Mono technical. Width contrast, not weight
+/// shouting — one family keeps the grid calm.
+pub const UNQUIET_GRID: Profile = Profile {
+    display: Voice {
+        family: "Instrument Sans",
+        vars: "wdth 80, wght 650",
+    },
+    technical: Voice {
+        family: "IBM Plex Mono",
         vars: "",
     },
 };
@@ -712,22 +724,26 @@ mod tests {
                 button(t, "b", "Go", ButtonOpts::new(ButtonVariant::Outline, "go"));
             });
         }
-        apply_profile(&mut app, &SIGNAL_CABINET_LOCAL);
+        apply_profile(&mut app, &SIGNAL_CABINET);
         let t = app.get("t").unwrap();
-        assert_eq!(t.props.get("font").map(|s| s.as_str()), Some("Bahnschrift"));
         assert_eq!(
-            t.props.get("font_vars").map(|s| s.as_str()),
-            Some("wdth 75")
+            t.props.get("font").map(|s| s.as_str()),
+            Some("Barlow Condensed")
         );
+        // Static Bold needs no axis settings.
+        assert!(!t.props.contains_key("font_vars"));
         let cap = app.get("cap").unwrap();
-        assert_eq!(cap.props.get("font").map(|s| s.as_str()), Some("Consolas"));
+        assert_eq!(
+            cap.props.get("font").map(|s| s.as_str()),
+            Some("IBM Plex Mono")
+        );
         assert!(!cap.props.contains_key("font_vars"));
         // Buttons keep the default face.
         let b = app.get("b").unwrap();
         assert!(!b.props.contains_key("font"));
         // Idempotent: a second pass changes nothing.
         let before = app.get("t").unwrap().props.clone();
-        apply_profile(&mut app, &SIGNAL_CABINET_LOCAL);
+        apply_profile(&mut app, &SIGNAL_CABINET);
         assert_eq!(app.get("t").unwrap().props, before);
     }
 

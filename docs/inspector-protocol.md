@@ -38,7 +38,10 @@ Two transports speak it: the `hamesh` CLI (TCP) and `hamesh-mcp`
   `start|center|end`; effective Start/End flip for RTL paragraphs),
   `advance` (shaped advance width), `ink` (raster-ink bounds),
   `trim` (font-relative trim box), `metrics` (ascent/descent/…),
-  `baseline`, `lines`. This is the final truth: both renderers
+  `baseline`, `lines`, `font_family` + `font_vars` (as requested)
+  and `font_resolved` (false when the family was absent and shaping
+  fell back — the interface stays correct, only this flag tells).
+  This is the final truth: both renderers
   and the Eye consume it verbatim.
   Recipe for centered text: `|origin.x + advance/2 −
   (content.left+content.right)/2| < 1.0px` ⇒ centered.
