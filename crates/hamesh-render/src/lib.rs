@@ -215,14 +215,28 @@ fn rounded_path(rect: &hamesh_layout::Rect, radius: f32) -> Option<Path> {
     pb.finish()
 }
 
+/// Content identity for the frame cache. A cache is an optimisation,
+/// never an alternative source of truth: the key must uniquely describe
+/// the thing being cached. Revisions + dimensions do NOT — independent
+/// scenes share them routinely (every headless test builds rev 1 at a
+/// fixed viewport). So the key is a hash over the serialized scene:
+/// every field paint can read is in the identity by construction, and
+/// any future visual field that serializes joins it automatically.
+/// Two scenes share a key only if they paint identically.
+fn fingerprint(scene: &Scene) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let bytes = serde_json::to_vec(scene).expect("scene serializes");
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    bytes.hash(&mut h);
+    h.finish()
+}
+
 pub fn render(scene: &Scene) -> Frame {
     let w = scene.viewport_w.max(1.0) as u32;
     let h = scene.viewport_h.max(1.0) as u32;
-    // Steady-state frames are identical: same revisions + viewport =
+    // Steady-state frames are identical: same content + viewport =
     // same pixels. Skip the whole paint on repeat (bounded LRU).
-    // Correctness: the key covers everything paint reads from the
-    // scene (revisions bind app+scene truth, size binds the frame).
-    let key = (scene.scene_revision, scene.app_revision, w, h);
+    let key = (fingerprint(scene), w, h);
     {
         let cache =
             FRAME_CACHE.get_or_init(|| std::sync::Mutex::new(std::collections::VecDeque::new()));
@@ -265,7 +279,7 @@ pub fn render(scene: &Scene) -> Frame {
     }
 }
 
-type FrameCache = std::sync::Mutex<std::collections::VecDeque<((u64, u64, u32, u32), Pixmap)>>;
+type FrameCache = std::sync::Mutex<std::collections::VecDeque<((u64, u32, u32), Pixmap)>>;
 static FRAME_CACHE: std::sync::OnceLock<FrameCache> = std::sync::OnceLock::new();
 
 fn render_uncached(scene: &Scene, w: u32, h: u32) -> Pixmap {
@@ -640,6 +654,98 @@ mod tests {
             "filled half is accent"
         );
         assert_eq!(right, hamesh_theme::resolve("track"), "empty half is track");
+    }
+
+    #[test]
+    fn frame_cache_never_swaps_distinct_scenes() {
+        // Independent review (Lucy): the frame cache was keyed on
+        // (scene_rev, app_rev, w, h), which independent scenes share
+        // routinely — the rounded card and the progress bar below are
+        // both 200x200 rev 1. Render in both orders plus repeats (the
+        // cache-hit path): every frame must carry its own pixels.
+        let mut card_app = App::new("win");
+        card_app.add(
+            "win",
+            Component::new("card", Role::Panel, "card")
+                .with_prop("w", "100")
+                .with_prop("h", "100")
+                .with_prop("surface", "raised")
+                .with_prop("radius", "20"),
+        );
+        let card_scene = hamesh_scene::build(
+            &card_app,
+            &hamesh_layout::compute(&card_app, 200.0, 200.0),
+            1,
+        );
+        let mut bar_app = App::new("win");
+        bar_app.add(
+            "win",
+            Component::new("bar", Role::Panel, "progress")
+                .with_prop("block", "Progress")
+                .with_prop("w", "100")
+                .with_prop("h", "10")
+                .with_prop("surface", "track")
+                .with_prop("value", "50")
+                .with_prop("fill", "accent"),
+        );
+        let bar_scene =
+            hamesh_scene::build(&bar_app, &hamesh_layout::compute(&bar_app, 200.0, 200.0), 1);
+        assert_eq!(
+            (card_scene.scene_revision, card_scene.viewport_w),
+            (bar_scene.scene_revision, bar_scene.viewport_w),
+            "test premise: identical revision/dimension tuples"
+        );
+        let card = card_scene.nodes.iter().find(|n| n.id == "card").unwrap();
+        let win_bg = card_scene
+            .nodes
+            .iter()
+            .find(|n| n.id == "win")
+            .unwrap()
+            .color;
+        let bar = bar_scene.nodes.iter().find(|n| n.id == "bar").unwrap();
+        let check_card = |f: &Frame| {
+            assert_eq!(
+                px(
+                    &f.pixmap,
+                    (card.rect.x + 2.0) as usize,
+                    (card.rect.y + 2.0) as usize
+                ),
+                win_bg,
+                "card corner cutout shows parent"
+            );
+            assert_eq!(
+                px(
+                    &f.pixmap,
+                    (card.rect.x + card.rect.w / 2.0) as usize,
+                    (card.rect.y + card.rect.h / 2.0) as usize
+                ),
+                hamesh_theme::resolve("raised"),
+                "card center must be surface"
+            );
+        };
+        let check_bar = |f: &Frame| {
+            let y = (bar.rect.y + bar.rect.h / 2.0) as usize;
+            assert_eq!(
+                px(&f.pixmap, (bar.rect.x + 5.0) as usize, y),
+                hamesh_theme::resolve("accent"),
+                "filled half is accent"
+            );
+            assert_eq!(
+                px(&f.pixmap, (bar.rect.x + bar.rect.w - 5.0) as usize, y),
+                hamesh_theme::resolve("track"),
+                "empty half is track"
+            );
+        };
+        // Both orders, then repeats: the second rendering of each
+        // scene comes from the cache and must still be correct.
+        let f1 = render(&card_scene);
+        check_card(&f1);
+        let f2 = render(&bar_scene);
+        check_bar(&f2);
+        let f3 = render(&bar_scene);
+        check_bar(&f3);
+        let f4 = render(&card_scene);
+        check_card(&f4);
     }
 
     #[test]
