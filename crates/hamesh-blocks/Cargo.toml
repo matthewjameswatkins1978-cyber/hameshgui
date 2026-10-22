@@ -8,3 +8,6 @@ license.workspace = true
 hamesh-core = { path = "../hamesh-core" }
 hamesh-theme = { path = "../hamesh-theme" }
 serde.workspace = true
+
+[dev-dependencies]
+serde_json = "1"

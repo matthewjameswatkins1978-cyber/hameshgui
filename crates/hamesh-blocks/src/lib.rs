@@ -596,4 +596,40 @@ mod tests {
         let b = app.get("go").unwrap();
         assert_eq!(b.props.get("variant").map(|s| s.as_str()), Some("outline"));
     }
+
+    #[test]
+    fn catalogue_covers_every_builder() {
+        // The machine catalogue is the Eye's discovery path: every
+        // block prop the builders emit must be documented with the
+        // shape agents need (description, props, actions, example).
+        let v: serde_json::Value =
+            serde_json::from_str(include_str!("../catalogue.json")).expect("catalogue parses");
+        let blocks = v
+            .get("blocks")
+            .and_then(|b| b.as_array())
+            .expect("blocks array");
+        let mut names: Vec<&str> = Vec::new();
+        for b in blocks {
+            let name = b.get("name").and_then(|n| n.as_str()).expect("block name");
+            names.push(name);
+            assert!(
+                b.get("description").and_then(|d| d.as_str()).is_some(),
+                "{name} needs a description"
+            );
+            assert!(
+                b.get("props").and_then(|p| p.as_array()).is_some(),
+                "{name} needs a props array"
+            );
+            assert!(
+                b.get("example").and_then(|e| e.as_str()).is_some(),
+                "{name} needs an example"
+            );
+        }
+        for expected in [
+            "Row", "Column", "Spacer", "Divider", "Title", "Heading", "Body", "Caption", "Subtle",
+            "Card", "Badge", "Icon", "Metric", "Progress", "Button",
+        ] {
+            assert!(names.contains(&expected), "catalogue missing {expected}");
+        }
+    }
 }

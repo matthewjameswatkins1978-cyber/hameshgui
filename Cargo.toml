@@ -17,6 +17,7 @@ members = [
   "apps/hamesh-cli",
   "apps/hamesh-faults",
   "apps/hamesh-drill",
+  "apps/hamesh-blocks-drill",
   "apps/hamesh-mcp",
   "apps/hamesh-mcp-drill",
 ]

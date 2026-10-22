@@ -926,6 +926,14 @@ dependencies = [
  "hamesh-core",
  "hamesh-theme",
  "serde",
+ "serde_json",
+]
+
+[[package]]
+name = "hamesh-blocks-drill"
+version = "0.2.0"
+dependencies = [
+ "serde_json",
 ]
 
 [[package]]
