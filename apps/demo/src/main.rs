@@ -218,7 +218,7 @@ fn main() {
 
     // Eye detail on the button proves the framework can explain itself.
     let layout5 = hamesh_layout::compute(&app, viewport.0, viewport.1);
-    if let Some(d) = hamesh_inspect::detail(&app, &layout5, "btn_inc") {
+    if let Some(d) = hamesh_inspect::detail(&app, &layout5, None, "btn_inc") {
         println!(
             "DETAIL btn_inc: enabled={} visible={} clipped={} rect={:?} diag={:?}",
             d.enabled, d.effectively_visible, d.clipped_by_parent, d.rect, d.diagnostics

@@ -41,6 +41,11 @@ pub struct ComponentDetail {
     pub rect: Option<hamesh_layout::Rect>,
     pub z: Option<i32>,
     pub props: std::collections::HashMap<String, String>,
+    /// Canonical text geometry (CorelDRAW-style selection model):
+    /// layout rect + line box are separate from font trim, ink and
+    /// baseline. Agents check centering/alignment from THESE, never
+    /// by eyeballing pixels. `None` = non-text node.
+    pub text_geom: Option<TextGeom>,
     pub state_keys: Vec<String>,
     pub diagnostics: Vec<String>,
 }
@@ -68,7 +73,25 @@ pub fn compact_map(app: &App, _layout: &LayoutOutput, scene: &Scene) -> CompactM
     }
 }
 
-pub fn detail(app: &App, layout: &LayoutOutput, id: &str) -> Option<ComponentDetail> {
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct TextGeom {
+    /// Node-local ink bounds [x0,y0,x1,y1]: what glyphs paint.
+    pub ink: Option<[f32; 4]>,
+    /// Node-local font trim [x0,y0,x1,y1]: cap top to baseline.
+    /// Renderers center this; stable across text changes.
+    pub trim: Option<[f32; 4]>,
+    /// Font metrics [ascent, descent, cap, line_height] in px.
+    pub metrics: Option<[f32; 4]>,
+    /// Node-local first baseline y. Shared baselines = aligned text.
+    pub baseline: Option<f32>,
+}
+
+pub fn detail(
+    app: &App,
+    layout: &LayoutOutput,
+    scene: Option<&Scene>,
+    id: &str,
+) -> Option<ComponentDetail> {
     let c = app.components.get(id)?;
     let l = layout.nodes.get(id);
     let mut diagnostics = Vec::new();
@@ -96,6 +119,12 @@ pub fn detail(app: &App, layout: &LayoutOutput, id: &str) -> Option<ComponentDet
     } else {
         diagnostics.push("no layout node: outside computed tree".to_string());
     }
+    let sn = scene.and_then(|s| s.nodes.iter().find(|n| n.id == id));
+    if let Some(n) = sn {
+        if n.text.is_empty() && n.trim.is_none() {
+            diagnostics.push("no text content: text_geom is None".to_string());
+        }
+    }
     Some(ComponentDetail {
         id: id.to_string(),
         role: format!("{:?}", c.role),
@@ -107,6 +136,12 @@ pub fn detail(app: &App, layout: &LayoutOutput, id: &str) -> Option<ComponentDet
         rect: l.map(|n| n.rect.clone()),
         z: l.map(|n| n.z),
         props: c.props.clone(),
+        text_geom: sn.map(|n| TextGeom {
+            ink: n.ink,
+            trim: n.trim,
+            metrics: n.metrics,
+            baseline: n.baseline,
+        }),
         state_keys: app.state.keys().cloned().collect(),
         diagnostics,
     })
@@ -120,13 +155,21 @@ mod tests {
     #[test]
     fn map_and_detail() {
         let mut app = App::new("win");
-        app.add("win", Component::new("b1", Role::Button, "Increment"));
+        app.add(
+            "win",
+            Component::new("b1", Role::Button, "Increment").with_prop("text", "Increment"),
+        );
         let layout = hamesh_layout::compute(&app, 400.0, 300.0);
         let scene = hamesh_scene::build(&app, &layout, 3);
         let map = compact_map(&app, &layout, &scene);
         assert!(map.nodes.iter().any(|n| n.id == "b1"));
-        let d = detail(&app, &layout, "b1").unwrap();
+        let d = detail(&app, &layout, Some(&scene), "b1").unwrap();
         assert!(d.effectively_visible);
         assert!(d.diagnostics.is_empty());
+        // Buttons carry font trim (cap-alphabetic) for the Eye.
+        let g = d.text_geom.expect("button text_geom");
+        assert!(g.trim.is_some(), "button trim missing");
+        assert!(g.baseline.is_some(), "button baseline missing");
+        assert!(g.metrics.is_some(), "button metrics missing");
     }
 }

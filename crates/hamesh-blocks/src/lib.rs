@@ -329,7 +329,9 @@ pub fn badge(s: &mut Scope, id: &str, text: &str, v: Variant) {
         .insert("border_token".to_string(), v.dot().to_string());
     c.props
         .insert("variant".to_string(), v.as_str().to_string());
-    c.props.insert("pad".to_string(), "4".to_string());
+    // Shared 16px text origin with buttons (pad 8 + inset 8): pill
+    // and button first letters sit on the same invisible line.
+    c.props.insert("pad".to_string(), "8".to_string());
     // Pills center on the cross axis instead of stretching tall.
     c.props.insert("align".to_string(), "center".to_string());
     s.leaf(c);

@@ -41,6 +41,21 @@ pub struct SceneNode {
     /// Ghost nodes (spacers) participate in layout and hit-testing
     /// policy but paint nothing.
     pub ghost: bool,
+    /// Shaped ink bounds (node-local x0,y0,x1,y1): what the glyphs
+    /// actually paint, bearings included. The Eye reads object bounds
+    /// CorelDRAW-style; alignment never uses this (it would jump with
+    /// content). `None` = no ink (empty text, icon-only nodes).
+    pub ink: Option<[f32; 4]>,
+    /// Font-relative trim (node-local x0,y0,x1,y1): cap top to
+    /// alphabetic baseline, same for any string in this font/size.
+    /// Renderers center THIS, never the ink silhouette.
+    pub trim: Option<[f32; 4]>,
+    /// Font metrics for this node's text: [ascent, descent, cap,
+    /// line_height] in px. Distinguished from ink on purpose: the Eye
+    /// reports both so agents stop guessing which box they see.
+    pub metrics: Option<[f32; 4]>,
+    /// First baseline (node-local y), for cross-node baseline checks.
+    pub baseline: Option<f32>,
     /// Caret x (layout-space, relative to the text origin) for a focused
     /// text input. `None` = no caret. Part of scene truth so CPU and GPU
     /// renderers (and the Eye) agree on where editing happens.
@@ -123,6 +138,36 @@ pub fn build(app: &App, layout: &LayoutOutput, scene_revision: u64) -> Scene {
             } else {
                 None
             };
+            // Ink + trim in node-local space. Ink is what the glyphs
+            // paint (Eye object bounds); trim is the font-relative
+            // cap-to-baseline box (renderer alignment target). Same
+            // line origin both sides: +inset horizontally, +run origin
+            // vertically. Trim x spans the advance width (stable).
+            let font_size = num("font_size", 16.0).max(8.0);
+            let avail_w = (l.rect.w - 2.0 * hamesh_text::TEXT_INSET_X).max(8.0);
+            let lay = hamesh_text::TextLayout::new(&text, avail_w, font_size);
+            let oy = hamesh_text::run_oy(l.rect.h, text.is_empty(), lay.height());
+            let ink = hamesh_text::ink_box(&text, avail_w, font_size).map(|b| {
+                [
+                    b.x0 + hamesh_text::TEXT_INSET_X,
+                    b.y0 + oy,
+                    b.x1 + hamesh_text::TEXT_INSET_X,
+                    b.y1 + oy,
+                ]
+            });
+            let (trim, metrics, baseline) = match hamesh_text::trim_box(&text, avail_w, font_size) {
+                Some(t) => (
+                    Some([
+                        hamesh_text::TEXT_INSET_X,
+                        t.top + oy,
+                        hamesh_text::TEXT_INSET_X + t.advance,
+                        t.bottom + oy,
+                    ]),
+                    Some([t.ascent, t.descent, t.cap, t.line_height]),
+                    Some(t.baseline + oy),
+                ),
+                None => (None, None, None),
+            };
             Some(SceneNode {
                 id: c.id.0.clone(),
                 role: role.clone(),
@@ -148,13 +193,17 @@ pub fn build(app: &App, layout: &LayoutOutput, scene_revision: u64) -> Scene {
                     .map(|t| hamesh_theme::resolve(t))
                     .unwrap_or_else(|| hamesh_theme::resolve("accent")),
                 icon: c.props.get("icon").cloned(),
-                font_size: num("font_size", 16.0).max(8.0),
+                font_size,
                 text_rgba: c
                     .props
                     .get("text_token")
                     .map(|t| hamesh_theme::resolve(t))
                     .unwrap_or_else(|| hamesh_theme::resolve("text")),
                 ghost: c.props.get("ghost").map(|s| s == "true").unwrap_or(false),
+                ink,
+                trim,
+                metrics,
+                baseline,
                 caret_x,
                 focused,
             })

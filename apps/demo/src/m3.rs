@@ -124,7 +124,7 @@ fn main() {
         serde_json::to_string_pretty(&map).unwrap(),
     )
     .expect("map");
-    if let Some(d) = hamesh_inspect::detail(&app, &layout, "composer") {
+    if let Some(d) = hamesh_inspect::detail(&app, &layout, None, "composer") {
         println!(
             "EYE composer: enabled={} visible={} caret_in_text={:?}",
             d.enabled,

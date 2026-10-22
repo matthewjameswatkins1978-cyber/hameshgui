@@ -1062,6 +1062,7 @@ version = "0.2.0"
 dependencies = [
  "hamesh-core",
  "hamesh-layout",
+ "hamesh-text",
  "hamesh-theme",
  "serde",
 ]

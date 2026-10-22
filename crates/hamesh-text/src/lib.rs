@@ -11,6 +11,26 @@ use parley::style::StyleProperty;
 use parley::{FontContext, LayoutContext};
 
 pub mod glue;
+
+/// Horizontal text inset (px): glyphs draw this far inside their node
+/// on each side. Layout measurement, scene ink and both renderers
+/// share this constant so boxes, ink and pixels agree.
+pub const TEXT_INSET_X: f32 = 8.0;
+
+/// Empty-text line box (px): keeps a caret-sized box where there is
+/// no ink. Shared by scene ink and both renderers.
+pub const EMPTY_LINE_H: f32 = 18.0;
+
+/// Vertical origin of the text run inside a node of height `h`:
+/// line-box centering for real text, caret box for empty text.
+pub fn run_oy(node_h: f32, text_empty: bool, natural_h: f32) -> f32 {
+    let lh = if text_empty {
+        EMPTY_LINE_H
+    } else {
+        natural_h.max(1.0)
+    };
+    ((node_h - lh) / 2.0).max(0.0)
+}
 pub use glue::{glyph_origin, proof_png, rasterize_layout, rasterize_parley, RasterGlyph};
 
 #[derive(Clone, Debug, PartialEq)]
@@ -66,6 +86,13 @@ impl TextLayout {
         n
     }
 
+    /// Baseline of the first line in layout space, if the text laid
+    /// out at least one line. The Eye uses it for cross-node
+    /// baseline alignment checks (the CorelDRAW-style invisible lines).
+    pub fn first_baseline(&self) -> Option<f32> {
+        self.layout.lines().next().map(|l| l.metrics().baseline)
+    }
+
     /// Owned per-run positioned glyphs. Coordinates are layout-absolute
     /// (see decision 009): add the node's origin to place them.
     pub fn runs(&self) -> Vec<TextRun> {
@@ -85,6 +112,167 @@ impl TextLayout {
         }
         out
     }
+}
+
+/// Shaped ink bounds in layout space (text origin at 0,0), plus the
+/// first baseline. The union of hinted raster coverage: ground truth
+/// for what the renderers actually paint, bearings included.
+/// `None` = no ink (empty or whitespace-only text).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct InkBox {
+    pub x0: f32,
+    pub y0: f32,
+    pub x1: f32,
+    pub y1: f32,
+    pub baseline: f32,
+}
+
+impl InkBox {
+    pub fn w(&self) -> f32 {
+        (self.x1 - self.x0).max(0.0)
+    }
+    pub fn h(&self) -> f32 {
+        (self.y1 - self.y0).max(0.0)
+    }
+    pub fn cx(&self) -> f32 {
+        (self.x0 + self.x1) / 2.0
+    }
+    pub fn cy(&self) -> f32 {
+        (self.y0 + self.y1) / 2.0
+    }
+}
+
+fn ink_uncached(text: &str, max_width: f32, font_size: f32) -> Option<InkBox> {
+    if text.trim().is_empty() {
+        return None;
+    }
+    let layout = TextLayout::new(text, max_width, font_size);
+    let baseline = layout.first_baseline()?;
+    let glyphs = glue::rasterize_layout(&layout);
+    let mut x0 = f32::INFINITY;
+    let mut y0 = f32::INFINITY;
+    let mut x1 = f32::NEG_INFINITY;
+    let mut y1 = f32::NEG_INFINITY;
+    for g in &glyphs {
+        let (gx, gy) = glue::glyph_origin(g, 0.0, 0.0);
+        for (i, a) in g.alpha.iter().enumerate() {
+            if *a < 8 {
+                continue;
+            }
+            let px = gx + (i as u32 % g.w) as i32;
+            let py = gy + (i as u32 / g.w) as i32;
+            x0 = x0.min(px as f32);
+            y0 = y0.min(py as f32);
+            x1 = x1.max(px as f32 + 1.0);
+            y1 = y1.max(py as f32 + 1.0);
+        }
+    }
+    if x0 == f32::INFINITY {
+        return None;
+    }
+    Some(InkBox {
+        x0,
+        y0,
+        x1,
+        y1,
+        baseline,
+    })
+}
+
+/// Bounded memoization: ink is a pure function of shaped text, and
+/// live frames re-query the same strings constantly. 512 entries,
+/// cleared wholesale when full (simplest correct eviction).
+type InkCache = std::sync::Mutex<std::collections::HashMap<(String, u32, u32), Option<InkBox>>>;
+static INK_CACHE: std::sync::OnceLock<InkCache> = std::sync::OnceLock::new();
+
+fn ink_key(text: &str, max_width: f32, font_size: f32) -> (String, u32, u32) {
+    (text.to_string(), max_width.to_bits(), font_size.to_bits())
+}
+
+/// Shaped ink bounds for text, cached. Same inputs the renderers use:
+/// `max_width` is the wrapping width, `font_size` in px.
+pub fn ink_box(text: &str, max_width: f32, font_size: f32) -> Option<InkBox> {
+    let key = ink_key(text, max_width, font_size);
+    let cache = INK_CACHE.get_or_init(|| std::sync::Mutex::new(std::collections::HashMap::new()));
+    if let Some(hit) = cache.lock().expect("ink cache").get(&key) {
+        return *hit;
+    }
+    let v = ink_uncached(text, max_width, font_size);
+    let mut c = cache.lock().expect("ink cache");
+    if c.len() >= 512 {
+        c.clear();
+    }
+    c.insert(key, v);
+    v
+}
+
+/// Font-relative cap height (px) for `font_size`: ink top of "H"
+/// vs its baseline. Depends only on font+size, never content, so a
+/// trim derived from it cannot jump when the label text changes.
+/// Cached per size; fallback 0.7*size keeps boxes sane if shaping fails.
+type CapCache = std::sync::Mutex<std::collections::HashMap<u32, f32>>;
+static CAP_CACHE: std::sync::OnceLock<CapCache> = std::sync::OnceLock::new();
+
+pub fn cap_height_ref(font_size: f32) -> f32 {
+    let key = font_size.to_bits();
+    let cache = CAP_CACHE.get_or_init(|| std::sync::Mutex::new(std::collections::HashMap::new()));
+    if let Some(hit) = cache.lock().expect("cap cache").get(&key) {
+        return *hit;
+    }
+    let v = ink_uncached("H", 400.0, font_size)
+        .map(|b| (b.baseline - b.y0).max(1.0))
+        .unwrap_or(font_size * 0.7);
+    let mut c = cache.lock().expect("cap cache");
+    if c.len() >= 64 {
+        c.clear();
+    }
+    c.insert(key, v);
+    v
+}
+
+/// Font-relative trim in layout space (text origin 0,0): top is
+/// baseline minus cap height, bottom is the alphabetic baseline
+/// (CSS `text-box-edge: cap alphabetic`). Same box for any string
+/// in the same font/size: stable across Connected/Disconnected,
+/// accented text, fallback runs. Single-line only (`None` for empty
+/// or wrapped text): multiline keeps line-box placement. Descenders
+/// and accents overflow the trim by design; renderers align by it
+/// but never clip to it (clip stays at the node rect).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct FontTrim {
+    pub top: f32,
+    pub bottom: f32,
+    pub baseline: f32,
+    pub cap: f32,
+    pub ascent: f32,
+    pub descent: f32,
+    pub line_height: f32,
+    pub advance: f32,
+}
+
+pub fn trim_box(text: &str, max_width: f32, font_size: f32) -> Option<FontTrim> {
+    if text.trim().is_empty() {
+        return None;
+    }
+    let layout = TextLayout::new(text, max_width, font_size);
+    if layout.line_count() != 1 {
+        return None;
+    }
+    let baseline = layout.first_baseline()?;
+    let line_height = layout.height().max(1.0);
+    let ascent = baseline.max(1.0);
+    let descent = (line_height - baseline).max(0.0);
+    let cap = cap_height_ref(font_size);
+    Some(FontTrim {
+        top: baseline - cap,
+        bottom: baseline,
+        baseline,
+        cap,
+        ascent,
+        descent,
+        line_height,
+        advance: layout.width(),
+    })
 }
 
 pub fn layout_parley(text: &str, max_width: f32) -> TextMetrics {
@@ -163,5 +351,75 @@ mod tests {
         println!("cosmic wrapped: {c:?}");
         assert!(p.lines > 1, "parley did not wrap: {p:?}");
         assert!(c.lines > 1, "cosmic did not wrap: {c:?}");
+    }
+
+    #[test]
+    fn ink_box_is_ground_truth() {
+        assert!(ink_box("", 400.0, 13.0).is_none());
+        assert!(ink_box("   ", 400.0, 13.0).is_none());
+        let ink = ink_box("Connected", 400.0, 13.0).expect("ink");
+        let lay = TextLayout::new("Connected", 400.0, 13.0);
+        // Bearings trimmed: ink narrower than the advance box.
+        assert!(
+            ink.w() < lay.width(),
+            "ink {} vs advance {}",
+            ink.w(),
+            lay.width()
+        );
+        assert!(ink.w() > 0.0 && ink.h() > 0.0);
+        // Baseline sane: inside the ink span for caps/lowercase mix
+        // (no descenders in "Connected", so ink bottom is the baseline).
+        assert!(
+            ink.baseline >= ink.y1 - 1.0,
+            "baseline {} vs ink bottom {}",
+            ink.baseline,
+            ink.y1
+        );
+        // Cached call agrees.
+        assert_eq!(ink_box("Connected", 400.0, 13.0), Some(ink));
+        // Descenders extend ink below the baseline.
+        let desc = ink_box("Inspected", 400.0, 13.0).expect("ink");
+        assert!(desc.y1 > desc.baseline, "p tail should pass the baseline");
+    }
+
+    #[test]
+    fn trim_is_font_relative_not_content_relative() {
+        // Stability: Connected -> Disconnected must not move the box.
+        let a = trim_box("Connected", 400.0, 13.0).expect("trim a");
+        let b = trim_box("Disconnected", 400.0, 13.0).expect("trim b");
+        assert!(
+            (a.top - b.top).abs() < 0.01,
+            "top moved: {:?} vs {:?}",
+            a,
+            b
+        );
+        assert!(
+            (a.bottom - b.bottom).abs() < 0.01,
+            "bottom moved: {:?} vs {:?}",
+            a,
+            b
+        );
+        // Accents share the box: trim never clips diacritics by construction
+        // (renderers align by trim, clip only to node rect).
+        let c = trim_box("Caf\u{e9}", 400.0, 13.0).expect("trim c");
+        assert!(
+            (a.top - c.top).abs() < 0.01,
+            "accent moved top: {:?} vs {:?}",
+            a,
+            c
+        );
+        // Empty and wrapped text opt out to line-box placement.
+        assert!(trim_box("", 400.0, 13.0).is_none());
+        assert!(trim_box("a b c d e f g", 10.0, 13.0).is_none());
+        // Cap-alphabetic trim sits inside the line box: top at or below
+        // the line top, bottom (baseline) strictly above the line bottom
+        // whenever the font carries descender space.
+        assert!(a.top >= 0.0, "trim top inside line: {:?}", a);
+        assert!(a.bottom < a.line_height, "trim bottom inside line: {:?}", a);
+        assert!(
+            (a.bottom - a.top - a.cap).abs() < 0.01,
+            "trim height is cap: {:?}",
+            a
+        );
     }
 }

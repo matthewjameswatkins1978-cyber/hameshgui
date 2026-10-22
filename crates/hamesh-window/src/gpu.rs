@@ -168,8 +168,15 @@ fn draw_text(
     layout: Option<&hamesh_text::TextLayout>,
 ) {
     // Empty text still lays out nothing, but the caret needs a line box.
+    // Glyphs ride the font-relative trim (mirrors the CPU renderer);
+    // the caret stays line-anchored at dy_line.
     let lh = layout.map(|l| l.height()).unwrap_or(0.0).max(18.0);
-    let dy = node.rect.y + ((node.rect.h - lh) / 2.0).max(0.0);
+    let dy_line = node.rect.y + ((node.rect.h - lh) / 2.0).max(0.0);
+    let shift = match node.trim {
+        Some([_, y0, _, y1]) => node.rect.h / 2.0 - (y0 + y1) / 2.0,
+        None => 0.0,
+    };
+    let dy = dy_line + shift;
     let brush = Brush::Solid(node_color(node.text_rgba));
     if let Some(layout) = layout {
         for run in layout.runs() {
@@ -189,11 +196,12 @@ fn draw_text(
         }
     }
     // Caret bar for the focused composer (mirrors the CPU renderer).
+    // Line-anchored at dy_line; glyphs above ride the trim shift.
     if node.focused {
         if let Some(cx) = node.caret_x {
             let care = RoundedRect::new(
                 (node.rect.x + 8.0 + cx) as f64,
-                dy as f64,
+                dy_line as f64,
                 (node.rect.x + 8.0 + cx + 2.0) as f64,
                 (dy + lh.max(8.0)) as f64,
                 1.0,

@@ -116,7 +116,7 @@ fn main() {
             c.props.insert("w".to_string(), "2000".to_string());
         }
         let l = layout(&app);
-        let d = hamesh_inspect::detail(&app, &l, "composer").expect("detail");
+        let d = hamesh_inspect::detail(&app, &l, None, "composer").expect("detail");
         println!(
             "  discover: clipped={} rect={:?}",
             d.clipped_by_parent, d.rect
@@ -134,7 +134,7 @@ fn main() {
             c.props.insert("w".to_string(), "700".to_string());
         }
         let l2 = layout(&app);
-        let d2 = hamesh_inspect::detail(&app, &l2, "composer").expect("detail");
+        let d2 = hamesh_inspect::detail(&app, &l2, None, "composer").expect("detail");
         check(!d2.clipped_by_parent, "clipping cleared after repair");
         check(d2.diagnostics.is_empty(), "no diagnostics remain");
     }

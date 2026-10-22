@@ -26,29 +26,47 @@ pub struct Frame {
 }
 
 /// Blit parley/swash glyph coverage for a node's text, clipped to the
-/// node's own rect so text never bleeds into siblings.
+/// node's own rect so text never bleeds into siblings. Glyphs are
+/// placed from the scene trim box (font-relative optical centering):
+/// the run origin shifts so the cap-to-baseline trim — not the line
+/// box, never the per-string ink silhouette — sits centered. Stable
+/// across Connected/Disconnected by construction. The caret stays
+/// line-anchored for editing affordance.
 fn blit_text(pix: &mut Pixmap, node: &hamesh_scene::SceneNode) {
-    let avail_w = (node.rect.w - 16.0).max(8.0);
+    let avail_w = (node.rect.w - 2.0 * hamesh_text::TEXT_INSET_X).max(8.0);
     let layout = hamesh_text::TextLayout::new(&node.text, avail_w, node.font_size);
     // Empty text still gets a line box: the caret must render in an
     // empty focused composer (this early-return once ate the caret).
-    let lh = layout.height().max(18.0);
-    let ox = node.rect.x + 8.0;
-    let oy = node.rect.y + ((node.rect.h - lh) / 2.0).max(0.0);
+    let line_h = if node.text.is_empty() {
+        hamesh_text::EMPTY_LINE_H
+    } else {
+        layout.height().max(1.0)
+    };
+    let oy_line = node.rect.y + ((node.rect.h - line_h) / 2.0).max(0.0);
+    let ox = node.rect.x + hamesh_text::TEXT_INSET_X;
+    // Optical shift: trim center onto box center (0 when no trim:
+    // empty text, wrapped text, icon-only nodes).
+    let shift = match node.trim {
+        Some([_, y0, _, y1]) => node.rect.h / 2.0 - (y0 + y1) / 2.0,
+        None => 0.0,
+    };
+    let oy = oy_line + shift;
     let glyphs = if layout.height() > 0.0 {
         hamesh_text::rasterize_layout(&layout)
     } else {
         Vec::new()
     };
     // Caret bar for the focused composer (scene truth, read by the Eye too).
+    // Line-anchored: it spans the line box at the line origin, while
+    // glyphs above ride the optical shift.
     if node.focused {
         if let Some(cx) = node.caret_x {
             let bx = ox + cx;
-            let bh = lh.max(8.0);
+            let bh = line_h.max(8.0);
             if bx >= node.rect.x && bx + 2.0 <= node.rect.x + node.rect.w {
                 let mut cp = Paint::default();
                 cp.set_color(Color::from_rgba8(120, 220, 200, 255));
-                if let Some(bar) = SkRect::from_xywh(bx, oy, 2.0, bh) {
+                if let Some(bar) = SkRect::from_xywh(bx, oy_line, 2.0, bh) {
                     pix.fill_rect(bar, &cp, Transform::identity(), None);
                 }
             }
@@ -428,6 +446,7 @@ mod tests {
         app.add(
             "win",
             Component::new("bar", Role::Panel, "progress")
+                .with_prop("block", "Progress")
                 .with_prop("w", "100")
                 .with_prop("h", "10")
                 .with_prop("surface", "track")

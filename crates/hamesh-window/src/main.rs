@@ -929,8 +929,8 @@ impl HameshWindowApp {
                 Some(self.stamped(v))
             }
             Op::Detail { id } => {
-                let (layout, _) = self.layout_and_scene();
-                match hamesh_inspect::detail(&self.app, &layout, &id) {
+                let (layout, scene) = self.layout_and_scene();
+                match hamesh_inspect::detail(&self.app, &layout, Some(&scene), &id) {
                     Some(d) => {
                         let v = serde_json::to_value(&d).unwrap_or(serde_json::Value::Null);
                         Some(self.stamped(v))
