@@ -80,6 +80,33 @@ impl Default for LayoutOpts {
     }
 }
 
+impl LayoutOpts {
+    /// Edge-to-edge row: no padding, standard gap (headers, actions).
+    pub fn flat() -> Self {
+        Self {
+            pad: 0.0,
+            ..Default::default()
+        }
+    }
+    /// Tight stack: no padding, hairline gap (label groups).
+    pub fn tight() -> Self {
+        Self {
+            pad: 0.0,
+            gap: hamesh_theme::space::XS,
+            ..Default::default()
+        }
+    }
+    /// Responsive tile grid: no padding, wide gap, wraps (metrics).
+    pub fn tiles() -> Self {
+        Self {
+            pad: 0.0,
+            gap: hamesh_theme::space::M,
+            wrap: true,
+            ..Default::default()
+        }
+    }
+}
+
 fn apply_layout(c: &mut Component, layout: &str, o: &LayoutOpts) {
     c.props.insert("layout".to_string(), layout.to_string());
     c.props.insert("pad".to_string(), o.pad.to_string());
@@ -303,6 +330,8 @@ pub fn badge(s: &mut Scope, id: &str, text: &str, v: Variant) {
     c.props
         .insert("variant".to_string(), v.as_str().to_string());
     c.props.insert("pad".to_string(), "4".to_string());
+    // Pills center on the cross axis instead of stretching tall.
+    c.props.insert("align".to_string(), "center".to_string());
     s.leaf(c);
 }
 
@@ -317,6 +346,8 @@ pub fn icon(s: &mut Scope, id: &str, name: &str, token: &str, surface: &str, siz
     c.props.insert("surface".to_string(), surface.to_string());
     c.props.insert("w".to_string(), size.to_string());
     c.props.insert("h".to_string(), size.to_string());
+    // Painted leaf: no interior padding (same bar lesson).
+    c.props.insert("pad".to_string(), "0".to_string());
     s.leaf(c);
 }
 
@@ -414,6 +445,9 @@ pub fn progress(s: &mut Scope, id: &str, o: ProgressOpts) {
     let mut c = styled(Role::Panel, id, id, "Progress");
     c.props.insert("surface".to_string(), "track".to_string());
     c.props.insert("radius".to_string(), "3".to_string());
+    // A bar has no interior: container padding would inflate it
+    // (an empty h=6 leaf with default pad 12 lays out 24 tall).
+    c.props.insert("pad".to_string(), "0".to_string());
     c.props.insert("h".to_string(), o.h.to_string());
     c.props.insert("value".to_string(), o.value.to_string());
     c.props.insert("min".to_string(), o.min.to_string());

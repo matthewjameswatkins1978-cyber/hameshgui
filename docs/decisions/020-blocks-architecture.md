@@ -127,3 +127,25 @@ Lucy adds three principles, incorporated without interrupting B1:
    type/balance/contrast/states, get independent eyes (agent or
    human) on the PNGs. Measurable defects and aesthetic calls are
    recorded separately.
+
+## Addendum 2026-10-22 — layout lessons from the first composition
+
+Composing the dashboard exposed three layout-truth gaps, all fixed
+in the shared core (not the dashboard):
+
+1. **Text measures.** Text/Status/Button leaves carry their string
+   as Taffy node context and are measured with parley
+   (`compute_layout_with_measure`). Labels, badges and buttons now
+   size to content; explicit `h` still wins; M3 feed rows (ListItem
+   + explicit h) and M1 screens are unaffected.
+2. **CSS-correct grow.** The legacy blanket `flex_grow=1` on every
+   Panel made siblings fight over free space. Default is now 0;
+   structural fill opts in (`Role::List` keeps 1, tiles opt in).
+3. **Cross-axis align.** New `align: start|center|end` prop
+   (Taffy `AlignSelf`) so pills don't stretch tall in headers.
+4. **Progress fill is opt-in.** `fill_frac` resolves only when
+   `block == "Progress"` — Metric tiles reuse `value` as Eye
+   metadata without painting bars.
+5. **Painted leaves take pad 0.** An empty h=6 leaf with the
+   default pad 12 lays out 24 tall; progress/icon builders zero
+   it. Badge/button pills keep their padding deliberately.

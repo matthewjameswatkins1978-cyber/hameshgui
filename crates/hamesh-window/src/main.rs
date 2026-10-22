@@ -18,6 +18,7 @@ use hamesh_core::{App, Component, Role};
 use hamesh_diag::Trace;
 use hamesh_widgets::Key as WKey;
 use hamesh_widgets::{handle_key, rebuild_feed_nodes, sync_composer, Focus, Widgets};
+mod dashboard;
 mod gpu;
 mod inspect_srv;
 
@@ -56,7 +57,9 @@ fn sample_app() -> App {
     );
     app.add(
         "win",
-        Component::new("panel", Role::Panel, "main").with_prop("layout", "column"),
+        Component::new("panel", Role::Panel, "main")
+            .with_prop("layout", "column")
+            .with_prop("flex_grow", "1"),
     );
     app.add(
         "panel",
@@ -153,6 +156,9 @@ struct HameshWindowApp {
     /// `handle_key` core as the headless drills. `None` = M1 demo app.
     widgets: Option<Widgets>,
     use_m3: bool,
+    /// Blocks dashboard mode (`--blocks`): the Agent X composition from
+    /// hamesh-blocks replaces the M1 sample app. Same loop, Eye, Hand.
+    use_blocks: bool,
     shift_held: bool,
     m3_smoke_done: bool,
     /// M4 live loop: background Pi worker link. `None` unless `--pi`.
@@ -190,6 +196,7 @@ impl HameshWindowApp {
             pending_waits: Vec::new(),
             widgets: None,
             use_m3: false,
+            use_blocks: false,
             shift_held: false,
             m3_smoke_done: false,
             pi: None,
@@ -399,6 +406,10 @@ impl HameshWindowApp {
             }
         }
         self.scene_rev += 1;
+        // Blocks dashboards bind state to props: re-sync after every
+        // press so mouse, keyboard and inspector paths all stay live.
+        // Defensive on non-dashboard apps.
+        dashboard::refresh_dashboard(&mut self.app);
         (hit, r.success, focus)
     }
 
@@ -1309,8 +1320,14 @@ impl ApplicationHandler<UserEvent> for HameshWindowApp {
                             self.size.0 as f32,
                             self.size.1 as f32,
                         );
-                        let r = click_component_human(&mut self.app, &layout, "btn_inc");
+                        let target = if self.use_blocks {
+                            "dash-action"
+                        } else {
+                            "btn_inc"
+                        };
+                        let r = click_component_human(&mut self.app, &layout, target);
                         sync_label(&mut self.app);
+                        dashboard::refresh_dashboard(&mut self.app);
                         self.scene_rev += 1;
                         self.trace.record(
                             "hand.key_space",
@@ -1453,6 +1470,12 @@ fn main() {
     app.use_m3 = std::env::args().any(|a| a == "--m3");
     if app.use_m3 {
         println!("M3 mode: feed + composer (Tab/typing/Enter/wheel)");
+    }
+    app.use_blocks = std::env::args().any(|a| a == "--blocks");
+    if app.use_blocks {
+        app.app = dashboard::build_dashboard();
+        app.scene_rev += 1;
+        println!("BLOCKS mode: Agent X dashboard from hamesh-blocks");
     }
     app.use_inspect = std::env::args().any(|a| a == "--inspect");
     if app.use_inspect {

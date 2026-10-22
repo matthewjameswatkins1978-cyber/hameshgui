@@ -6,5 +6,6 @@ license.workspace = true
 
 [dependencies]
 hamesh-core = { path = "../hamesh-core" }
+hamesh-text = { path = "../hamesh-text" }
 taffy.workspace = true
 serde.workspace = true

@@ -106,14 +106,22 @@ pub fn build(app: &App, layout: &LayoutOutput, scene_revision: u64) -> Scene {
                 .get("surface")
                 .map(|t| hamesh_theme::resolve(t))
                 .unwrap_or_else(|| role_color(&role, &c.name));
-            let fill_frac = match (c.props.get("value"), c.props.get("min"), c.props.get("max")) {
-                (Some(v), min, max) => {
-                    let v: f32 = v.parse().unwrap_or(0.0);
-                    let lo: f32 = min.and_then(|s| s.parse().ok()).unwrap_or(0.0);
-                    let hi: f32 = max.and_then(|s| s.parse().ok()).unwrap_or(100.0);
-                    Some(((v - lo) / (hi - lo).max(1e-6)).clamp(0.0, 1.0))
+            // Progress fill is opt-in: only `block == "Progress"` nodes
+            // interpret value/min/max as a fill fraction. Other blocks
+            // (e.g. Metric tiles) reuse `value` as Eye metadata.
+            let is_progress = c.props.get("block").map(|s| s.as_str()) == Some("Progress");
+            let fill_frac = if is_progress {
+                match (c.props.get("value"), c.props.get("min"), c.props.get("max")) {
+                    (Some(v), min, max) => {
+                        let v: f32 = v.parse().unwrap_or(0.0);
+                        let lo: f32 = min.and_then(|s| s.parse().ok()).unwrap_or(0.0);
+                        let hi: f32 = max.and_then(|s| s.parse().ok()).unwrap_or(100.0);
+                        Some(((v - lo) / (hi - lo).max(1e-6)).clamp(0.0, 1.0))
+                    }
+                    _ => None,
                 }
-                _ => None,
+            } else {
+                None
             };
             Some(SceneNode {
                 id: c.id.0.clone(),
@@ -194,6 +202,7 @@ mod tests {
         app.add(
             "win",
             Component::new("bar", Role::Panel, "progress")
+                .with_prop("block", "Progress")
                 .with_prop("value", "75")
                 .with_prop("fill", "success"),
         );

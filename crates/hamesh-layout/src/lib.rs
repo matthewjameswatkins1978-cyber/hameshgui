@@ -9,6 +9,46 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use taffy::prelude::*;
 
+/// Text content for leaf measurement. Taffy calls back into parley
+/// so text nodes size to their content instead of collapsing.
+#[derive(Clone, Debug)]
+pub struct TextMeasure {
+    pub text: String,
+    pub font_size: f32,
+}
+
+/// Measure a text leaf: known dimensions win, otherwise parley.
+/// MinContent asks for the longest word (wrapping upper bound).
+fn measure_text(
+    ctx: Option<&TextMeasure>,
+    known: Size<Option<f32>>,
+    avail: Size<AvailableSpace>,
+) -> Size<f32> {
+    if let (Some(w), Some(h)) = (known.width, known.height) {
+        return Size {
+            width: w,
+            height: h,
+        };
+    }
+    let Some(tm) = ctx else {
+        return Size::ZERO;
+    };
+    let max_w = match avail.width {
+        AvailableSpace::Definite(x) => x,
+        AvailableSpace::MaxContent => f32::INFINITY,
+        AvailableSpace::MinContent => tm
+            .text
+            .split_whitespace()
+            .map(|wd| hamesh_text::TextLayout::new(wd, f32::INFINITY, tm.font_size).width())
+            .fold(0.0, f32::max),
+    };
+    let lay = hamesh_text::TextLayout::new(&tm.text, max_w.max(0.0), tm.font_size);
+    Size {
+        width: known.width.unwrap_or(lay.width()),
+        height: known.height.unwrap_or(lay.height()),
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Rect {
     pub x: f32,
@@ -81,16 +121,41 @@ fn child_style(comp: &hamesh_core::Component) -> Style {
     let w = parse("w")
         .map(Dimension::length)
         .unwrap_or(Dimension::auto());
-    let h = match (parse("h"), is_container) {
-        (Some(v), _) => Dimension::length(v),
-        (None, true) => Dimension::auto(),
-        (None, false) => Dimension::length(32.0),
+    // Text leaves measure their content (see measure_text); buttons
+    // measure their label the same way so rows size them. Every other
+    // leaf keeps the legacy 32px default so old screens don't shift.
+    let is_text = matches!(
+        comp.role,
+        hamesh_core::Role::Text | hamesh_core::Role::Status | hamesh_core::Role::Button
+    );
+    let h = match (parse("h"), is_container, is_text) {
+        (Some(v), _, _) => Dimension::length(v),
+        (None, true, _) => Dimension::auto(),
+        (None, false, true) => Dimension::auto(),
+        (None, false, false) => Dimension::length(32.0),
     };
     let grow = comp
         .props
         .get("flex_grow")
         .and_then(|v| v.parse::<f32>().ok())
-        .unwrap_or(if is_container { 1.0 } else { 0.0 });
+        // CSS-correct default: nothing grows unless asked. The legacy
+        // blanket grow=1 made same-role siblings (tiles, bars, icons)
+        // fight over free space. Structural fill (feed, main panels)
+        // opts in explicitly; Role::List keeps 1 (virtualized viewport).
+        .unwrap_or(if matches!(comp.role, hamesh_core::Role::List) {
+            1.0
+        } else {
+            0.0
+        });
+    // Cross-axis placement inside the parent: start|center|end|stretch
+    // (default stretch preserves legacy behavior; badges opt out).
+    // Taffy spells the variants START/CENTER/END/STRETCH.
+    let align = match comp.props.get("align").map(|s| s.as_str()) {
+        Some("start") => Some(AlignSelf::START),
+        Some("center") => Some(AlignSelf::CENTER),
+        Some("end") => Some(AlignSelf::END),
+        _ => None,
+    };
     let dir = match comp.props.get("layout").map(|s| s.as_str()) {
         Some("row") => FlexDirection::Row,
         _ => FlexDirection::Column,
@@ -105,6 +170,7 @@ fn child_style(comp: &hamesh_core::Component) -> Style {
         },
         flex_direction: dir,
         flex_grow: grow,
+        align_self: align,
         flex_wrap: if wrap {
             FlexWrap::Wrap
         } else {
@@ -125,8 +191,12 @@ fn child_style(comp: &hamesh_core::Component) -> Style {
 }
 
 /// Compute layout for the whole tree at a fixed viewport size.
+///
+/// Text leaves (`Text`/`Status` roles) carry their content as Taffy
+/// node context and are measured with parley, so labels size to
+/// their text. Every other leaf measures zero (style sizes win).
 pub fn compute(app: &App, viewport_w: f32, viewport_h: f32) -> LayoutOutput {
-    let mut taffy: TaffyTree<()> = TaffyTree::new();
+    let mut taffy: TaffyTree<Option<TextMeasure>> = TaffyTree::new();
     let mut node_of: HashMap<String, NodeId> = HashMap::new();
     let mut order: Vec<String> = Vec::new();
 
@@ -134,7 +204,7 @@ pub fn compute(app: &App, viewport_w: f32, viewport_h: f32) -> LayoutOutput {
     fn build(
         app: &App,
         id: &str,
-        taffy: &mut TaffyTree<()>,
+        taffy: &mut TaffyTree<Option<TextMeasure>>,
         node_of: &mut HashMap<String, NodeId>,
         order: &mut Vec<String>,
     ) {
@@ -144,9 +214,26 @@ pub fn compute(app: &App, viewport_w: f32, viewport_h: f32) -> LayoutOutput {
             build(app, &c.0, taffy, node_of, order);
             kids.push(node_of[&c.0]);
         }
-        let node = taffy
-            .new_with_children(child_style(comp), &kids)
-            .expect("taffy node");
+        let style = child_style(comp);
+        let node = if kids.is_empty()
+            && matches!(
+                comp.role,
+                hamesh_core::Role::Text | hamesh_core::Role::Status | hamesh_core::Role::Button
+            ) {
+            let font_size = comp
+                .props
+                .get("font_size")
+                .and_then(|v| v.parse::<f32>().ok())
+                .unwrap_or(16.0);
+            let text = comp.props.get("text").cloned().unwrap_or_default();
+            taffy
+                .new_leaf_with_context(style, Some(TextMeasure { text, font_size }))
+                .expect("taffy text leaf")
+        } else if kids.is_empty() {
+            taffy.new_leaf(style).expect("taffy leaf")
+        } else {
+            taffy.new_with_children(style, &kids).expect("taffy node")
+        };
         node_of.insert(id.to_string(), node);
         order.push(id.to_string());
     }
@@ -165,11 +252,19 @@ pub fn compute(app: &App, viewport_w: f32, viewport_h: f32) -> LayoutOutput {
         taffy.set_style(root_node, root_style).expect("root size");
     }
     taffy
-        .compute_layout(
+        .compute_layout_with_measure(
             root_node,
             Size {
                 width: AvailableSpace::Definite(viewport_w),
                 height: AvailableSpace::Definite(viewport_h),
+            },
+            |inputs, _node, ctx, style| {
+                taffy::compute::compute_leaf_layout(
+                    inputs,
+                    style,
+                    |_, _| 0.0,
+                    |known, avail| measure_text(ctx.and_then(|c| c.as_ref()), known, avail),
+                )
             },
         )
         .expect("taffy layout");
@@ -434,5 +529,71 @@ mod tests {
         let sp = out.get("sp").unwrap();
         let hit = hit_test(&app, &out, sp.rect.x + 2.0, sp.rect.y + 2.0);
         assert_ne!(hit.as_deref(), Some("sp"));
+    }
+
+    #[test]
+    fn text_leaf_measures_content() {
+        // In a row, a text leaf's width comes from parley: a 28px
+        // title measures wider than the same text at 12px, and
+        // neither collapses while it has content. (In a column the
+        // cross axis stretches, which is also correct.)
+        let mut app = App::new("win");
+        app.add(
+            "win",
+            Component::new("row", Role::Panel, "row").with_prop("layout", "row"),
+        );
+        app.add(
+            "row",
+            Component::new("big", Role::Text, "big")
+                .with_prop("text", "Agent X")
+                .with_prop("font_size", "28"),
+        );
+        app.add(
+            "row",
+            Component::new("small", Role::Text, "small")
+                .with_prop("text", "Agent X")
+                .with_prop("font_size", "12"),
+        );
+        let out = compute(&app, 600.0, 300.0);
+        let big = out.get("big").unwrap().rect.w;
+        let small = out.get("small").unwrap().rect.w;
+        assert!(big > 40.0, "28px title must measure wide, got {big}");
+        assert!(
+            small > 10.0 && small < big,
+            "12px narrower: {small} < {big}"
+        );
+    }
+
+    #[test]
+    fn bar_height_six_not_padding() {
+        // Painted thin leaves carry pad 0 (builders enforce it); an
+        // h=6 leaf with no pad lays out exactly 6 tall.
+        let mut app = App::new("win");
+        app.add(
+            "win",
+            Component::new("col", Role::Panel, "col").with_prop("layout", "column"),
+        );
+        app.add(
+            "col",
+            Component::new("bar", Role::Panel, "bar")
+                .with_prop("h", "6")
+                .with_prop("pad", "0"),
+        );
+        let out = compute(&app, 400.0, 300.0);
+        assert_eq!(out.get("bar").unwrap().rect.h, 6.0);
+    }
+
+    #[test]
+    fn explicit_h_still_wins_over_measure() {
+        // Legacy screens pin text height: the measure must not override.
+        let mut app = App::new("win");
+        app.add(
+            "win",
+            Component::new("s", Role::Status, "status")
+                .with_prop("text", "counter=0")
+                .with_prop("h", "28"),
+        );
+        let out = compute(&app, 400.0, 300.0);
+        assert_eq!(out.get("s").unwrap().rect.h, 28.0);
     }
 }

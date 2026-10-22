@@ -1003,6 +1003,7 @@ name = "hamesh-layout"
 version = "0.2.0"
 dependencies = [
  "hamesh-core",
+ "hamesh-text",
  "serde",
  "taffy",
 ]
@@ -1088,6 +1089,7 @@ name = "hamesh-window"
 version = "0.2.0"
 dependencies = [
  "hamesh-automation",
+ "hamesh-blocks",
  "hamesh-core",
  "hamesh-diag",
  "hamesh-inspect",

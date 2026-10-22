@@ -366,6 +366,11 @@ fn apply_command(app: &mut App, command_id: &str) {
         "reset" => {
             app.set_state("counter", "0");
         }
+        "inspect_design" => {
+            // Dashboard action: records that a human reviewed the design.
+            // The window re-syncs the button label via refresh_dashboard.
+            app.set_state("design_inspected", "true");
+        }
         _ => {
             app.bump();
         }
