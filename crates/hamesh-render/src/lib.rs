@@ -131,6 +131,8 @@ fn blit_text(pix: &mut Pixmap, node: &hamesh_scene::SceneNode) {
         &hamesh_text::FontSpec {
             family: node.font_family.clone(),
             vars: node.font_vars.clone(),
+            style: hamesh_text::FontSpec::parse_style(node.font_style.as_deref()),
+            tracking: node.tracking,
         },
     );
     // Empty text still gets a line box: the caret must render in an
@@ -154,6 +156,8 @@ fn blit_text(pix: &mut Pixmap, node: &hamesh_scene::SceneNode) {
             &hamesh_text::FontSpec {
                 family: node.font_family.clone(),
                 vars: node.font_vars.clone(),
+                style: hamesh_text::FontSpec::parse_style(node.font_style.as_deref()),
+                tracking: node.tracking,
             },
         )
     } else {

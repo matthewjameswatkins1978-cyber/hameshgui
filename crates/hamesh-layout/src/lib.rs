@@ -308,6 +308,8 @@ pub fn compute(app: &App, viewport_w: f32, viewport_h: f32) -> LayoutOutput {
                         shaping: hamesh_text::FontSpec::parse(
                             comp.props.get("font").map(String::as_str),
                             comp.props.get("font_vars").map(String::as_str),
+                            comp.props.get("font_style").map(String::as_str),
+                            comp.props.get("tracking").map(String::as_str),
                         ),
                     }),
                 )

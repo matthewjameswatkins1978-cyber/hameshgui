@@ -119,9 +119,8 @@ vendored under `assets/fonts` (deterministic on every machine,
 including CI). Substitution is never silent: the Eye reports
 `font_resolved` per node (family-level).
 
-Not yet wired: italic styles (no `font_style` prop — the
-Newsreader Italic face is vendored but unreachable), tracking
-(no letter-spacing prop), SOFT/WONK axes (parsed, untested on a
-live face). Grid-vs-Cabinet reads quiet on the dashboard for
- exactly this reason — both are condensed grotesques without
-their accents. Wire style/tracking, or accept the restraint.
+Not yet wired: tracking (no letter-spacing prop) and SOFT/WONK
+axes (parsed, untested on a live face). Grid-vs-Cabinet reads
+quiet on the dashboard for exactly this reason — both are
+condensed grotesques without their accents. Wire tracking, or
+accept the restraint.

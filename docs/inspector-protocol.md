@@ -40,7 +40,8 @@ Two transports speak it: the `hamesh` CLI (TCP) and `hamesh-mcp`
   `trim` (font-relative trim box), `metrics` (ascent/descent/…),
   `baseline`, `lines`, `font_family` + `font_vars` (as requested)
   and `font_resolved` (false when the family was absent and shaping
-  fell back — the interface stays correct, only this flag tells).
+  fell back — the interface stays correct, only this flag tells),
+  plus `font_style` (as requested) and `tracking` (px).
   This is the final truth: both renderers
   and the Eye consume it verbatim.
   Recipe for centered text: `|origin.x + advance/2 −

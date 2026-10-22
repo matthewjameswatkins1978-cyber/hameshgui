@@ -162,15 +162,33 @@ pub struct TextRun {
 pub struct FontSpec {
     pub family: Option<String>,
     pub vars: Vec<([u8; 4], f32)>,
+    /// Requested style (`font_style` prop): italic faces resolve
+    /// through font matching, `None` keeps the default. Part of
+    /// cache identity like every other shaping input.
+    pub style: Option<parley::style::FontStyle>,
+    /// Extra inter-glyph space in px (`tracking` prop, may be
+    /// negative). Positions shift; the rasterizer needs no change
+    /// (it paints glyphs where shaping put them).
+    pub tracking: f32,
 }
 
 impl FontSpec {
-    /// Stable identity for cache keys: family name plus each
-    /// axis tag and value bits, in declared order.
+    /// Stable identity for cache keys: family name, style, tracking
+    /// plus each axis tag and value bits, in declared order.
     pub fn fingerprint(&self) -> u64 {
         use std::hash::{Hash, Hasher};
         let mut h = std::collections::hash_map::DefaultHasher::new();
         self.family.hash(&mut h);
+        // FontStyle carries no Hash; bucket the variants by hand.
+        // Oblique (and futures) share one bucket: shaping still
+        // distinguishes them, only the cache is coarser.
+        let s = match self.style {
+            None => 0u8,
+            Some(parley::style::FontStyle::Italic) => 1u8,
+            Some(_) => 2u8,
+        };
+        s.hash(&mut h);
+        self.tracking.to_bits().hash(&mut h);
         for (tag, v) in &self.vars {
             tag.hash(&mut h);
             v.to_bits().hash(&mut h);
@@ -178,10 +196,17 @@ impl FontSpec {
         h.finish()
     }
 
-    /// Parse the `font` / `font_vars` component props (`font_vars`
-    /// is `"TAG value, ..."`, e.g. `"wdth 75, opsz 16"`). Malformed
-    /// entries are skipped, never fatal.
-    pub fn parse(font: Option<&str>, vars: Option<&str>) -> Self {
+    /// Parse the `font` / `font_vars` / `font_style` / `tracking`
+    /// component props (`font_vars` is `"TAG value, ..."`, e.g.
+    /// `"wdth 75, opsz 16"`; `font_style` is `"italic"` or absent;
+    /// `tracking` is extra px between glyphs, may be negative).
+    /// Malformed entries are skipped, never fatal.
+    pub fn parse(
+        font: Option<&str>,
+        vars: Option<&str>,
+        style: Option<&str>,
+        tracking: Option<&str>,
+    ) -> Self {
         let family = font.map(str::to_string);
         let mut out = Vec::new();
         if let Some(v) = vars {
@@ -197,7 +222,25 @@ impl FontSpec {
                 }
             }
         }
-        Self { family, vars: out }
+        let style = Self::parse_style(style);
+        let tracking = tracking.and_then(|t| t.parse::<f32>().ok()).unwrap_or(0.0);
+        Self {
+            family,
+            vars: out,
+            style,
+            tracking,
+        }
+    }
+
+    /// Parse a `font_style` prop: `"italic"` voices the italic face
+    /// through font matching; anything else (or absent) is upright.
+    /// Shared by scene resolution and renderer reconstruction so a
+    /// node means the same style on every path.
+    pub fn parse_style(style: Option<&str>) -> Option<parley::style::FontStyle> {
+        match style {
+            Some(s) if s.eq_ignore_ascii_case("italic") => Some(parley::style::FontStyle::Italic),
+            _ => None,
+        }
     }
 }
 
@@ -254,6 +297,12 @@ impl TextLayout {
                         })
                         .collect();
                     builder.push_default(StyleProperty::FontVariations((&vars[..]).into()));
+                }
+                if let Some(st) = spec.style {
+                    builder.push_default(StyleProperty::FontStyle(st));
+                }
+                if spec.tracking != 0.0 {
+                    builder.push_default(StyleProperty::LetterSpacing(spec.tracking));
                 }
                 let mut layout = builder.build(text);
                 layout.break_all_lines(Some(max_width));
@@ -738,6 +787,8 @@ mod tests {
                 &FontSpec {
                     family: Some("Instrument Sans".to_string()),
                     vars: vec![(*b"wdth", wdth)],
+                    style: None,
+                    tracking: 0.0,
                 },
             )
             .width()
@@ -763,6 +814,8 @@ mod tests {
         let spec = |wdth: Option<f32>| FontSpec {
             family: Some("Instrument Sans".to_string()),
             vars: wdth.map(|w| vec![(*b"wdth", w)]).unwrap_or_default(),
+            style: None,
+            tracking: 0.0,
         };
         let lay = |s: &FontSpec| TextLayout::new_varied("Hamburg", f32::INFINITY, 64.0, None, s);
         let (ld, lv) = (lay(&spec(None)), lay(&spec(Some(75.0))));
@@ -803,13 +856,18 @@ mod tests {
     #[test]
     fn font_spec_parse_keeps_valid_axes_drops_garbage() {
         let s = FontSpec::parse(
-            Some("Bahnschrift"),
+            Some("Instrument Sans"),
             Some("wdth 75, bogus, opsz nope, toolongtag 1, wght 700"),
+            Some("italic"),
+            Some("-0.5"),
         );
-        assert_eq!(s.family.as_deref(), Some("Bahnschrift"));
+        assert_eq!(s.family.as_deref(), Some("Instrument Sans"));
         assert_eq!(s.vars, vec![(*b"wdth", 75.0), (*b"wght", 700.0)]);
-        let empty = FontSpec::parse(None, None);
+        assert_eq!(s.style, Some(parley::style::FontStyle::Italic));
+        assert_eq!(s.tracking, -0.5);
+        let empty = FontSpec::parse(None, None, None, None);
         assert!(empty.family.is_none() && empty.vars.is_empty());
+        assert!(empty.style.is_none() && empty.tracking == 0.0);
         // Fingerprint distinguishes shaping configurations.
         assert_ne!(s.fingerprint(), empty.fingerprint());
     }
@@ -830,5 +888,73 @@ mod tests {
             assert!(font_family_available(f), "missing vendored face {f}");
         }
         assert!(!font_family_available("NoSuchFaceXYZ"));
+    }
+
+    #[test]
+    fn italic_style_resolves_the_italic_face() {
+        // `font_style: italic` must match the italic file through
+        // font matching — not synthesize, not ignore. Upright and
+        // italic Newsreader shape differently (different outlines).
+        register_fonts_from_dir(&bundled_fonts_dir());
+        let lay = |style: Option<parley::style::FontStyle>| {
+            TextLayout::new_varied(
+                "Hamburg",
+                f32::INFINITY,
+                64.0,
+                None,
+                &FontSpec {
+                    family: Some("Newsreader".to_string()),
+                    vars: vec![],
+                    style,
+                    tracking: 0.0,
+                },
+            )
+        };
+        let (up, it) = (lay(None), lay(Some(parley::style::FontStyle::Italic)));
+        eprintln!(
+            "style proof: upright={:.1} italic={:.1}",
+            up.width(),
+            it.width()
+        );
+        assert!(
+            (up.width() - it.width()).abs() >= 1.0,
+            "italic must shape a different face, not the upright"
+        );
+    }
+
+    #[test]
+    fn tracking_shifts_advance_deterministically() {
+        // Tracking is extra px per glyph (parley letter-spacing
+        // adds after each glyph, trailing included): the line grows
+        // by glyph_count * tracking. Negative narrows.
+        register_fonts_from_dir(&bundled_fonts_dir());
+        let lay = |tracking: f32| {
+            TextLayout::new_varied(
+                "Hamburg",
+                f32::INFINITY,
+                40.0,
+                None,
+                &FontSpec {
+                    family: Some("Instrument Sans".to_string()),
+                    vars: vec![],
+                    style: None,
+                    tracking,
+                },
+            )
+        };
+        let (plain, wide, tight) = (lay(0.0), lay(2.0), lay(-1.0));
+        let per = 7.0; // "Hamburg" = 7 glyphs, spacing after each
+        assert!(
+            (wide.width() - plain.width() - per * 2.0).abs() < 1.0,
+            "tracking +2 must add 14px: {} vs {}",
+            wide.width(),
+            plain.width()
+        );
+        assert!(
+            (plain.width() - tight.width() - per * 1.0).abs() < 1.0,
+            "tracking -1 must remove 7px: {} vs {}",
+            plain.width(),
+            tight.width()
+        );
     }
 }

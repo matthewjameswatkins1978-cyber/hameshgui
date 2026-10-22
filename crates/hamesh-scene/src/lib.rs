@@ -88,6 +88,12 @@ pub struct SceneNode {
     /// back: the interface stays correct, and the Eye reports the
     /// substitution here (family-level). True when no `font` prop.
     pub font_resolved: bool,
+    /// Requested style (`font_style` prop): `Some("italic")` voices
+    /// the italic face through font matching. `None` = upright.
+    pub font_style: Option<String>,
+    /// Extra inter-glyph px (`tracking` prop, may be negative).
+    /// Part of scene truth: advances and origins include it.
+    pub tracking: f32,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -197,6 +203,8 @@ pub fn build(app: &App, layout: &LayoutOutput, scene_revision: u64) -> Scene {
             let font_spec = hamesh_text::FontSpec::parse(
                 c.props.get("font").map(String::as_str),
                 c.props.get("font_vars").map(String::as_str),
+                c.props.get("font_style").map(String::as_str),
+                c.props.get("tracking").map(String::as_str),
             );
             // Substitution signal: a named family the collection does
             // not know falls back. Layout and paint stay correct;
@@ -335,6 +343,8 @@ pub fn build(app: &App, layout: &LayoutOutput, scene_revision: u64) -> Scene {
                 font_family: font_spec.family.clone(),
                 font_vars: font_spec.vars.clone(),
                 font_resolved,
+                font_style: c.props.get("font_style").cloned(),
+                tracking: font_spec.tracking,
             })
         })
         .collect();
@@ -393,6 +403,8 @@ mod tests {
         let spec = hamesh_text::FontSpec {
             family: Some("Instrument Sans".to_string()),
             vars: vec![(*b"wdth", 75.0)],
+            style: None,
+            tracking: 0.0,
         };
         let direct =
             hamesh_text::trim_box("Connected", f32::INFINITY, 13.0, None, &spec).expect("trim");

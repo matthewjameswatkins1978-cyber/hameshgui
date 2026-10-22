@@ -397,6 +397,20 @@ mod tests {
         // against the same Plex Mono technical voice. Three profiles,
         // one composition, three unmistakable treatments.
         voice_proof(&UNQUIET_GRID, "grid", "target/grid-proof.png");
+        // The guest appearance: the subtitle speaks Newsreader Italic.
+        let alt = build_dashboard_with(&UNQUIET_GRID);
+        let sub = alt.get("dash-sub").unwrap();
+        assert_eq!(
+            sub.props.get("font_style").map(|s| s.as_str()),
+            Some("italic")
+        );
+        let layout = hamesh_layout::compute(&alt, 800.0, 600.0);
+        let scene = hamesh_scene::build(&alt, &layout, 1);
+        let sn = scene.nodes.iter().find(|n| n.id == "dash-sub").unwrap();
+        assert!(
+            sn.font_resolved,
+            "italic kicker must resolve, not substitute"
+        );
     }
 
     /// Shared variety proof: `profile` voices the composition, the

@@ -584,14 +584,16 @@ pub fn button(s: &mut Scope, id: &str, label: &str, o: ButtonOpts) {
 
 // ---- Design profiles ----
 
-/// One typographic voice: a face plus its variation axes. Empty
-/// `vars` means the default instance. Faces that are absent on a
-/// machine fall back silently (parley/fontdb); profiles must only
-/// be asserted through structural properties, never absolute widths.
+/// One typographic voice: a face, its variation axes, and an
+/// optional style. Empty `vars` means the default instance;
+/// `style: Some("italic")` voices the italic face through font
+/// matching. Faces that are absent on a machine fall back silently
+/// (parley/fontdb) and the Eye reports the substitution.
 #[derive(Clone, Copy, Debug)]
 pub struct Voice {
     pub family: &'static str,
     pub vars: &'static str,
+    pub style: Option<&'static str>,
 }
 
 /// A design language's type contract: which voice speaks each
@@ -603,6 +605,9 @@ pub struct Profile {
     pub display: Voice,
     /// Readouts, labels, annotations (instrumental mono).
     pub technical: Voice,
+    /// The guest appearance: subtitles and kickers (humanist
+    /// break). `None` leaves them in the default face.
+    pub accent: Option<Voice>,
 }
 
 /// Signal Cabinet: Barlow Condensed display, IBM Plex Mono
@@ -612,11 +617,14 @@ pub const SIGNAL_CABINET: Profile = Profile {
     display: Voice {
         family: "Barlow Condensed",
         vars: "",
+        style: None,
     },
     technical: Voice {
         family: "IBM Plex Mono",
         vars: "",
+        style: None,
     },
+    accent: None,
 };
 
 /// Living Folio: Newsreader at display optical size for titles
@@ -626,41 +634,42 @@ pub const LIVING_FOLIO: Profile = Profile {
     display: Voice {
         family: "Newsreader",
         vars: "opsz 72",
+        style: None,
     },
     technical: Voice {
         family: "IBM Plex Mono",
         vars: "",
+        style: None,
     },
+    accent: None,
 };
 
 /// Unquiet Grid: Instrument Sans narrowed and weighted for
-/// display, Plex Mono technical. Width contrast, not weight
-/// shouting — one family keeps the grid calm.
+/// display, Plex Mono technical, Newsreader Italic kicker for
+/// the guest appearance. Width contrast, not weight shouting —
+/// one family keeps the grid calm, the italic breaks it once.
 pub const UNQUIET_GRID: Profile = Profile {
     display: Voice {
         family: "Instrument Sans",
         vars: "wdth 80, wght 650",
+        style: None,
     },
     technical: Voice {
         family: "IBM Plex Mono",
         vars: "",
+        style: None,
     },
+    accent: Some(Voice {
+        family: "Newsreader",
+        vars: "opsz 16",
+        style: Some("italic"),
+    }),
 };
 
-/// Reapplication contract: a profile owns `font` and `font_vars`
-/// on the block kinds it voices (Title, MetricValue, Caption,
-/// MetricLabel). Reapplying reconciles those two props on every
-/// node of a voiced kind with the new profile's desired state —
-/// set when voiced, removed when not — so Grid → Cabinet cannot
-/// leave `wdth 80, wght 650` behind. Props on other kinds (Button,
-/// Badge, Body, Heading, panels…) are never touched: genuine
-/// overrides there survive every switch. Overrides on voiced kinds
-/// are profile-managed — set them after `apply_profile`, or
-/// re-apply to reset. The app revision bumps iff a prop actually
-/// changed, so revision-dependent caches (frame cache, Eye
-/// staleness, drill rev tracking) invalidate exactly when paint can
-/// differ — and an idempotent reapply is a no-op down to the
-/// revision.
+/// Voice a whole composition: Title + MetricValue speak display,
+/// Caption + MetricLabel speak technical, Subtle speaks the accent
+/// when the profile has one. Everything else keeps the default
+/// face. Idempotent: re-applying changes nothing.
 pub fn apply_profile(app: &mut App, p: &Profile) {
     let mut changed = false;
     for c in app.components.values_mut() {
@@ -675,43 +684,23 @@ pub fn apply_profile(app: &mut App, p: &Profile) {
         let v = match kind {
             Some("Title") | Some("MetricValue") => Some(&p.display),
             Some("Caption") | Some("MetricLabel") => Some(&p.technical),
+            Some("Subtle") => p.accent.as_ref(),
             _ => None,
         };
-        let (font, vars) = match v {
-            Some(v) => (
-                Some(v.family.to_string()),
-                (!v.vars.is_empty()).then(|| v.vars.to_string()),
-            ),
-            None => (None, None),
-        };
-        reconcile_prop(c, "font", font, &mut changed);
-        reconcile_prop(c, "font_vars", vars, &mut changed);
-    }
-    if changed {
-        app.bump();
+        if let Some(v) = v {
+            voice_component(c, v);
+        }
     }
 }
 
-/// Reconcile one managed prop with its desired state: remove when
-/// `None`, set when different. Reports whether anything changed.
-fn reconcile_prop(
-    c: &mut hamesh_core::Component,
-    key: &str,
-    want: Option<String>,
-    changed: &mut bool,
-) {
-    let have = c.props.get(key).cloned();
-    if have == want {
-        return;
+/// Stamp one component with a voice: family, axes, style.
+fn voice_component(c: &mut hamesh_core::Component, v: &Voice) {
+    c.props.insert("font".to_string(), v.family.to_string());
+    if !v.vars.is_empty() {
+        c.props.insert("font_vars".to_string(), v.vars.to_string());
     }
-    *changed = true;
-    match want {
-        Some(v) => {
-            c.props.insert(key.to_string(), v);
-        }
-        None => {
-            c.props.remove(key);
-        }
+    if let Some(st) = v.style {
+        c.props.insert("font_style".to_string(), st.to_string());
     }
 }
 
