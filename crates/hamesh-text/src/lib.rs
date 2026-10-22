@@ -117,16 +117,48 @@ impl TextLayout {
     /// preferred metrics. Builders declare it from the type ramp so
     /// tokens and rendering agree; legacy nodes omit it.
     pub fn new(text: &str, max_width: f32, font_size: f32, line_height: Option<f32>) -> Self {
+        Self::new_varied(text, max_width, font_size, line_height, None, &[])
+    }
+
+    /// Lay out text in an optional font family with OpenType variation
+    /// axes applied (e.g. family `"Bahnschrift"`, `[(b"wdth", 75.0)]`).
+    /// `family: None` keeps the current default resolution; tags are
+    /// four raw bytes and values are axis units. Axes the resolved
+    /// font lacks are ignored by the shaper - check the design-profile
+    /// probe before depending on a specific axis. `None` family and
+    /// empty `variations` behave exactly like `new`.
+    pub fn new_varied(
+        text: &str,
+        max_width: f32,
+        font_size: f32,
+        line_height: Option<f32>,
+        family: Option<&str>,
+        variations: &[([u8; 4], f32)],
+    ) -> Self {
         FONT_CX.with(|fcx| {
             LAYOUT_CX.with(|lcx| {
                 let mut fcx = fcx.borrow_mut();
                 let mut lcx = lcx.borrow_mut();
                 let mut builder = lcx.ranged_builder(&mut fcx, text, 1.0, false);
+                if let Some(f) = family {
+                    builder.push_default(StyleProperty::FontFamily(
+                        parley::style::FontFamily::named(f),
+                    ));
+                }
                 builder.push_default(StyleProperty::FontSize(font_size));
                 if let Some(lh) = line_height {
                     builder.push_default(StyleProperty::LineHeight(
                         parley::style::LineHeight::Absolute(lh),
                     ));
+                }
+                if !variations.is_empty() {
+                    let vars: Vec<parley::setting::FontVariation> = variations
+                        .iter()
+                        .map(|(tag, v)| {
+                            parley::setting::FontVariation::new(parley::setting::Tag::new(tag), *v)
+                        })
+                        .collect();
+                    builder.push_default(StyleProperty::FontVariations((&vars[..]).into()));
                 }
                 let mut layout = builder.build(text);
                 layout.break_all_lines(Some(max_width));
@@ -582,30 +614,20 @@ mod tests {
     fn variable_axes_reach_shaping_when_supported() {
         // Phase B groundwork: design profiles need wdth/opsz and
         // beyond. Shapes one word in Bahnschrift (variable, ships
-        // with Windows) at two widths through the real parley path.
-        // Advances MUST differ if axes work end to end. Skips (never
-        // fails) where the font is absent — CI makes no such
-        // guarantee, and absence is not a Hamesh defect.
-        use parley::style::{FontFamily, StyleProperty};
+        // with Windows) at two widths through the public API.
+        // Advances MUST differ if family + axes work end to end.
+        // Skips (never fails) where the font is absent - CI makes no
+        // such guarantee, and absence is not a Hamesh defect.
         let probe = |wdth: f32| -> f32 {
-            FONT_CX.with(|fcx| {
-                LAYOUT_CX.with(|lcx| {
-                    let mut fcx = fcx.borrow_mut();
-                    let mut lcx = lcx.borrow_mut();
-                    let mut builder = lcx.ranged_builder(&mut fcx, "Hamburg", 1.0, false);
-                    builder
-                        .push_default(StyleProperty::FontFamily(FontFamily::named("Bahnschrift")));
-                    builder.push_default(StyleProperty::FontSize(64.0));
-                    let vars = [parley::setting::FontVariation::new(
-                        parley::setting::Tag::new(b"wdth"),
-                        wdth,
-                    )];
-                    builder.push_default(StyleProperty::FontVariations((&vars).into()));
-                    let mut layout = builder.build("Hamburg");
-                    layout.break_all_lines(None);
-                    layout.width()
-                })
-            })
+            TextLayout::new_varied(
+                "Hamburg",
+                f32::INFINITY,
+                64.0,
+                None,
+                Some("Bahnschrift"),
+                &[(*b"wdth", wdth)],
+            )
+            .width()
         };
         let (narrow, wide) = (probe(75.0), probe(100.0));
         if (narrow - wide).abs() < 1.0 {
