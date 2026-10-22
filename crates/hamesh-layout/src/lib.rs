@@ -53,8 +53,17 @@ impl LayoutOutput {
 }
 
 /// Style hints carried in component props:
-/// `w`, `h` (px), `flex_grow`, `layout: column|row`, `overlay: true`.
+/// `w`, `h` (px), `flex_grow`, `layout: column|row`, `overlay: true`,
+/// `pad` (px, default 12, 0 = flush), `gap` (px, default 8),
+/// `wrap: true` (flex-wrap for responsive equal-tile rows).
 fn child_style(comp: &hamesh_core::Component) -> Style {
+    let parse_nonneg = |k: &str, dflt: f32| -> f32 {
+        comp.props
+            .get(k)
+            .and_then(|v| v.parse::<f32>().ok())
+            .filter(|v| *v >= 0.0)
+            .unwrap_or(dflt)
+    };
     let parse = |k: &str| -> Option<f32> {
         comp.props
             .get(k)
@@ -86,6 +95,9 @@ fn child_style(comp: &hamesh_core::Component) -> Style {
         Some("row") => FlexDirection::Row,
         _ => FlexDirection::Column,
     };
+    let pad = parse_nonneg("pad", 12.0);
+    let gap = parse_nonneg("gap", 8.0);
+    let wrap = comp.props.get("wrap").map(|s| s == "true").unwrap_or(false);
     Style {
         size: Size {
             width: w,
@@ -93,15 +105,20 @@ fn child_style(comp: &hamesh_core::Component) -> Style {
         },
         flex_direction: dir,
         flex_grow: grow,
+        flex_wrap: if wrap {
+            FlexWrap::Wrap
+        } else {
+            FlexWrap::NoWrap
+        },
         gap: Size {
-            width: length(8.0),
-            height: length(8.0),
+            width: length(gap),
+            height: length(gap),
         },
         padding: taffy::Rect {
-            left: length(12.0),
-            right: length(12.0),
-            top: length(12.0),
-            bottom: length(12.0),
+            left: length(pad),
+            right: length(pad),
+            top: length(pad),
+            bottom: length(pad),
         },
         ..Default::default()
     }
@@ -327,5 +344,68 @@ mod tests {
         assert!(!btn.effectively_visible);
         let hit = hit_test(&app, &out, btn.rect.x + 2.0, btn.rect.y + 2.0);
         assert_ne!(hit.as_deref(), Some("btn"));
+    }
+
+    #[test]
+    fn pad_zero_is_flush() {
+        // pad=0 removes the container inset: child spans full width.
+        let mut app = App::new("win");
+        app.add(
+            "win",
+            Component::new("panel", Role::Panel, "flush").with_prop("pad", "0"),
+        );
+        app.add(
+            "panel",
+            Component::new("kid", Role::Panel, "kid").with_prop("h", "20"),
+        );
+        let out = compute(&app, 400.0, 300.0);
+        let kid = out.get("kid").unwrap();
+        // Full width minus nothing: flush edges (root has its own pad,
+        // so measure against the panel, not the viewport).
+        let panel = out.get("panel").unwrap();
+        assert!(
+            (kid.rect.x - panel.rect.x).abs() < 0.5,
+            "kid.x={} panel.x={}",
+            kid.rect.x,
+            panel.rect.x
+        );
+        assert!(
+            (kid.rect.w - panel.rect.w).abs() < 1.0,
+            "kid.w={} panel.w={}",
+            kid.rect.w,
+            panel.rect.w
+        );
+    }
+
+    #[test]
+    fn wrap_breaks_equal_tiles() {
+        // A row of two 200px tiles in a 300px viewport wraps: the
+        // second tile lands on the next line. Responsive metrics grid.
+        let mut app = App::new("win");
+        app.add(
+            "win",
+            Component::new("row", Role::Panel, "tiles")
+                .with_prop("layout", "row")
+                .with_prop("wrap", "true")
+                .with_prop("pad", "0")
+                .with_prop("gap", "0"),
+        );
+        for i in 0..2 {
+            app.add(
+                "row",
+                Component::new(&format!("t{i}"), Role::Panel, "tile")
+                    .with_prop("w", "200")
+                    .with_prop("h", "60"),
+            );
+        }
+        let out = compute(&app, 300.0, 300.0);
+        let t0 = out.get("t0").unwrap();
+        let t1 = out.get("t1").unwrap();
+        assert!(
+            t1.rect.y > t0.rect.y + 10.0,
+            "t1.y={} t0.y={}",
+            t1.rect.y,
+            t0.rect.y
+        );
     }
 }

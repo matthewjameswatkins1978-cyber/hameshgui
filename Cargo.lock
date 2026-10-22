@@ -910,7 +910,7 @@ dependencies = [
 
 [[package]]
 name = "hamesh-automation"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "hamesh-core",
  "hamesh-diag",
@@ -921,21 +921,21 @@ dependencies = [
 
 [[package]]
 name = "hamesh-cli"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "serde_json",
 ]
 
 [[package]]
 name = "hamesh-core"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "serde",
 ]
 
 [[package]]
 name = "hamesh-demo"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "hamesh-automation",
  "hamesh-core",
@@ -950,7 +950,7 @@ dependencies = [
 
 [[package]]
 name = "hamesh-diag"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "serde",
  "serde_json",
@@ -958,14 +958,14 @@ dependencies = [
 
 [[package]]
 name = "hamesh-drill"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "serde_json",
 ]
 
 [[package]]
 name = "hamesh-faults"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "hamesh-automation",
  "hamesh-core",
@@ -980,7 +980,7 @@ dependencies = [
 
 [[package]]
 name = "hamesh-inspect"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "hamesh-core",
  "hamesh-layout",
@@ -991,7 +991,7 @@ dependencies = [
 
 [[package]]
 name = "hamesh-layout"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "hamesh-core",
  "serde",
@@ -1000,7 +1000,7 @@ dependencies = [
 
 [[package]]
 name = "hamesh-mcp"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "rmcp",
  "schemars",
@@ -1011,14 +1011,14 @@ dependencies = [
 
 [[package]]
 name = "hamesh-mcp-drill"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "serde_json",
 ]
 
 [[package]]
 name = "hamesh-pi"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "serde",
  "serde_json",
@@ -1026,7 +1026,7 @@ dependencies = [
 
 [[package]]
 name = "hamesh-render"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "hamesh-core",
  "hamesh-layout",
@@ -1038,7 +1038,7 @@ dependencies = [
 
 [[package]]
 name = "hamesh-scene"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "hamesh-core",
  "hamesh-layout",
@@ -1047,7 +1047,7 @@ dependencies = [
 
 [[package]]
 name = "hamesh-text"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "cosmic-text",
  "parley",
@@ -1057,8 +1057,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "hamesh-theme"
+version = "0.2.0"
+
+[[package]]
 name = "hamesh-widgets"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "hamesh-core",
  "hamesh-layout",
@@ -1069,7 +1073,7 @@ dependencies = [
 
 [[package]]
 name = "hamesh-window"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "hamesh-automation",
  "hamesh-core",
