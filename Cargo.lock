@@ -920,6 +920,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "hamesh-blocks"
+version = "0.2.0"
+dependencies = [
+ "hamesh-core",
+ "hamesh-theme",
+ "serde",
+]
+
+[[package]]
 name = "hamesh-cli"
 version = "0.2.0"
 dependencies = [
