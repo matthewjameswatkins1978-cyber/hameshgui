@@ -371,6 +371,12 @@ fn apply_command(app: &mut App, command_id: &str) {
             // The window re-syncs the button label via refresh_dashboard.
             app.set_state("design_inspected", "true");
         }
+        "pause_worker" => {
+            // Pi panel action: toggles paused state; the window
+            // re-syncs the button label via refresh_pi_panel.
+            let paused = app.state.get("paused").map(|s| s.as_str()) == Some("true");
+            app.set_state("paused", if paused { "false" } else { "true" });
+        }
         _ => {
             app.bump();
         }

@@ -11,10 +11,13 @@ use taffy::prelude::*;
 
 /// Text content for leaf measurement. Taffy calls back into parley
 /// so text nodes size to their content instead of collapsing.
+/// `line_height` is the declared ramp value (None = font default);
+/// measure and render share it so boxes and pixels agree.
 #[derive(Clone, Debug)]
 pub struct TextMeasure {
     pub text: String,
     pub font_size: f32,
+    pub line_height: Option<f32>,
 }
 
 /// Measure a text leaf: known dimensions win, otherwise parley.
@@ -37,18 +40,24 @@ fn measure_text(
     let Some(tm) = ctx else {
         return Size::ZERO;
     };
+    let lh = tm.line_height;
     let max_w = match avail.width {
         AvailableSpace::Definite(x) => (x - 2.0 * TEXT_INSET_X).max(0.0),
         AvailableSpace::MaxContent => f32::INFINITY,
         AvailableSpace::MinContent => tm
             .text
             .split_whitespace()
-            .map(|wd| hamesh_text::TextLayout::new(wd, f32::INFINITY, tm.font_size).width())
+            .map(|wd| hamesh_text::TextLayout::new(wd, f32::INFINITY, tm.font_size, lh).width())
             .fold(0.0, f32::max),
     };
-    let lay = hamesh_text::TextLayout::new(&tm.text, max_w.max(0.0), tm.font_size);
+    let lay = hamesh_text::TextLayout::new(&tm.text, max_w.max(0.0), tm.font_size, lh);
+    // Pixel containment: fractional advances need the next whole pixel
+    // (raster floors origins). Without ceil, rect.w - inset can land a
+    // fraction short of the advance and paint wraps what layout kept
+    // single-line. Shrink:0 above keeps rect.w >= this measurement.
+    let contained = lay.width().ceil();
     Size {
-        width: known.width.unwrap_or(lay.width() + 2.0 * TEXT_INSET_X),
+        width: known.width.unwrap_or(contained + 2.0 * TEXT_INSET_X),
         height: known.height.unwrap_or(lay.height()),
     }
 }
@@ -101,7 +110,8 @@ impl LayoutOutput {
 /// `pad` (px, default 12, 0 = flush), `gap` (px, default 8),
 /// `wrap: true` (flex-wrap for responsive equal-tile rows),
 /// `align: start|center|end` (cross-axis, default stretch),
-/// `basis` (flex base px; 0 = share space equally regardless of content).
+/// `basis` (flex base px; 0 = share space equally regardless of content),
+/// `min_w` (readability floor: wrapping rows break instead of squeezing).
 fn child_style(comp: &hamesh_core::Component) -> Style {
     let parse_nonneg = |k: &str, dflt: f32| -> f32 {
         comp.props
@@ -130,6 +140,9 @@ fn child_style(comp: &hamesh_core::Component) -> Style {
     // Text leaves measure their content (see measure_text); buttons
     // measure their label the same way so rows size them. Every other
     // leaf keeps the legacy 32px default so old screens don't shift.
+    // Text is incompressible (measured width stays valid only there):
+    // flex shrink must never squeeze labels, or paint wraps what
+    // layout kept single-line. Siblings (spacers) absorb the pressure.
     let is_text = matches!(
         comp.role,
         hamesh_core::Role::Text | hamesh_core::Role::Status | hamesh_core::Role::Button
@@ -166,7 +179,11 @@ fn child_style(comp: &hamesh_core::Component) -> Style {
         Some("row") => FlexDirection::Row,
         _ => FlexDirection::Column,
     };
-    let pad = parse_nonneg("pad", 12.0);
+    // Text leaves hug their glyphs: default pad 0 (a label's box is its
+    // line box; padding is the parent's job). Containers keep 12.
+    // Explicit `pad` always wins — badges/buttons declare their own.
+    let pad_default = if is_text { 0.0 } else { 12.0 };
+    let pad = parse_nonneg("pad", pad_default);
     let gap = parse_nonneg("gap", 8.0);
     let wrap = comp.props.get("wrap").map(|s| s == "true").unwrap_or(false);
     // Zero is a meaningful base (share equally), so unlike `parse`
@@ -178,14 +195,29 @@ fn child_style(comp: &hamesh_core::Component) -> Style {
         .filter(|v| *v >= 0.0)
         .map(Dimension::length)
         .unwrap_or(Dimension::auto());
+    // Readability floor: `min_w` keeps tiles/controls from crushing
+    // below usable width, so wrapping rows break instead of squeezing.
+    let min_w = comp
+        .props
+        .get("min_w")
+        .and_then(|v| v.parse::<f32>().ok())
+        .filter(|v| *v > 0.0)
+        .map(taffy::style::LengthPercentageAuto::length)
+        .unwrap_or(taffy::style::LengthPercentageAuto::AUTO);
     Style {
         size: Size {
             width: w,
             height: h,
         },
+        min_size: Size {
+            width: min_w,
+            height: taffy::style::LengthPercentageAuto::AUTO,
+        },
         flex_direction: dir,
         flex_grow: grow,
         flex_basis: basis,
+        // Incompressible text: shrink would invalidate measurement.
+        flex_shrink: if is_text { 0.0 } else { 1.0 },
         align_self: align,
         flex_wrap: if wrap {
             FlexWrap::Wrap
@@ -241,9 +273,21 @@ pub fn compute(app: &App, viewport_w: f32, viewport_h: f32) -> LayoutOutput {
                 .get("font_size")
                 .and_then(|v| v.parse::<f32>().ok())
                 .unwrap_or(16.0);
+            let line_height = comp
+                .props
+                .get("lh")
+                .and_then(|v| v.parse::<f32>().ok())
+                .filter(|v| *v > 0.0);
             let text = comp.props.get("text").cloned().unwrap_or_default();
             taffy
-                .new_leaf_with_context(style, Some(TextMeasure { text, font_size }))
+                .new_leaf_with_context(
+                    style,
+                    Some(TextMeasure {
+                        text,
+                        font_size,
+                        line_height,
+                    }),
+                )
                 .expect("taffy text leaf")
         } else if kids.is_empty() {
             taffy.new_leaf(style).expect("taffy leaf")
@@ -581,6 +625,77 @@ mod tests {
     }
 
     #[test]
+    fn text_leaf_defaults_to_no_padding() {
+        // C1 root cause: text leaves carried the container default
+        // pad 12 — 24px of phantom padding that dwarfed real gaps.
+        // A label's box is now its line box; padding is the parent's
+        // job. Explicit `pad` still applies (see pill test below).
+        let mut app = App::new("win");
+        app.add(
+            "win",
+            Component::new("t", Role::Text, "t")
+                .with_prop("text", "Hi")
+                .with_prop("font_size", "16"),
+        );
+        let out = compute(&app, 400.0, 300.0);
+        let r = out.get("t").unwrap().rect.clone();
+        let line = hamesh_text::TextLayout::new("Hi", f32::INFINITY, 16.0, None).height();
+        assert!(
+            (r.h - line).abs() < 1.0,
+            "label box {r:?} must hug its line ({line})"
+        );
+    }
+
+    #[test]
+    fn declared_line_height_sizes_the_box() {
+        // Ramp line heights are real: `lh` flows into parley and the
+        // measured box matches it.
+        let mut app = App::new("win");
+        app.add(
+            "win",
+            Component::new("t", Role::Text, "t")
+                .with_prop("text", "Hi")
+                .with_prop("font_size", "28")
+                .with_prop("lh", "34"),
+        );
+        let out = compute(&app, 400.0, 300.0);
+        let h = out.get("t").unwrap().rect.h;
+        assert!((h - 34.0).abs() < 1.0, "lh=34 must size the box, got {h}");
+    }
+
+    #[test]
+    fn text_leaf_refuses_flex_shrink() {
+        // Paint/layout agreement: a heading beside a greedy spacer keeps
+        // its measured width instead of squeezing (which wrapped paint
+        // but not layout — the "Development" truncation).
+        let mut app = App::new("win");
+        app.add(
+            "win",
+            Component::new("row", Role::Panel, "row")
+                .with_prop("layout", "row")
+                .with_prop("pad", "0")
+                .with_prop("gap", "0"),
+        );
+        app.add(
+            "row",
+            Component::new("h", Role::Text, "h")
+                .with_prop("text", "Development progress")
+                .with_prop("font_size", "18"),
+        );
+        app.add(
+            "row",
+            Component::new("sp", Role::Panel, "sp")
+                .with_prop("ghost", "true")
+                .with_prop("flex_grow", "1"),
+        );
+        let out = compute(&app, 744.0, 100.0);
+        let w = out.get("h").unwrap().rect.w;
+        let full =
+            hamesh_text::TextLayout::new("Development progress", f32::INFINITY, 18.0, None).width();
+        assert!(w >= full - 1.0, "heading kept {w}, measured {full}");
+    }
+
+    #[test]
     fn bar_height_six_not_padding() {
         // Painted thin leaves carry pad 0 (builders enforce it); an
         // h=6 leaf with no pad lays out exactly 6 tall.
@@ -628,7 +743,7 @@ mod tests {
         );
         let out = compute(&app, 400.0, 300.0);
         let w = out.get("pill").unwrap().rect.w;
-        let glyphs = hamesh_text::TextLayout::new("Connected", f32::INFINITY, 13.0).width();
+        let glyphs = hamesh_text::TextLayout::new("Connected", f32::INFINITY, 13.0, None).width();
         assert!(
             w >= glyphs + 8.0,
             "pill box {w} must contain glyphs {glyphs} plus padding"

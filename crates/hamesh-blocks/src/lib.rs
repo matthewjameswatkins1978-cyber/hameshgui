@@ -162,13 +162,17 @@ pub fn divider(s: &mut Scope, id: &str) {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct TextOpts {
     pub size: f32,
+    pub line_height: f32,
     pub token: String,
 }
 
 impl TextOpts {
-    pub fn sized(size: f32, token: &str) -> Self {
+    /// Full ramp entry: size + line height travel together so the
+    /// type ramp and actual rendering stay consistent (acceptance 5).
+    pub fn sized(size: f32, line_height: f32, token: &str) -> Self {
         Self {
             size,
+            line_height,
             token: token.to_string(),
         }
     }
@@ -178,52 +182,63 @@ fn text_node(kind: &str, id: &str, text: &str, o: &TextOpts) -> Component {
     let mut c = styled(Role::Text, id, id, kind);
     c.props.insert("text".to_string(), text.to_string());
     c.props.insert("font_size".to_string(), o.size.to_string());
+    c.props.insert("lh".to_string(), o.line_height.to_string());
     c.props.insert("text_token".to_string(), o.token.clone());
     c
 }
 
 /// Prominent screen/page title.
 pub fn title(s: &mut Scope, id: &str, text: &str) {
-    let (size, _) = hamesh_theme::type_ramp::TITLE;
-    s.leaf(text_node("Title", id, text, &TextOpts::sized(size, "text")));
+    let (size, lh) = hamesh_theme::type_ramp::TITLE;
+    s.leaf(text_node(
+        "Title",
+        id,
+        text,
+        &TextOpts::sized(size, lh, "text"),
+    ));
 }
 
 /// Section heading.
 pub fn heading(s: &mut Scope, id: &str, text: &str) {
-    let (size, _) = hamesh_theme::type_ramp::HEADING;
+    let (size, lh) = hamesh_theme::type_ramp::HEADING;
     s.leaf(text_node(
         "Heading",
         id,
         text,
-        &TextOpts::sized(size, "text"),
+        &TextOpts::sized(size, lh, "text"),
     ));
 }
 
 /// Standard body copy.
 pub fn body(s: &mut Scope, id: &str, text: &str) {
-    let (size, _) = hamesh_theme::type_ramp::BODY;
-    s.leaf(text_node("Body", id, text, &TextOpts::sized(size, "text")));
+    let (size, lh) = hamesh_theme::type_ramp::BODY;
+    s.leaf(text_node(
+        "Body",
+        id,
+        text,
+        &TextOpts::sized(size, lh, "text"),
+    ));
 }
 
 /// Small descriptive label.
 pub fn caption(s: &mut Scope, id: &str, text: &str) {
-    let (size, _) = hamesh_theme::type_ramp::CAPTION;
+    let (size, lh) = hamesh_theme::type_ramp::CAPTION;
     s.leaf(text_node(
         "Caption",
         id,
         text,
-        &TextOpts::sized(size, "muted"),
+        &TextOpts::sized(size, lh, "muted"),
     ));
 }
 
 /// Muted secondary line (subtitles, hints).
 pub fn subtle(s: &mut Scope, id: &str, text: &str) {
-    let (size, _) = hamesh_theme::type_ramp::BODY;
+    let (size, lh) = hamesh_theme::type_ramp::BODY;
     s.leaf(text_node(
         "Subtle",
         id,
         text,
-        &TextOpts::sized(size, "text_dim"),
+        &TextOpts::sized(size, lh, "text_dim"),
     ));
 }
 
@@ -235,6 +250,12 @@ pub struct CardOpts {
     pub radius: f32,
     pub surface: String,
     pub border_w: f32,
+    /// Gap between the card's direct sections. Distinctly larger
+    /// than inner-group gaps so sections read as groups (proximity).
+    pub gap: f32,
+    /// Flex grow: root-level cards set 1 to fill their window instead
+    /// of floating in dead space; nested cards keep 0 and hug content.
+    pub grow: f32,
 }
 
 impl Default for CardOpts {
@@ -244,6 +265,8 @@ impl Default for CardOpts {
             radius: hamesh_theme::radius::LG,
             surface: "surface".to_string(),
             border_w: 1.0,
+            gap: hamesh_theme::space::XL,
+            grow: 0.0,
         }
     }
 }
@@ -253,6 +276,10 @@ pub fn card(s: &mut Scope, id: &str, o: CardOpts, kids: impl FnOnce(&mut Scope))
     let mut c = styled(Role::Panel, id, id, "Card");
     c.props.insert("layout".to_string(), "column".to_string());
     c.props.insert("pad".to_string(), o.pad.to_string());
+    c.props.insert("gap".to_string(), o.gap.to_string());
+    if o.grow > 0.0 {
+        c.props.insert("flex_grow".to_string(), o.grow.to_string());
+    }
     c.props.insert("radius".to_string(), o.radius.to_string());
     c.props.insert("surface".to_string(), o.surface);
     if o.border_w > 0.0 {
@@ -312,12 +339,14 @@ impl Variant {
     }
 }
 
-/// Status pill: dot + label, colored by variant.
+/// Status pill: label colored by variant, border tinted to match.
+/// (No dot glyph — the tinted border is the indicator.)
 pub fn badge(s: &mut Scope, id: &str, text: &str, v: Variant) {
-    let (size, _) = hamesh_theme::type_ramp::LABEL;
+    let (size, lh) = hamesh_theme::type_ramp::LABEL;
     let mut c = styled(Role::Status, id, id, "Badge");
     c.props.insert("text".to_string(), text.to_string());
     c.props.insert("font_size".to_string(), size.to_string());
+    c.props.insert("lh".to_string(), lh.to_string());
     c.props
         .insert("text_token".to_string(), v.text().to_string());
     c.props
@@ -392,6 +421,9 @@ pub fn metric(s: &mut Scope, id: &str, o: MetricOpts) {
     tile.props.insert("flex_grow".to_string(), "1".to_string());
     // Base zero: tiles share the row equally regardless of content.
     tile.props.insert("basis".to_string(), "0".to_string());
+    // Readability floor: below this width tiles stack instead of
+    // crushing (wrapping rows honor min widths when breaking).
+    tile.props.insert("min_w".to_string(), "140".to_string());
     tile.props.insert("value".to_string(), o.value.clone());
     tile.props
         .insert("metric_label".to_string(), o.label.clone());
@@ -404,19 +436,19 @@ pub fn metric(s: &mut Scope, id: &str, o: MetricOpts) {
             "raised",
             20.0,
         );
-        let (vsize, _) = hamesh_theme::type_ramp::METRIC_VALUE;
+        let (vsize, vlh) = hamesh_theme::type_ramp::METRIC_VALUE;
         t.leaf(text_node(
             "MetricValue",
             &format!("{id}-value"),
             &o.value,
-            &TextOpts::sized(vsize, "text"),
+            &TextOpts::sized(vsize, vlh, "text"),
         ));
-        let (lsize, _) = hamesh_theme::type_ramp::CAPTION;
+        let (lsize, llh) = hamesh_theme::type_ramp::CAPTION;
         t.leaf(text_node(
             "MetricLabel",
             &format!("{id}-label"),
             &o.label,
-            &TextOpts::sized(lsize, "muted"),
+            &TextOpts::sized(lsize, llh, "muted"),
         ));
     });
 }
@@ -511,10 +543,11 @@ impl ButtonOpts {
 /// Labeled button with a named action. The host app owns the action —
 /// Blocks never invent behaviour, only declare the intent.
 pub fn button(s: &mut Scope, id: &str, label: &str, o: ButtonOpts) {
-    let (size, _) = hamesh_theme::type_ramp::LABEL;
+    let (size, lh) = hamesh_theme::type_ramp::LABEL;
     let mut c = styled(Role::Button, id, label, "Button");
     c.props.insert("text".to_string(), label.to_string());
     c.props.insert("font_size".to_string(), size.to_string());
+    c.props.insert("lh".to_string(), lh.to_string());
     c.props
         .insert("text_token".to_string(), o.variant.text().to_string());
     c.props

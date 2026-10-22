@@ -63,11 +63,20 @@ pub struct TextRun {
 }
 
 impl TextLayout {
-    pub fn new(text: &str, max_width: f32, font_size: f32) -> Self {
+    /// Lay out text. `line_height` is an absolute px line box
+    /// (parley `LineHeight::Absolute`); `None` keeps the font's
+    /// preferred metrics. Builders declare it from the type ramp so
+    /// tokens and rendering agree; legacy nodes omit it.
+    pub fn new(text: &str, max_width: f32, font_size: f32, line_height: Option<f32>) -> Self {
         let mut fcx = FontContext::new();
         let mut lcx: LayoutContext<peniko::Brush> = LayoutContext::new();
         let mut builder = lcx.ranged_builder(&mut fcx, text, 1.0, false);
         builder.push_default(StyleProperty::FontSize(font_size));
+        if let Some(lh) = line_height {
+            builder.push_default(StyleProperty::LineHeight(
+                parley::style::LineHeight::Absolute(lh),
+            ));
+        }
         let mut layout = builder.build(text);
         layout.break_all_lines(Some(max_width));
         Self { layout }
@@ -142,11 +151,16 @@ impl InkBox {
     }
 }
 
-fn ink_uncached(text: &str, max_width: f32, font_size: f32) -> Option<InkBox> {
+fn ink_uncached(
+    text: &str,
+    max_width: f32,
+    font_size: f32,
+    line_height: Option<f32>,
+) -> Option<InkBox> {
     if text.trim().is_empty() {
         return None;
     }
-    let layout = TextLayout::new(text, max_width, font_size);
+    let layout = TextLayout::new(text, max_width, font_size, line_height);
     let baseline = layout.first_baseline()?;
     let glyphs = glue::rasterize_layout(&layout);
     let mut x0 = f32::INFINITY;
@@ -182,22 +196,38 @@ fn ink_uncached(text: &str, max_width: f32, font_size: f32) -> Option<InkBox> {
 /// Bounded memoization: ink is a pure function of shaped text, and
 /// live frames re-query the same strings constantly. 512 entries,
 /// cleared wholesale when full (simplest correct eviction).
-type InkCache = std::sync::Mutex<std::collections::HashMap<(String, u32, u32), Option<InkBox>>>;
+type InkCache =
+    std::sync::Mutex<std::collections::HashMap<(String, u32, u32, Option<u32>), Option<InkBox>>>;
 static INK_CACHE: std::sync::OnceLock<InkCache> = std::sync::OnceLock::new();
 
-fn ink_key(text: &str, max_width: f32, font_size: f32) -> (String, u32, u32) {
-    (text.to_string(), max_width.to_bits(), font_size.to_bits())
+fn ink_key(
+    text: &str,
+    max_width: f32,
+    font_size: f32,
+    line_height: Option<f32>,
+) -> (String, u32, u32, Option<u32>) {
+    (
+        text.to_string(),
+        max_width.to_bits(),
+        font_size.to_bits(),
+        line_height.map(|v| v.to_bits()),
+    )
 }
 
 /// Shaped ink bounds for text, cached. Same inputs the renderers use:
-/// `max_width` is the wrapping width, `font_size` in px.
-pub fn ink_box(text: &str, max_width: f32, font_size: f32) -> Option<InkBox> {
-    let key = ink_key(text, max_width, font_size);
+/// `max_width` is the wrapping width, `font_size`/`line_height` in px.
+pub fn ink_box(
+    text: &str,
+    max_width: f32,
+    font_size: f32,
+    line_height: Option<f32>,
+) -> Option<InkBox> {
+    let key = ink_key(text, max_width, font_size, line_height);
     let cache = INK_CACHE.get_or_init(|| std::sync::Mutex::new(std::collections::HashMap::new()));
     if let Some(hit) = cache.lock().expect("ink cache").get(&key) {
         return *hit;
     }
-    let v = ink_uncached(text, max_width, font_size);
+    let v = ink_uncached(text, max_width, font_size, line_height);
     let mut c = cache.lock().expect("ink cache");
     if c.len() >= 512 {
         c.clear();
@@ -219,7 +249,7 @@ pub fn cap_height_ref(font_size: f32) -> f32 {
     if let Some(hit) = cache.lock().expect("cap cache").get(&key) {
         return *hit;
     }
-    let v = ink_uncached("H", 400.0, font_size)
+    let v = ink_uncached("H", 400.0, font_size, None)
         .map(|b| (b.baseline - b.y0).max(1.0))
         .unwrap_or(font_size * 0.7);
     let mut c = cache.lock().expect("cap cache");
@@ -250,11 +280,16 @@ pub struct FontTrim {
     pub advance: f32,
 }
 
-pub fn trim_box(text: &str, max_width: f32, font_size: f32) -> Option<FontTrim> {
+pub fn trim_box(
+    text: &str,
+    max_width: f32,
+    font_size: f32,
+    line_height: Option<f32>,
+) -> Option<FontTrim> {
     if text.trim().is_empty() {
         return None;
     }
-    let layout = TextLayout::new(text, max_width, font_size);
+    let layout = TextLayout::new(text, max_width, font_size, line_height);
     if layout.line_count() != 1 {
         return None;
     }
@@ -276,7 +311,7 @@ pub fn trim_box(text: &str, max_width: f32, font_size: f32) -> Option<FontTrim> 
 }
 
 pub fn layout_parley(text: &str, max_width: f32) -> TextMetrics {
-    let layout = TextLayout::new(text, max_width, 16.0);
+    let layout = TextLayout::new(text, max_width, 16.0, None);
     let owned = layout.runs();
     TextMetrics {
         engine: "parley",
@@ -355,10 +390,10 @@ mod tests {
 
     #[test]
     fn ink_box_is_ground_truth() {
-        assert!(ink_box("", 400.0, 13.0).is_none());
-        assert!(ink_box("   ", 400.0, 13.0).is_none());
-        let ink = ink_box("Connected", 400.0, 13.0).expect("ink");
-        let lay = TextLayout::new("Connected", 400.0, 13.0);
+        assert!(ink_box("", 400.0, 13.0, None).is_none());
+        assert!(ink_box("   ", 400.0, 13.0, None).is_none());
+        let ink = ink_box("Connected", 400.0, 13.0, None).expect("ink");
+        let lay = TextLayout::new("Connected", 400.0, 13.0, None);
         // Bearings trimmed: ink narrower than the advance box.
         assert!(
             ink.w() < lay.width(),
@@ -376,17 +411,17 @@ mod tests {
             ink.y1
         );
         // Cached call agrees.
-        assert_eq!(ink_box("Connected", 400.0, 13.0), Some(ink));
+        assert_eq!(ink_box("Connected", 400.0, 13.0, None), Some(ink));
         // Descenders extend ink below the baseline.
-        let desc = ink_box("Inspected", 400.0, 13.0).expect("ink");
+        let desc = ink_box("Inspected", 400.0, 13.0, None).expect("ink");
         assert!(desc.y1 > desc.baseline, "p tail should pass the baseline");
     }
 
     #[test]
     fn trim_is_font_relative_not_content_relative() {
         // Stability: Connected -> Disconnected must not move the box.
-        let a = trim_box("Connected", 400.0, 13.0).expect("trim a");
-        let b = trim_box("Disconnected", 400.0, 13.0).expect("trim b");
+        let a = trim_box("Connected", 400.0, 13.0, None).expect("trim a");
+        let b = trim_box("Disconnected", 400.0, 13.0, None).expect("trim b");
         assert!(
             (a.top - b.top).abs() < 0.01,
             "top moved: {:?} vs {:?}",
@@ -401,7 +436,7 @@ mod tests {
         );
         // Accents share the box: trim never clips diacritics by construction
         // (renderers align by trim, clip only to node rect).
-        let c = trim_box("Caf\u{e9}", 400.0, 13.0).expect("trim c");
+        let c = trim_box("Caf\u{e9}", 400.0, 13.0, None).expect("trim c");
         assert!(
             (a.top - c.top).abs() < 0.01,
             "accent moved top: {:?} vs {:?}",
@@ -409,8 +444,8 @@ mod tests {
             c
         );
         // Empty and wrapped text opt out to line-box placement.
-        assert!(trim_box("", 400.0, 13.0).is_none());
-        assert!(trim_box("a b c d e f g", 10.0, 13.0).is_none());
+        assert!(trim_box("", 400.0, 13.0, None).is_none());
+        assert!(trim_box("a b c d e f g", 10.0, 13.0, None).is_none());
         // Cap-alphabetic trim sits inside the line box: top at or below
         // the line top, bottom (baseline) strictly above the line bottom
         // whenever the font carries descender space.

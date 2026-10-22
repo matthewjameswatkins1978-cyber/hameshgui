@@ -41,7 +41,7 @@ pub fn glyph_origin(g: &RasterGlyph, ox: f32, oy: f32) -> (i32, i32) {
 
 /// Layout + rasterize in one pass (16px, kept for the spike proof).
 pub fn rasterize_parley(text: &str, max_width: f32) -> Vec<RasterGlyph> {
-    rasterize_layout(&TextLayout::new(text, max_width, 16.0))
+    rasterize_layout(&TextLayout::new(text, max_width, 16.0, None))
 }
 
 /// Rasterize owned positioned runs (CPU path). The swash `FontRef`

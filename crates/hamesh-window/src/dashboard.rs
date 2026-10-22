@@ -47,46 +47,55 @@ pub fn build_dashboard() -> App {
     let pval: f32 = progress_s.parse().unwrap_or(0.0);
     {
         let mut s = Scope::root(&mut app, "win");
-        card(&mut s, "dash", CardOpts::default(), |t| {
-            row(t, "dash-header", LayoutOpts::flat(), |r| {
-                col(r, "dash-title-col", LayoutOpts::tight(), |c| {
-                    title(c, "dash-title", "Agent X");
-                    subtle(c, "dash-sub", "Autonomous operations overview");
+        // Root card fills the window: an app panel, not a floating box.
+        card(
+            &mut s,
+            "dash",
+            CardOpts {
+                grow: 1.0,
+                ..Default::default()
+            },
+            |t| {
+                row(t, "dash-header", LayoutOpts::flat(), |r| {
+                    col(r, "dash-title-col", LayoutOpts::tight(), |c| {
+                        title(c, "dash-title", "Agent X");
+                        subtle(c, "dash-sub", "Autonomous operations overview");
+                    });
+                    spacer(r, "dash-hsp");
+                    badge(r, "dash-status", &status, Variant::Success);
                 });
-                spacer(r, "dash-hsp");
-                badge(r, "dash-status", &status, Variant::Success);
-            });
-            row(t, "dash-metrics", LayoutOpts::tiles(), |r| {
-                metric(r, "m-agents", MetricOpts::new("Agents", &agents, "users"));
-                metric(
-                    r,
-                    "m-tasks",
-                    MetricOpts::new("Tasks", &tasks, "list-checks"),
-                );
-                metric(
-                    r,
-                    "m-errors",
-                    MetricOpts::new("Errors", &errors, "triangle-alert"),
-                );
-            });
-            col(t, "dash-prog", LayoutOpts::tight(), |c| {
-                row(c, "dash-prog-head", LayoutOpts::flat(), |r| {
-                    heading(r, "dash-prog-title", "Development progress");
-                    spacer(r, "dash-psp");
-                    caption(r, "dash-prog-val", &format!("{progress_s}%"));
+                row(t, "dash-metrics", LayoutOpts::tiles(), |r| {
+                    metric(r, "m-agents", MetricOpts::new("Agents", &agents, "users"));
+                    metric(
+                        r,
+                        "m-tasks",
+                        MetricOpts::new("Tasks", &tasks, "list-checks"),
+                    );
+                    metric(
+                        r,
+                        "m-errors",
+                        MetricOpts::new("Errors", &errors, "triangle-alert"),
+                    );
                 });
-                progress(c, "dash-bar", ProgressOpts::new(pval));
-            });
-            row(t, "dash-action-row", LayoutOpts::flat(), |r| {
-                spacer(r, "dash-asp");
-                button(
-                    r,
-                    "dash-action",
-                    "Inspect design",
-                    ButtonOpts::new(ButtonVariant::Outline, "inspect_design"),
-                );
-            });
-        });
+                col(t, "dash-prog", LayoutOpts::tight(), |c| {
+                    row(c, "dash-prog-head", LayoutOpts::flat(), |r| {
+                        heading(r, "dash-prog-title", "Development progress");
+                        spacer(r, "dash-psp");
+                        caption(r, "dash-prog-val", &format!("{progress_s}%"));
+                    });
+                    progress(c, "dash-bar", ProgressOpts::new(pval));
+                });
+                row(t, "dash-action-row", LayoutOpts::flat(), |r| {
+                    spacer(r, "dash-asp");
+                    button(
+                        r,
+                        "dash-action",
+                        "Inspect design",
+                        ButtonOpts::new(ButtonVariant::Outline, "inspect_design"),
+                    );
+                });
+            },
+        );
     }
     refresh_dashboard(&mut app);
     app
@@ -190,6 +199,96 @@ mod tests {
             na.rect.h,
             nb.rect.y
         );
+    }
+
+    #[test]
+    fn composition_audit_reads_as_groups() {
+        // Machine-checked composition (§4): real measurements over
+        // the canonical geometry. Errors fail; observations stay out.
+        let app = build_dashboard();
+        let layout = hamesh_layout::compute(&app, 760.0, 560.0);
+        let scene = hamesh_scene::build(&app, &layout, 1);
+        let r = |id: &str| layout.get(id).unwrap().rect.clone();
+        let sn = |id: &str| scene.nodes.iter().find(|n| n.id == id).unwrap();
+        // 1. Title/subtitle form one group: visible glyph gap small.
+        let tg = r("dash-title");
+        let sg = r("dash-sub");
+        let gap = sg.y - (tg.y + tg.h);
+        assert!((0.0..=12.0).contains(&gap), "title/sub group gap: {gap}");
+        // 2. Progress heading paints whole: single line, trim present.
+        let pt = sn("dash-prog-title");
+        assert_eq!(pt.lines, 1, "prog heading must not wrap");
+        assert!(pt.trim.is_some(), "prog heading needs trim");
+        // 3. Tiles equal, aligned in one row.
+        let (a, b, c) = (r("m-agents"), r("m-tasks"), r("m-errors"));
+        assert!(
+            (a.w - b.w).abs() <= 1.0 && (b.w - c.w).abs() <= 1.0,
+            "equal tiles"
+        );
+        assert!(a.y == b.y && b.y == c.y, "one row");
+        // 4. No clipping anywhere in the composition.
+        for n in &scene.nodes {
+            assert!(!n.clipped, "{} clipped", n.id);
+        }
+        // 5. No sibling overlap within each container row/col.
+        for parent in [
+            "dash-header",
+            "dash-metrics",
+            "dash-action-row",
+            "dash-prog-head",
+        ] {
+            let kids: Vec<_> = app.get(parent).unwrap().children.iter().collect();
+            for (i, x) in kids.iter().enumerate() {
+                for y in &kids[i + 1..] {
+                    let (rx, ry) = (r(&x.0), r(&y.0));
+                    let overlap_x = (rx.x < ry.x + ry.w) && (ry.x < rx.x + rx.w);
+                    let overlap_y = (rx.y < ry.y + ry.h) && (ry.y < rx.y + rx.h);
+                    // Ghost spacers share rows by design (they hold space).
+                    let ghost = |id: &str| sn(id).ghost;
+                    if !(overlap_x && overlap_y) || ghost(&x.0) || ghost(&y.0) {
+                        continue;
+                    }
+                    panic!("overlap: {} vs {:?} vs {:?}", parent, rx, ry);
+                }
+            }
+        }
+        // 6. Section rhythm: gaps between card sections exceed the
+        // largest inner gap (proximity = grouping).
+        let card_gap: f32 = app
+            .get("dash")
+            .unwrap()
+            .props
+            .get("gap")
+            .unwrap()
+            .parse()
+            .unwrap();
+        let inner = [("dash-title-col", 4.0), ("dash-prog", 4.0)];
+        for (id, g) in inner {
+            let cg: f32 = app
+                .get(id)
+                .unwrap()
+                .props
+                .get("gap")
+                .unwrap_or(&"0".to_string())
+                .parse()
+                .unwrap_or(0.0);
+            assert!(
+                card_gap > g && card_gap > cg,
+                "card {card_gap} must exceed inner {g}/{cg}"
+            );
+        }
+    }
+
+    #[test]
+    fn medium_width_keeps_one_row() {
+        // 560px viewport: tiles still share a row (min_w 140 fits).
+        let app = build_dashboard();
+        let layout = hamesh_layout::compute(&app, 560.0, 560.0);
+        let (a, b) = (
+            layout.get("m-agents").unwrap(),
+            layout.get("m-tasks").unwrap(),
+        );
+        assert_eq!(a.rect.y, b.rect.y, "560px: one row");
     }
 
     #[test]

@@ -158,4 +158,38 @@ mod tests {
     fn unknown_token_falls_back_to_surface() {
         assert_eq!(resolve("nope"), SURFACE.rgba);
     }
+
+    fn luminance([r, g, b, _]: [u8; 4]) -> f32 {
+        let f = |c: u8| {
+            let v = c as f32 / 255.0;
+            if v <= 0.03928 {
+                v / 12.92
+            } else {
+                ((v + 0.055) / 1.055).powf(2.4)
+            }
+        };
+        0.2126 * f(r) + 0.7152 * f(g) + 0.0722 * f(b)
+    }
+
+    fn contrast(a: [u8; 4], b: [u8; 4]) -> f32 {
+        let (la, lb) = (luminance(a), luminance(b));
+        (la.max(lb) + 0.05) / (la.min(lb) + 0.05)
+    }
+
+    #[test]
+    fn text_pairs_meet_wcag_aa() {
+        // Guardrails, not a compliance claim: body text pairs must
+        // reach WCAG AA (4.5:1); large/secondary text 3:1 where noted.
+        for (fg, bg, min) in [
+            (TEXT.rgba, SURFACE.rgba, 4.5),
+            (TEXT.rgba, RAISED.rgba, 4.5),
+            (TEXT_DIM.rgba, RAISED.rgba, 4.5),
+            (MUTED.rgba, RAISED.rgba, 3.0),
+            (SUCCESS.rgba, RAISED.rgba, 3.0),
+            (TEXT.rgba, ACCENT.rgba, 3.0),
+        ] {
+            let c = contrast(fg, bg);
+            assert!(c >= min, "contrast {c:.2} < {min} for {fg:?} on {bg:?}");
+        }
+    }
 }

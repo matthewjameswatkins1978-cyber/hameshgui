@@ -84,6 +84,9 @@ pub struct TextGeom {
     pub metrics: Option<[f32; 4]>,
     /// Node-local first baseline y. Shared baselines = aligned text.
     pub baseline: Option<f32>,
+    /// Measured line count at the final width. 1 = paint lays the
+    /// run unwrapped (never re-wraps layout); >1 = intentional wrap.
+    pub lines: usize,
 }
 
 pub fn detail(
@@ -141,6 +144,7 @@ pub fn detail(
             trim: n.trim,
             metrics: n.metrics,
             baseline: n.baseline,
+            lines: n.lines,
         }),
         state_keys: app.state.keys().cloned().collect(),
         diagnostics,

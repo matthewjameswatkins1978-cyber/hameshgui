@@ -180,7 +180,7 @@ impl Composer {
         if prefix.is_empty() {
             return 0.0;
         }
-        hamesh_text::TextLayout::new(&prefix, max_width, 16.0).width()
+        hamesh_text::TextLayout::new(&prefix, max_width, 16.0, None).width()
     }
 
     pub fn take_submission(&mut self) -> Option<String> {
@@ -241,7 +241,7 @@ impl Feed {
         self.layout_width = width;
         for (i, m) in self.messages.iter().enumerate() {
             if self.heights[i] < 0.0 {
-                let l = hamesh_text::TextLayout::new(&m.text, width - 16.0, 16.0);
+                let l = hamesh_text::TextLayout::new(&m.text, width - 16.0, 16.0, None);
                 // Row = role line + text block + padding.
                 self.heights[i] = 24.0 + l.height().max(18.0) + 12.0;
             }

@@ -34,7 +34,14 @@ pub struct Frame {
 /// line-anchored for editing affordance.
 fn blit_text(pix: &mut Pixmap, node: &hamesh_scene::SceneNode) {
     let avail_w = (node.rect.w - 2.0 * hamesh_text::TEXT_INSET_X).max(8.0);
-    let layout = hamesh_text::TextLayout::new(&node.text, avail_w, node.font_size);
+    // Same wrap rule as scene build: single-line nodes lay out
+    // unwrapped so paint can never re-wrap what layout kept whole.
+    let wrap_w = if node.text.is_empty() || node.lines <= 1 {
+        f32::INFINITY
+    } else {
+        avail_w
+    };
+    let layout = hamesh_text::TextLayout::new(&node.text, wrap_w, node.font_size, node.line_height);
     // Empty text still gets a line box: the caret must render in an
     // empty focused composer (this early-return once ate the caret).
     let line_h = if node.text.is_empty() {

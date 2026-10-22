@@ -147,12 +147,24 @@ fn build_vscene(
             None
         } else {
             let avail = (r.w - 16.0).max(8.0);
+            // Same wrap rule as scene build + CPU: single-line nodes
+            // lay out unwrapped so paint never re-wraps layout.
+            let wrap_w = if node.lines <= 1 {
+                f32::INFINITY
+            } else {
+                avail
+            };
             let key = format!(
-                "{}|{:.0}|{:.0}|{}",
-                node.id, avail, node.font_size, node.text
+                "{}|{:.0}|{:.0}|{:?}|{}|{}",
+                node.id, avail, node.font_size, node.line_height, node.lines, node.text
             );
             if !cache.contains_key(&key) {
-                let layout = hamesh_text::TextLayout::new(&node.text, avail, node.font_size);
+                let layout = hamesh_text::TextLayout::new(
+                    &node.text,
+                    wrap_w,
+                    node.font_size,
+                    node.line_height,
+                );
                 cache.insert(key.clone(), layout);
             }
             cache.get(&key).filter(|l| l.height() > 0.0)

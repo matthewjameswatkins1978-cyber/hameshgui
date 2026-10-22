@@ -37,6 +37,13 @@ pub struct SceneNode {
     /// Text size (px) from `font_size` (default 16) and color from
     /// the `text_token` prop (default near-white `text`).
     pub font_size: f32,
+    /// Declared ramp line height (`lh` prop); None = font default.
+    /// Renderers resolve identically to measure.
+    pub line_height: Option<f32>,
+    /// Measured line count at the final width. Render contract: nodes
+    /// that measured single-line never re-wrap at paint time (paint
+    /// wraps only what layout wrapped); overflow clips at the rect.
+    pub lines: usize,
     pub text_rgba: [u8; 4],
     /// Ghost nodes (spacers) participate in layout and hit-testing
     /// policy but paint nothing.
@@ -144,10 +151,25 @@ pub fn build(app: &App, layout: &LayoutOutput, scene_revision: u64) -> Scene {
             // line origin both sides: +inset horizontally, +run origin
             // vertically. Trim x spans the advance width (stable).
             let font_size = num("font_size", 16.0).max(8.0);
+            let line_height = c
+                .props
+                .get("lh")
+                .and_then(|v| v.parse::<f32>().ok())
+                .filter(|v| *v > 0.0);
             let avail_w = (l.rect.w - 2.0 * hamesh_text::TEXT_INSET_X).max(8.0);
-            let lay = hamesh_text::TextLayout::new(&text, avail_w, font_size);
+            // Wrap rule shared with both renderers: wrap iff the final
+            // width wraps. Single-line nodes lay out unwrapped so paint
+            // can never re-wrap what layout kept whole.
+            let avail_lines =
+                hamesh_text::TextLayout::new(&text, avail_w, font_size, line_height).line_count();
+            let wrap_w = if text.is_empty() || avail_lines <= 1 {
+                f32::INFINITY
+            } else {
+                avail_w
+            };
+            let lay = hamesh_text::TextLayout::new(&text, wrap_w, font_size, line_height);
             let oy = hamesh_text::run_oy(l.rect.h, text.is_empty(), lay.height());
-            let ink = hamesh_text::ink_box(&text, avail_w, font_size).map(|b| {
+            let ink = hamesh_text::ink_box(&text, wrap_w, font_size, line_height).map(|b| {
                 [
                     b.x0 + hamesh_text::TEXT_INSET_X,
                     b.y0 + oy,
@@ -155,19 +177,20 @@ pub fn build(app: &App, layout: &LayoutOutput, scene_revision: u64) -> Scene {
                     b.y1 + oy,
                 ]
             });
-            let (trim, metrics, baseline) = match hamesh_text::trim_box(&text, avail_w, font_size) {
-                Some(t) => (
-                    Some([
-                        hamesh_text::TEXT_INSET_X,
-                        t.top + oy,
-                        hamesh_text::TEXT_INSET_X + t.advance,
-                        t.bottom + oy,
-                    ]),
-                    Some([t.ascent, t.descent, t.cap, t.line_height]),
-                    Some(t.baseline + oy),
-                ),
-                None => (None, None, None),
-            };
+            let (trim, metrics, baseline) =
+                match hamesh_text::trim_box(&text, wrap_w, font_size, line_height) {
+                    Some(t) => (
+                        Some([
+                            hamesh_text::TEXT_INSET_X,
+                            t.top + oy,
+                            hamesh_text::TEXT_INSET_X + t.advance,
+                            t.bottom + oy,
+                        ]),
+                        Some([t.ascent, t.descent, t.cap, t.line_height]),
+                        Some(t.baseline + oy),
+                    ),
+                    None => (None, None, None),
+                };
             Some(SceneNode {
                 id: c.id.0.clone(),
                 role: role.clone(),
@@ -194,6 +217,8 @@ pub fn build(app: &App, layout: &LayoutOutput, scene_revision: u64) -> Scene {
                     .unwrap_or_else(|| hamesh_theme::resolve("accent")),
                 icon: c.props.get("icon").cloned(),
                 font_size,
+                line_height,
+                lines: lay.line_count(),
                 text_rgba: c
                     .props
                     .get("text_token")

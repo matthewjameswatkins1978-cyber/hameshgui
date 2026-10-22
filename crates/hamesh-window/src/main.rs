@@ -21,6 +21,7 @@ use hamesh_widgets::{handle_key, rebuild_feed_nodes, sync_composer, Focus, Widge
 mod dashboard;
 mod gpu;
 mod inspect_srv;
+mod pi_panel;
 
 use std::num::NonZeroU32;
 use std::sync::Arc;
@@ -159,6 +160,9 @@ struct HameshWindowApp {
     /// Blocks dashboard mode (`--blocks`): the Agent X composition from
     /// hamesh-blocks replaces the M1 sample app. Same loop, Eye, Hand.
     use_blocks: bool,
+    /// Blocks Pi panel (`--blocks-pi`): same builders, worker status
+    /// composition. Implies `use_blocks` paths (refresh, Space).
+    use_blocks_pi: bool,
     shift_held: bool,
     m3_smoke_done: bool,
     /// M4 live loop: background Pi worker link. `None` unless `--pi`.
@@ -197,6 +201,7 @@ impl HameshWindowApp {
             widgets: None,
             use_m3: false,
             use_blocks: false,
+            use_blocks_pi: false,
             shift_held: false,
             m3_smoke_done: false,
             pi: None,
@@ -410,6 +415,7 @@ impl HameshWindowApp {
         // press so mouse, keyboard and inspector paths all stay live.
         // Defensive on non-dashboard apps.
         dashboard::refresh_dashboard(&mut self.app);
+        pi_panel::refresh_pi_panel(&mut self.app);
         (hit, r.success, focus)
     }
 
@@ -1320,7 +1326,9 @@ impl ApplicationHandler<UserEvent> for HameshWindowApp {
                             self.size.0 as f32,
                             self.size.1 as f32,
                         );
-                        let target = if self.use_blocks {
+                        let target = if self.use_blocks_pi {
+                            "pi-action"
+                        } else if self.use_blocks {
                             "dash-action"
                         } else {
                             "btn_inc"
@@ -1328,6 +1336,7 @@ impl ApplicationHandler<UserEvent> for HameshWindowApp {
                         let r = click_component_human(&mut self.app, &layout, target);
                         sync_label(&mut self.app);
                         dashboard::refresh_dashboard(&mut self.app);
+                        pi_panel::refresh_pi_panel(&mut self.app);
                         self.scene_rev += 1;
                         self.trace.record(
                             "hand.key_space",
@@ -1476,6 +1485,15 @@ fn main() {
         app.app = dashboard::build_dashboard();
         app.scene_rev += 1;
         println!("BLOCKS mode: Agent X dashboard from hamesh-blocks");
+    }
+    // Pi panel shares every path with the dashboard (refresh, Space,
+    // Eye, Hand); only the composition differs.
+    app.use_blocks_pi = std::env::args().any(|a| a == "--blocks-pi");
+    if app.use_blocks_pi {
+        app.use_blocks = true;
+        app.app = pi_panel::build_pi_panel();
+        app.scene_rev += 1;
+        println!("BLOCKS-PI mode: Pi worker panel from hamesh-blocks");
     }
     app.use_inspect = std::env::args().any(|a| a == "--inspect");
     if app.use_inspect {
