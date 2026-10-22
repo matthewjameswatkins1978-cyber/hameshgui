@@ -19,11 +19,15 @@ pub struct TextMeasure {
 
 /// Measure a text leaf: known dimensions win, otherwise parley.
 /// MinContent asks for the longest word (wrapping upper bound).
+/// Width includes the renderer's text origin inset on both sides
+/// (blit_text draws at rect.x + 8): measuring raw glyph width left
+/// tight pills 8px too narrow and text crossed the border.
 fn measure_text(
     ctx: Option<&TextMeasure>,
     known: Size<Option<f32>>,
     avail: Size<AvailableSpace>,
 ) -> Size<f32> {
+    const TEXT_INSET_X: f32 = 8.0;
     if let (Some(w), Some(h)) = (known.width, known.height) {
         return Size {
             width: w,
@@ -34,7 +38,7 @@ fn measure_text(
         return Size::ZERO;
     };
     let max_w = match avail.width {
-        AvailableSpace::Definite(x) => x,
+        AvailableSpace::Definite(x) => (x - 2.0 * TEXT_INSET_X).max(0.0),
         AvailableSpace::MaxContent => f32::INFINITY,
         AvailableSpace::MinContent => tm
             .text
@@ -44,7 +48,7 @@ fn measure_text(
     };
     let lay = hamesh_text::TextLayout::new(&tm.text, max_w.max(0.0), tm.font_size);
     Size {
-        width: known.width.unwrap_or(lay.width()),
+        width: known.width.unwrap_or(lay.width() + 2.0 * TEXT_INSET_X),
         height: known.height.unwrap_or(lay.height()),
     }
 }
@@ -607,5 +611,27 @@ mod tests {
         );
         let out = compute(&app, 400.0, 300.0);
         assert_eq!(out.get("s").unwrap().rect.h, 28.0);
+    }
+
+    #[test]
+    fn pill_text_fits_inside_its_box() {
+        // Matthew caught "Connected" crossing its pill border: the
+        // renderer draws glyphs at +8px, so the measured box must
+        // contain the full glyph run plus padding, not just parley.
+        let mut app = App::new("win");
+        app.add(
+            "win",
+            Component::new("pill", Role::Status, "pill")
+                .with_prop("text", "Connected")
+                .with_prop("font_size", "13")
+                .with_prop("pad", "4"),
+        );
+        let out = compute(&app, 400.0, 300.0);
+        let w = out.get("pill").unwrap().rect.w;
+        let glyphs = hamesh_text::TextLayout::new("Connected", f32::INFINITY, 13.0).width();
+        assert!(
+            w >= glyphs + 8.0,
+            "pill box {w} must contain glyphs {glyphs} plus padding"
+        );
     }
 }
