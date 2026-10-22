@@ -1033,6 +1033,7 @@ dependencies = [
  "hamesh-scene",
  "hamesh-text",
  "hamesh-theme",
+ "kurbo 0.13.1",
  "serde",
  "tiny-skia",
 ]

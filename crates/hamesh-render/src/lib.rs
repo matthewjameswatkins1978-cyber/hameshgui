@@ -10,6 +10,8 @@ use tiny_skia::{
     Color, FillRule, Paint, Path, PathBuilder, Pixmap, Rect as SkRect, Stroke, Transform,
 };
 
+pub mod icons;
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct FrameRef {
     pub scene_revision: u64,
@@ -204,6 +206,27 @@ pub fn render(scene: &Scene) -> Frame {
                     }
                 } else if let Some(r) = SkRect::from_xywh(bar.x, bar.y, bar.w, bar.h) {
                     pix.fill_rect(r, &paint_f, Transform::identity(), None);
+                }
+            }
+        }
+        // Icon glyph: stroked Lucide path in the text color, unknown
+        // names silently draw nothing (the Eye still shows the prop).
+        if let Some(ref iname) = node.icon {
+            if let Some(bez) = icons::icon_bez(iname) {
+                let (scale, dx, dy) = icons::icon_placement(node.rect.w, node.rect.h);
+                let ox = node.rect.x as f64 + dx;
+                let oy = node.rect.y as f64 + dy;
+                if let Some(ipath) = icons::bez_to_tinyskia(&bez, ox, oy, scale) {
+                    let mut paint_i = Paint::default();
+                    let [ir, ig, ib, _] = node.text_rgba;
+                    paint_i.set_color(Color::from_rgba8(ir, ig, ib, 255));
+                    let stroke = Stroke {
+                        width: (2.0 * scale) as f32,
+                        line_cap: tiny_skia::LineCap::Round,
+                        line_join: tiny_skia::LineJoin::Round,
+                        ..Default::default()
+                    };
+                    pix.stroke_path(&ipath, &paint_i, &stroke, Transform::identity(), None);
                 }
             }
         }
@@ -425,5 +448,53 @@ mod tests {
             "filled half is accent"
         );
         assert_eq!(right, hamesh_theme::resolve("track"), "empty half is track");
+    }
+
+    #[test]
+    fn icon_node_strokes_in_text_color() {
+        // The users glyph must leave text-colored stroke pixels; an
+        // unknown icon name must draw nothing and never crash.
+        let mut app = App::new("win");
+        app.add(
+            "win",
+            Component::new("ic", Role::Panel, "agents-icon")
+                .with_prop("w", "48")
+                .with_prop("h", "48")
+                .with_prop("icon", "users")
+                .with_prop("text_token", "accent_bright"),
+        );
+        app.add(
+            "win",
+            Component::new("bad", Role::Panel, "nope")
+                .with_prop("w", "48")
+                .with_prop("h", "48")
+                .with_prop("icon", "nope"),
+        );
+        let layout = hamesh_layout::compute(&app, 200.0, 200.0);
+        let scene = hamesh_scene::build(&app, &layout, 1);
+        assert_eq!(
+            scene.nodes.iter().find(|n| n.id == "ic").unwrap().icon,
+            Some("users".to_string())
+        );
+        let f = render(&scene);
+        let node = scene.nodes.iter().find(|n| n.id == "ic").unwrap();
+        let ink = hamesh_theme::resolve("accent_bright");
+        let mut stroke_pixels = 0;
+        let d = f.pixmap.data();
+        let w = f.pixmap.width() as usize;
+        let x0 = node.rect.x as usize;
+        let y0 = node.rect.y as usize;
+        for y in y0..(y0 + node.rect.h as usize) {
+            for x in x0..(x0 + node.rect.w as usize) {
+                let o = (y * w + x) * 4;
+                if d[o] == ink[0] && d[o + 1] == ink[1] && d[o + 2] == ink[2] {
+                    stroke_pixels += 1;
+                }
+            }
+        }
+        assert!(
+            stroke_pixels > 20,
+            "users glyph missing: {stroke_pixels} ink pixels"
+        );
     }
 }

@@ -9,7 +9,7 @@
 //! reconfigure; device-level failure -> report `GpuError::DeviceFailed`
 //! and let the caller fall back to the CPU path.
 
-use vello::kurbo::{Affine, RoundedRect};
+use vello::kurbo::{Affine, Cap, RoundedRect, Stroke};
 use vello::peniko::{Brush, Color, Fill};
 use vello::util::{RenderContext, RenderSurface};
 use vello::{AaConfig, RenderParams, Renderer, RendererOptions, Scene as VelloScene};
@@ -119,6 +119,22 @@ fn build_vscene(
                     &Brush::Solid(node_color(node.fill_rgba)),
                     None,
                     &bar,
+                );
+            }
+        }
+        // Icon glyph mirrors the CPU renderer: same BezPath, affine
+        // placement, round caps, text color.
+        if let Some(ref iname) = node.icon {
+            if let Some(bez) = hamesh_render::icons::icon_bez(iname) {
+                let (scale, dx, dy) = hamesh_render::icons::icon_placement(r.w, r.h);
+                let placed =
+                    Affine::translate((r.x as f64 + dx, r.y as f64 + dy)) * Affine::scale(scale);
+                v.stroke(
+                    &Stroke::new(2.0 * scale).with_caps(Cap::Round),
+                    placed,
+                    &Brush::Solid(node_color(node.text_rgba)),
+                    None,
+                    &bez,
                 );
             }
         }
