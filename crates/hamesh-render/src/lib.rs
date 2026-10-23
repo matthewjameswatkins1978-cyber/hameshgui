@@ -303,8 +303,7 @@ pub fn render(scene: &Scene) -> Frame {
     }
 }
 
-type FrameCache =
-    std::sync::Mutex<std::collections::VecDeque<((u64, u64, u32, u32), Pixmap)>>;
+type FrameCache = std::sync::Mutex<std::collections::VecDeque<((u64, u64, u32, u32), Pixmap)>>;
 static FRAME_CACHE: std::sync::OnceLock<FrameCache> = std::sync::OnceLock::new();
 
 fn render_uncached(scene: &Scene, w: u32, h: u32) -> Pixmap {
