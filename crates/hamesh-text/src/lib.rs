@@ -96,6 +96,17 @@ thread_local! {
     static FONTS_LOADED: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
 }
 
+/// Shaping-collection generation: bumped every time a thread loads
+/// fonts. Shape caches key on it, so entries shaped against a
+/// fallback collection can never be served after the real faces
+/// arrive (and vice versa) — no cross-test or startup-order poison.
+static FONT_GEN: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// Current shaping-collection generation for cache keys.
+pub fn font_generation() -> u64 {
+    FONT_GEN.load(std::sync::atomic::Ordering::SeqCst)
+}
+
 /// Directory holding Hamesh's vendored OFL profile faces
 /// (`assets/fonts` at the workspace root). Tests and apps resolve
 /// it from here so every crate shares one path.
@@ -116,6 +127,10 @@ pub fn register_fonts_from_dir(dir: &std::path::Path) -> usize {
         let before = fcx.collection.family_names().count();
         fcx.collection.load_fonts_from_paths([dir]);
         FONTS_LOADED.set(true);
+        // New faces change shaping: invalidate every shape cache by
+        // moving to a new generation (keys carry it; stale entries
+        // age out through the existing size caps, never served).
+        FONT_GEN.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         fcx.collection.family_names().count().saturating_sub(before)
     })
 }
@@ -272,6 +287,13 @@ impl TextLayout {
         line_height: Option<f32>,
         spec: &FontSpec,
     ) -> Self {
+        // Every shaping thread carries the vendored faces: the first
+        // shape on a thread loads them (guarded, amortized), so no
+        // caller — app, drill, or test — can shape a fallback where
+        // a profile face was meant. Explicit `register_fonts_from_dir`
+        // calls (e.g. at startup) stay the deterministic path; this
+        // only closes the ordering hole that poisoned shared caches.
+        register_fonts_from_dir(&bundled_fonts_dir());
         FONT_CX.with(|fcx| {
             LAYOUT_CX.with(|lcx| {
                 let mut fcx = fcx.borrow_mut();
@@ -437,7 +459,7 @@ fn ink_uncached(
 /// live frames re-query the same strings constantly. 512 entries,
 /// cleared wholesale when full (simplest correct eviction).
 type InkCache = std::sync::Mutex<
-    std::collections::HashMap<(String, u32, u32, Option<u32>, u64), Option<InkBox>>,
+    std::collections::HashMap<(u64, String, u32, u32, Option<u32>, u64), Option<InkBox>>,
 >;
 static INK_CACHE: std::sync::OnceLock<InkCache> = std::sync::OnceLock::new();
 
@@ -447,8 +469,9 @@ fn ink_key(
     font_size: f32,
     line_height: Option<f32>,
     spec: &FontSpec,
-) -> (String, u32, u32, Option<u32>, u64) {
+) -> (u64, String, u32, u32, Option<u32>, u64) {
     (
+        font_generation(),
         text.to_string(),
         max_width.to_bits(),
         font_size.to_bits(),
@@ -485,11 +508,11 @@ pub fn ink_box(
 /// so a trim derived from it cannot jump when the label text changes.
 /// Cached per (size, shaping); fallback 0.7*size keeps boxes sane if
 /// shaping fails.
-type CapCache = std::sync::Mutex<std::collections::HashMap<(u32, u64), f32>>;
+type CapCache = std::sync::Mutex<std::collections::HashMap<(u64, u32, u64), f32>>;
 static CAP_CACHE: std::sync::OnceLock<CapCache> = std::sync::OnceLock::new();
 
 pub fn cap_height_ref(font_size: f32, spec: &FontSpec) -> f32 {
-    let key = (font_size.to_bits(), spec.fingerprint());
+    let key = (font_generation(), font_size.to_bits(), spec.fingerprint());
     let cache = CAP_CACHE.get_or_init(|| std::sync::Mutex::new(std::collections::HashMap::new()));
     if let Some(hit) = cache.lock().expect("cap cache").get(&key) {
         return *hit;
@@ -533,6 +556,7 @@ pub fn trim_box(
     spec: &FontSpec,
 ) -> Option<FontTrim> {
     let key = (
+        font_generation(),
         text.to_string(),
         max_width.to_bits(),
         font_size.to_bits(),
@@ -553,7 +577,7 @@ pub fn trim_box(
 }
 
 type TrimCache = std::sync::Mutex<
-    std::collections::HashMap<(String, u32, u32, Option<u32>, u64), Option<FontTrim>>,
+    std::collections::HashMap<(u64, String, u32, u32, Option<u32>, u64), Option<FontTrim>>,
 >;
 static TRIM_CACHE: std::sync::OnceLock<TrimCache> = std::sync::OnceLock::new();
 

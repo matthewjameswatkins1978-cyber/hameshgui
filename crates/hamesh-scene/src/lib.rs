@@ -457,6 +457,38 @@ mod tests {
     }
 
     #[test]
+    fn fresh_threads_shape_with_vendored_faces() {
+        // Cache-poisoning regression: a thread that never explicitly
+        // registered must still resolve bundled faces (auto-register
+        // on first shape), so parallel tests can never cache fallback
+        // geometry under a key a voiced thread later reuses.
+        let shape_plex = || {
+            // Pristine collection: Plex is vendored, never systemic.
+            assert!(
+                !hamesh_text::font_family_available("IBM Plex Mono"),
+                "fresh thread must start unregistered"
+            );
+            let mut app = App::new("win");
+            app.add(
+                "win",
+                Component::new("b", Role::Status, "badge")
+                    .with_prop("text", "Connected")
+                    .with_prop("font", "IBM Plex Mono")
+                    .with_prop("font_size", "13")
+                    .with_prop("lh", "18"),
+            );
+            let layout = hamesh_layout::compute(&app, 800.0, 600.0);
+            let scene = build(&app, &layout, 1);
+            let n = scene.nodes.iter().find(|n| n.id == "b").unwrap();
+            assert!(n.font_resolved, "fresh thread must auto-register");
+            n.advance
+        };
+        let other = std::thread::scope(|s| s.spawn(shape_plex).join().unwrap());
+        let here = shape_plex();
+        assert_eq!(here, other, "one shaper, one answer, any thread");
+    }
+
+    #[test]
     fn style_props_resolve_to_scene_truth() {
         let mut app = App::new("win");
         app.add(

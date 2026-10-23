@@ -258,7 +258,9 @@ pub fn render(scene: &Scene) -> Frame {
     let h = scene.viewport_h.max(1.0) as u32;
     // Steady-state frames are identical: same content + viewport =
     // same pixels. Skip the whole paint on repeat (bounded LRU).
-    let key = (fingerprint(scene), w, h);
+    // The shaping generation joins the key: same scene shaped after
+    // new fonts arrive paints different pixels.
+    let key = (hamesh_text::font_generation(), fingerprint(scene), w, h);
     {
         let cache =
             FRAME_CACHE.get_or_init(|| std::sync::Mutex::new(std::collections::VecDeque::new()));
@@ -301,7 +303,8 @@ pub fn render(scene: &Scene) -> Frame {
     }
 }
 
-type FrameCache = std::sync::Mutex<std::collections::VecDeque<((u64, u32, u32), Pixmap)>>;
+type FrameCache =
+    std::sync::Mutex<std::collections::VecDeque<((u64, u64, u32, u32), Pixmap)>>;
 static FRAME_CACHE: std::sync::OnceLock<FrameCache> = std::sync::OnceLock::new();
 
 fn render_uncached(scene: &Scene, w: u32, h: u32) -> Pixmap {
