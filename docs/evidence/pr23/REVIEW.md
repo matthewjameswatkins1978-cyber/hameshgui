@@ -96,7 +96,6 @@ taste half remains human.
 Objective half: closed by measurement above (1 falsified, 2 falsified,
 3 falsified at shaping, 4 verified-shared-preexisting, 5 measured-shared).
 No treatment-specific objective defect found in any of the three.
-Taste half (character, authority, distinctness, intentionality): with
-Matthew, who holds the PNGs. The reviewer's question stands as briefed:
-are the three languages genuinely distinct, and are the unusual details
-intentional and effective?
+Taste (Matthew, 2026-10-23): all three accepted — "nice", differences
+noted as subtle. Contrast token: accepted as-is for now (revisitable)
+— no re-tokening; higher-impact work takes precedence.
