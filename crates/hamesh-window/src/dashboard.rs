@@ -392,6 +392,36 @@ mod tests {
     }
 
     #[test]
+    fn activity_rows_share_one_right_edge() {
+        // Objective geometry check (finding 3): the three activity
+        // metadata captions must end at the same x — the row spacer
+        // absorbs the slack, not the eye. Holds for every profile
+        // since rows share structure; advances differ, edges don't.
+        hamesh_text::register_fonts_from_dir(&hamesh_text::bundled_fonts_dir());
+        for (profile, name) in [
+            (&SIGNAL_CABINET, "cabinet"),
+            (&LIVING_FOLIO, "folio"),
+            (&UNQUIET_GRID, "grid"),
+        ] {
+            let app = build_dashboard_with(profile);
+            let layout = hamesh_layout::compute(&app, 800.0, 600.0);
+            let scene = hamesh_scene::build(&app, &layout, 1);
+            let mut edges = Vec::new();
+            for id in ["a1-sub", "a2-sub", "a3-sub"] {
+                let n = scene.nodes.iter().find(|n| n.id == id).unwrap();
+                edges.push(n.rect.x + n.origin[0] + n.advance);
+            }
+            eprintln!("{name} activity right edges: {edges:.1?}");
+            for w in edges.windows(2) {
+                assert!(
+                    (w[0] - w[1]).abs() < 1.5,
+                    "{name}: activity rows misaligned: {edges:.1?}"
+                );
+            }
+        }
+    }
+
+    #[test]
     fn grid_profile_gives_a_third_voice() {
         // The Unquiet Grid: narrowed, weighted Instrument Sans display
         // against the same Plex Mono technical voice. Three profiles,
