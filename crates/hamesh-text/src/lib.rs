@@ -923,6 +923,52 @@ mod tests {
     }
 
     #[test]
+    fn italic_selects_the_italic_file_by_bytes() {
+        // Finding 2: advance differences are necessary but not
+        // sufficient — prove the shaped run's font bytes ARE the
+        // italic file (ruling out fallback and synthesis alike).
+        // Skips only where the vendored faces are absent.
+        register_fonts_from_dir(&bundled_fonts_dir());
+        if !font_family_available("Newsreader") {
+            eprintln!("SKIP: vendored Newsreader absent");
+            return;
+        }
+        let dir = bundled_fonts_dir();
+        let roman = std::fs::read(dir.join("Newsreader[opsz,wght].ttf")).expect("roman face");
+        let italic =
+            std::fs::read(dir.join("Newsreader-Italic[opsz,wght].ttf")).expect("italic face");
+        assert_ne!(roman, italic, "sanity: the two files differ");
+        let lay = |style: Option<parley::style::FontStyle>| {
+            TextLayout::new_varied(
+                "Hamburg",
+                f32::INFINITY,
+                64.0,
+                None,
+                &FontSpec {
+                    family: Some("Newsreader".to_string()),
+                    vars: vec![],
+                    style,
+                    tracking: 0.0,
+                },
+            )
+            .runs()
+        };
+        let up = lay(None);
+        let it = lay(Some(parley::style::FontStyle::Italic));
+        assert!(!up.is_empty() && !it.is_empty(), "expected shaped runs");
+        assert_eq!(
+            up[0].font.data.data(),
+            roman.as_slice(),
+            "upright run must be the roman file"
+        );
+        assert_eq!(
+            it[0].font.data.data(),
+            italic.as_slice(),
+            "italic run must be the italic file"
+        );
+    }
+
+    #[test]
     fn tracking_shifts_advance_deterministically() {
         // Tracking is extra px per glyph (parley letter-spacing
         // adds after each glyph, trailing included): the line grows

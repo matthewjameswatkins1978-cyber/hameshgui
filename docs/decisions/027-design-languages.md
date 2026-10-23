@@ -116,11 +116,17 @@ rasterizer all carry variation coords end to end (regression
 tests prove spans track advances). The three profiles are live
 as `Profile` consts in hamesh-blocks, voiced by OFL faces
 vendored under `assets/fonts` (deterministic on every machine,
-including CI). Substitution is never silent: the Eye reports
-`font_resolved` per node (family-level).
+including CI). `font_style` resolves italic faces through font
+matching (byte-identity regression test) and `tracking` shifts
+advances by exactly glyphs × px; the Grid's Newsreader Italic
+kicker is live on the dashboard. Substitution is never silent:
+the Eye reports `font_resolved` per node — family-level only.
+It means the named family was found; it does NOT guarantee the
+requested style matched a real file (synthesis stays possible
+for families without one) or that every codepoint is covered
+(tofu stays possible). Style evidence comes from the
+byte-identity test, not the flag.
 
-Not yet wired: tracking (no letter-spacing prop) and SOFT/WONK
-axes (parsed, untested on a live face). Grid-vs-Cabinet reads
-quiet on the dashboard for exactly this reason — both are
-condensed grotesques without their accents. Wire tracking, or
-accept the restraint.
+Not yet wired: SOFT/WONK axes (parsed, untested on a live
+face) and GPU variable outlines (vello 0.11 has no coords API:
+positions exact, outlines default-instance — no parity claimed).

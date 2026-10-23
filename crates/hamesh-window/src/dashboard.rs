@@ -421,6 +421,17 @@ mod tests {
         hamesh_text::register_fonts_from_dir(&hamesh_text::bundled_fonts_dir());
         let cab = build_dashboard();
         let alt = build_dashboard_with(profile);
+        // Independence: identical content — only the voices differ.
+        let words = |app: &App| -> Vec<(String, String)> {
+            let mut v: Vec<(String, String)> = app
+                .components
+                .values()
+                .filter_map(|c| c.props.get("text").map(|t| (c.id.0.clone(), t.clone())))
+                .collect();
+            v.sort();
+            v
+        };
+        assert_eq!(words(&cab), words(&alt), "{name} must not change content");
         let layout_c = hamesh_layout::compute(&cab, 800.0, 600.0);
         let layout_a = hamesh_layout::compute(&alt, 800.0, 600.0);
         let scene_c = hamesh_scene::build(&cab, &layout_c, 1);
@@ -459,5 +470,9 @@ mod tests {
         let f = hamesh_render::render(&scene_a);
         std::fs::create_dir_all("target").unwrap();
         hamesh_render::save_png(&f, png).unwrap();
+        // Cabinet reference from the SAME run: identical content,
+        // viewport and state — the three PNGs are directly comparable.
+        let fc = hamesh_render::render(&scene_c);
+        hamesh_render::save_png(&fc, "target/cabinet-proof.png").unwrap();
     }
 }
