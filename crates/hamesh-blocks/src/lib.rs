@@ -647,21 +647,70 @@ pub const UNQUIET_GRID: Profile = Profile {
     },
 };
 
-/// Voice a whole composition: Title + MetricValue speak display,
-/// Caption + MetricLabel speak technical. Everything else keeps
-/// the default face. Idempotent: re-applying changes nothing.
+/// Reapplication contract: a profile owns `font` and `font_vars`
+/// on the block kinds it voices (Title, MetricValue, Caption,
+/// MetricLabel). Reapplying reconciles those two props on every
+/// node of a voiced kind with the new profile's desired state —
+/// set when voiced, removed when not — so Grid → Cabinet cannot
+/// leave `wdth 80, wght 650` behind. Props on other kinds (Button,
+/// Badge, Body, Heading, panels…) are never touched: genuine
+/// overrides there survive every switch. Overrides on voiced kinds
+/// are profile-managed — set them after `apply_profile`, or
+/// re-apply to reset. The app revision bumps iff a prop actually
+/// changed, so revision-dependent caches (frame cache, Eye
+/// staleness, drill rev tracking) invalidate exactly when paint can
+/// differ — and an idempotent reapply is a no-op down to the
+/// revision.
 pub fn apply_profile(app: &mut App, p: &Profile) {
+    let mut changed = false;
     for c in app.components.values_mut() {
-        let v = match c.props.get("block").map(|s| s.as_str()) {
+        let kind = c.props.get("block").map(|s| s.as_str());
+        let voiced = matches!(
+            kind,
+            Some("Title") | Some("MetricValue") | Some("Caption") | Some("MetricLabel")
+        );
+        if !voiced {
+            continue;
+        }
+        let v = match kind {
             Some("Title") | Some("MetricValue") => Some(&p.display),
             Some("Caption") | Some("MetricLabel") => Some(&p.technical),
             _ => None,
         };
-        if let Some(v) = v {
-            c.props.insert("font".to_string(), v.family.to_string());
-            if !v.vars.is_empty() {
-                c.props.insert("font_vars".to_string(), v.vars.to_string());
-            }
+        let (font, vars) = match v {
+            Some(v) => (
+                Some(v.family.to_string()),
+                (!v.vars.is_empty()).then(|| v.vars.to_string()),
+            ),
+            None => (None, None),
+        };
+        reconcile_prop(c, "font", font, &mut changed);
+        reconcile_prop(c, "font_vars", vars, &mut changed);
+    }
+    if changed {
+        app.bump();
+    }
+}
+
+/// Reconcile one managed prop with its desired state: remove when
+/// `None`, set when different. Reports whether anything changed.
+fn reconcile_prop(
+    c: &mut hamesh_core::Component,
+    key: &str,
+    want: Option<String>,
+    changed: &mut bool,
+) {
+    let have = c.props.get(key).cloned();
+    if have == want {
+        return;
+    }
+    *changed = true;
+    match want {
+        Some(v) => {
+            c.props.insert(key.to_string(), v);
+        }
+        None => {
+            c.props.remove(key);
         }
     }
 }
@@ -745,6 +794,91 @@ mod tests {
         let before = app.get("t").unwrap().props.clone();
         apply_profile(&mut app, &SIGNAL_CABINET);
         assert_eq!(app.get("t").unwrap().props, before);
+    }
+
+    #[test]
+    fn profile_switching_leaves_no_stale_typography() {
+        // Finding 1 regression: Grid → Cabinet → Folio → Grid on
+        // one instance. Each switch must exactly voice the new
+        // profile — no stale `font_vars` from the previous voice —
+        // while genuine overrides elsewhere survive and the revision
+        // bumps iff something actually changed.
+        let mut app = App::new("win");
+        {
+            let mut s = Scope::root(&mut app, "win");
+            card(&mut s, "c", CardOpts::default(), |t| {
+                title(t, "t", "Agent X");
+                caption(t, "cap", "75%");
+                button(t, "b", "Go", ButtonOpts::new(ButtonVariant::Outline, "go"));
+            });
+        }
+        // Genuine overrides: a manual face on an unvoiced kind, and
+        // a tracking value no profile manages. Both must survive.
+        app.get_mut("b")
+            .unwrap()
+            .props
+            .insert("font".into(), "Manual".into());
+        app.get_mut("cap")
+            .unwrap()
+            .props
+            .insert("tracking".into(), "2".into());
+        let voice = |app: &App| -> (Option<String>, Option<String>) {
+            let t = app.get("t").unwrap();
+            (
+                t.props.get("font").cloned(),
+                t.props.get("font_vars").cloned(),
+            )
+        };
+        let r0 = app.revision;
+        apply_profile(&mut app, &UNQUIET_GRID);
+        assert!(app.revision > r0, "first voicing must bump");
+        assert_eq!(
+            voice(&app),
+            (
+                Some("Instrument Sans".to_string()),
+                Some("wdth 80, wght 650".to_string())
+            )
+        );
+        let r1 = app.revision;
+        // Cabinet voices no axes: Grid's vars must be GONE, not stale.
+        apply_profile(&mut app, &SIGNAL_CABINET);
+        assert!(app.revision > r1, "voice change must bump");
+        assert_eq!(voice(&app), (Some("Barlow Condensed".to_string()), None));
+        let r2 = app.revision;
+        apply_profile(&mut app, &LIVING_FOLIO);
+        assert!(app.revision > r2, "voice change must bump");
+        assert_eq!(
+            voice(&app),
+            (Some("Newsreader".to_string()), Some("opsz 72".to_string()))
+        );
+        let r3 = app.revision;
+        apply_profile(&mut app, &UNQUIET_GRID);
+        assert!(app.revision > r3, "voice change must bump");
+        assert_eq!(
+            voice(&app),
+            (
+                Some("Instrument Sans".to_string()),
+                Some("wdth 80, wght 650".to_string())
+            )
+        );
+        // Idempotent reapply: props AND revision unchanged.
+        let (props_before, r4) = (app.get("t").unwrap().props.clone(), app.revision);
+        apply_profile(&mut app, &UNQUIET_GRID);
+        assert_eq!(app.revision, r4, "idempotent reapply must not bump");
+        assert_eq!(app.get("t").unwrap().props, props_before);
+        // Overrides survived every switch.
+        assert_eq!(
+            app.get("b").unwrap().props.get("font").map(|s| s.as_str()),
+            Some("Manual")
+        );
+        assert_eq!(
+            app.get("cap")
+                .unwrap()
+                .props
+                .get("tracking")
+                .map(|s| s.as_str()),
+            Some("2")
+        );
     }
 
     #[test]
