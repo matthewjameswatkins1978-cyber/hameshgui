@@ -1,0 +1,96 @@
+{
+  "icon_rects": [
+    [
+      "t-ok-icon",
+      [
+        208.0,
+        84.0,
+        20.0,
+        20.0
+      ]
+    ],
+    [
+      "t-lat-icon",
+      [
+        365.0,
+        84.0,
+        20.0,
+        20.0
+      ]
+    ],
+    [
+      "t-drop-icon",
+      [
+        522.0,
+        84.0,
+        20.0,
+        20.0
+      ]
+    ],
+    [
+      "t-peers-icon",
+      [
+        679.0,
+        84.0,
+        20.0,
+        20.0
+      ]
+    ]
+  ],
+  "png": "target/033/ops-820x560.png",
+  "probes": [
+    {
+      "asked_about": "t-ok",
+      "coverage": [
+        "PaintCandidate",
+        "PaintCandidate",
+        "PaintCandidate",
+        "PaintCandidate",
+        "PaintCandidate",
+        "PaintCandidate"
+      ],
+      "hit": "t-ok-value",
+      "paint_order": [
+        "ops",
+        "body",
+        "main",
+        "tiles",
+        "t-ok",
+        "t-ok-value"
+      ],
+      "topmost_candidate": "t-ok-value"
+    },
+    {
+      "asked_about": "e3",
+      "coverage": [
+        "PaintCandidate",
+        "PaintCandidate",
+        "PaintCandidate",
+        "PaintCandidate",
+        "PaintCandidate",
+        "Ghost"
+      ],
+      "hit": "e3",
+      "paint_order": [
+        "ops",
+        "body",
+        "main",
+        "events",
+        "e3",
+        "e3-sp"
+      ],
+      "topmost_candidate": "e3"
+    }
+  ],
+  "report": {
+    "clipped_content": [],
+    "off_viewport": [],
+    "overlaps": [],
+    "viewport_h": 560.0,
+    "viewport_w": 820.0
+  },
+  "size": [
+    820,
+    560
+  ]
+}
