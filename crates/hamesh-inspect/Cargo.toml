@@ -1,0 +1,12 @@
+[package]
+name = "hamesh-inspect"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+hamesh-core = { path = "../hamesh-core" }
+hamesh-layout = { path = "../hamesh-layout" }
+hamesh-scene = { path = "../hamesh-scene" }
+serde.workspace = true
+serde_json.workspace = true

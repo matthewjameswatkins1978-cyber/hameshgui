@@ -1,0 +1,12 @@
+[package]
+name = "hamesh-scene"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+hamesh-core = { path = "../hamesh-core" }
+hamesh-layout = { path = "../hamesh-layout" }
+hamesh-text = { path = "../hamesh-text" }
+hamesh-theme = { path = "../hamesh-theme" }
+serde.workspace = true

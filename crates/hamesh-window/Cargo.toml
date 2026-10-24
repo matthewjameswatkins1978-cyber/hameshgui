@@ -1,0 +1,29 @@
+[package]
+name = "hamesh-window"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "hamesh-window-demo"
+path = "src/main.rs"
+
+[dependencies]
+hamesh-core = { path = "../hamesh-core" }
+hamesh-layout = { path = "../hamesh-layout" }
+hamesh-scene = { path = "../hamesh-scene" }
+hamesh-render = { path = "../hamesh-render" }
+hamesh-text = { path = "../hamesh-text" }
+hamesh-widgets = { path = "../hamesh-widgets" }
+hamesh-pi = { path = "../hamesh-pi" }
+hamesh-inspect = { path = "../hamesh-inspect" }
+hamesh-diag = { path = "../hamesh-diag" }
+hamesh-automation = { path = "../hamesh-automation" }
+hamesh-blocks = { path = "../hamesh-blocks" }
+serde_json = "1"
+winit = "0.30"
+softbuffer = "0.4"
+wgpu = "30"
+vello = "0.11"
+pollster = "1"
+tiny-skia = "0.11"

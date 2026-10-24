@@ -1,0 +1,13 @@
+[package]
+name = "hamesh-blocks"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+hamesh-core = { path = "../hamesh-core" }
+hamesh-theme = { path = "../hamesh-theme" }
+serde.workspace = true
+
+[dev-dependencies]
+serde_json = "1"

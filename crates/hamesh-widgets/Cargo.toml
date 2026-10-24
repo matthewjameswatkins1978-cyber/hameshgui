@@ -1,0 +1,14 @@
+[package]
+name = "hamesh-widgets"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+hamesh-core = { path = "../hamesh-core" }
+hamesh-text = { path = "../hamesh-text" }
+serde.workspace = true
+unicode-segmentation = "1"
+
+[dev-dependencies]
+hamesh-layout = { path = "../hamesh-layout" }
