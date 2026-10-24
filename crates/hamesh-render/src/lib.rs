@@ -216,6 +216,21 @@ fn blit_text(pix: &mut Pixmap, node: &hamesh_scene::SceneNode, paint_rect: &hame
     }
 }
 
+/// Clip mask for a node that overflows its ancestor bounds.
+///
+/// Rects are *clipped*, never clamped: clamping a rect would redraw a
+/// border along the clip edge and move rounded corners, inventing
+/// geometry that is not in the scene. The mask cuts pixels instead, so
+/// what remains is exactly the part of the original paint that the
+/// ancestor allowed. Only overflowing nodes allocate one.
+fn clip_mask(clip: &hamesh_layout::Rect, w: u32, h: u32) -> Option<tiny_skia::Mask> {
+    let mut mask = tiny_skia::Mask::new(w, h)?;
+    let rect = SkRect::from_xywh(clip.x, clip.y, clip.w.max(0.0), clip.h.max(0.0))?;
+    let path = PathBuilder::from_rect(rect);
+    mask.fill_path(&path, FillRule::Winding, true, Transform::identity());
+    Some(mask)
+}
+
 fn rounded_clip_rect(rect: &hamesh_layout::Rect) -> Option<SkRect> {
     SkRect::from_xywh(rect.x, rect.y, rect.w.max(1.0), rect.h.max(1.0))
 }
@@ -321,44 +336,37 @@ fn render_uncached(scene: &Scene, w: u32, h: u32) -> Pixmap {
         if !node.visible || node.ghost {
             continue;
         }
-        // Paint-time ancestor clip. An overflowing node paints only the
-        // part inside its clip window, so escaped content is impossible
-        // rather than merely reported. Rectangular content intersects
-        // exactly; text keeps its resolved origin and is bounded
-        // per-pixel instead (clamping a text rect would move glyphs).
-        let paint_rect = if node.overflow {
-            node.rect
-                .intersect(&node.clip)
-                .unwrap_or(hamesh_layout::Rect {
-                    x: node.rect.x,
-                    y: node.rect.y,
-                    w: 0.0,
-                    h: 0.0,
-                })
+        // Paint-time ancestor clip. An overflowing node is masked to its
+        // ancestor bounds, so escaped content is impossible rather than
+        // merely reported. Geometry is untouched: fills, borders,
+        // progress bars and icons keep their position and size, and
+        // text keeps its resolved origin (bounded per-pixel below).
+        let mask = if node.overflow {
+            clip_mask(&node.clip, w, h)
         } else {
-            node.rect.clone()
+            None
         };
         let [rr, gg, bb, aa] = node.color;
         let mut paint = Paint::default();
         paint.set_color(Color::from_rgba8(rr, gg, bb, aa));
         if node.radius > 0.0 {
-            if let Some(path) = rounded_path(&paint_rect, node.radius) {
+            if let Some(path) = rounded_path(&node.rect, node.radius) {
                 pix.fill_path(
                     &path,
                     &paint,
                     FillRule::Winding,
                     Transform::identity(),
-                    None,
+                    mask.as_ref(),
                 );
             }
             if node.border_w > 0.0 {
                 // Inset half the stroke so the border stays inside the rect.
                 let half = node.border_w / 2.0;
                 let inset = hamesh_layout::Rect {
-                    x: paint_rect.x + half,
-                    y: paint_rect.y + half,
-                    w: (paint_rect.w - node.border_w).max(1.0),
-                    h: (paint_rect.h - node.border_w).max(1.0),
+                    x: node.rect.x + half,
+                    y: node.rect.y + half,
+                    w: (node.rect.w - node.border_w).max(1.0),
+                    h: (node.rect.h - node.border_w).max(1.0),
                 };
                 if let Some(bp) = rounded_path(&inset, (node.radius - half).max(0.0)) {
                     let mut paint_b = Paint::default();
@@ -368,15 +376,15 @@ fn render_uncached(scene: &Scene, w: u32, h: u32) -> Pixmap {
                         width: node.border_w,
                         ..Default::default()
                     };
-                    pix.stroke_path(&bp, &paint_b, &stroke, Transform::identity(), None);
+                    pix.stroke_path(&bp, &paint_b, &stroke, Transform::identity(), mask.as_ref());
                 }
             }
         } else {
-            let Some(r) = rounded_clip_rect(&paint_rect) else {
+            let Some(r) = rounded_clip_rect(&node.rect) else {
                 continue;
             };
             // Simple rounded look: draw rect; overlay translucency shows through.
-            pix.fill_rect(r, &paint, Transform::identity(), None);
+            pix.fill_rect(r, &paint, Transform::identity(), mask.as_ref());
             if node.border_w > 0.0 {
                 let mut paint_b = Paint::default();
                 let [br, bg, bb2, ba] = node.border_rgba;
@@ -392,7 +400,7 @@ fn render_uncached(scene: &Scene, w: u32, h: u32) -> Pixmap {
                 pb.line_to(r.x(), r.y() + r.height());
                 pb.close();
                 if let Some(bp) = pb.finish() {
-                    pix.stroke_path(&bp, &paint_b, &stroke, Transform::identity(), None);
+                    pix.stroke_path(&bp, &paint_b, &stroke, Transform::identity(), mask.as_ref());
                 }
             }
         }
@@ -401,10 +409,10 @@ fn render_uncached(scene: &Scene, w: u32, h: u32) -> Pixmap {
             if frac > 0.0 {
                 let bw = (node.rect.w * frac).max(1.0);
                 let bar = hamesh_layout::Rect {
-                    x: paint_rect.x,
-                    y: paint_rect.y,
-                    w: bw.min(paint_rect.w),
-                    h: paint_rect.h,
+                    x: node.rect.x,
+                    y: node.rect.y,
+                    w: bw,
+                    h: node.rect.h,
                 };
                 let mut paint_f = Paint::default();
                 let [fr, fg, fb, fa] = node.fill_rgba;
@@ -416,11 +424,11 @@ fn render_uncached(scene: &Scene, w: u32, h: u32) -> Pixmap {
                             &paint_f,
                             FillRule::Winding,
                             Transform::identity(),
-                            None,
+                            mask.as_ref(),
                         );
                     }
                 } else if let Some(r) = SkRect::from_xywh(bar.x, bar.y, bar.w, bar.h) {
-                    pix.fill_rect(r, &paint_f, Transform::identity(), None);
+                    pix.fill_rect(r, &paint_f, Transform::identity(), mask.as_ref());
                 }
             }
         }
@@ -428,9 +436,11 @@ fn render_uncached(scene: &Scene, w: u32, h: u32) -> Pixmap {
         // names silently draw nothing (the Eye still shows the prop).
         if let Some(ref iname) = node.icon {
             if let Some(bez) = icons::icon_bez(iname) {
-                let (scale, dx, dy) = icons::icon_placement(paint_rect.w, paint_rect.h);
-                let ox = paint_rect.x as f64 + dx;
-                let oy = paint_rect.y as f64 + dy;
+                // Placement uses the node's own rect: clipping must hide
+                // overflowing pixels, never rescale or recentre the glyph.
+                let (scale, dx, dy) = icons::icon_placement(node.rect.w, node.rect.h);
+                let ox = node.rect.x as f64 + dx;
+                let oy = node.rect.y as f64 + dy;
                 if let Some(ipath) = icons::bez_to_tinyskia(&bez, ox, oy, scale) {
                     let mut paint_i = Paint::default();
                     let [ir, ig, ib, _] = node.text_rgba;
@@ -441,7 +451,13 @@ fn render_uncached(scene: &Scene, w: u32, h: u32) -> Pixmap {
                         line_join: tiny_skia::LineJoin::Round,
                         ..Default::default()
                     };
-                    pix.stroke_path(&ipath, &paint_i, &stroke, Transform::identity(), None);
+                    pix.stroke_path(
+                        &ipath,
+                        &paint_i,
+                        &stroke,
+                        Transform::identity(),
+                        mask.as_ref(),
+                    );
                 }
             }
         }
@@ -449,7 +465,21 @@ fn render_uncached(scene: &Scene, w: u32, h: u32) -> Pixmap {
         // pixel and clipped to the node's rect. The caret draws even for
         // empty text, so blit_text itself decides what to skip — never
         // gate the whole call on text presence (that ate the caret twice).
-        blit_text(&mut pix, node, &paint_rect);
+        // Text keeps its resolved origin and is bounded per-pixel: the
+        // same contract as the other primitives, without moving glyphs.
+        let text_rect = if node.overflow {
+            node.rect
+                .intersect(&node.clip)
+                .unwrap_or(hamesh_layout::Rect {
+                    x: node.rect.x,
+                    y: node.rect.y,
+                    w: 0.0,
+                    h: 0.0,
+                })
+        } else {
+            node.rect.clone()
+        };
+        blit_text(&mut pix, node, &text_rect);
     }
 
     pix
@@ -715,6 +745,162 @@ mod tests {
             }
         }
         assert!(painted, "the in-panel label must still paint its text");
+    }
+
+    #[test]
+    fn border_strokes_cannot_escape_the_ancestor_clip() {
+        // A stroked border is half outside its rect and its corners
+        // bulge; clamping the rect would also invent an edge along the
+        // clip line. The mask must cut the stroke instead, so below the
+        // panel there is nothing at all.
+        let mut app = App::new("win");
+        app.add(
+            "win",
+            Component::new("panel", Role::Panel, "panel")
+                .with_prop("w", "80")
+                .with_prop("h", "40")
+                .with_prop("pad", "0"),
+        );
+        app.add(
+            "panel",
+            Component::new("plate", Role::Panel, "plate")
+                .with_prop("h", "60")
+                .with_prop("pad", "0")
+                .with_prop("border", "4")
+                .with_prop("border_token", "accent")
+                .with_prop("surface", "raised")
+                .with_prop("flex_grow", "0"),
+        );
+        let layout = hamesh_layout::compute(&app, 200.0, 200.0);
+        let scene = hamesh_scene::build(&app, &layout, 1);
+        let plate = scene.nodes.iter().find(|n| n.id == "plate").unwrap();
+        assert!(plate.overflow, "precondition: the plate overflows");
+        let f = render(&scene);
+        let win_bg = scene.nodes.iter().find(|n| n.id == "win").unwrap().color;
+        let accent = hamesh_theme::resolve("accent");
+        let below = (plate.clip.y + plate.clip.h + 3.0) as usize;
+        for x in (plate.rect.x as usize)..((plate.rect.x + plate.rect.w) as usize) {
+            let got = px(&f.pixmap, x, below);
+            assert_ne!(got, accent, "border stroke escaped at x={x}");
+            assert_eq!(got, win_bg, "paint leaked below the panel at x={x}");
+        }
+    }
+
+    #[test]
+    fn clipped_icon_keeps_its_placement_and_only_loses_pixels() {
+        // Clipping must hide overflowing pixels, never rescale or recentre
+        // the glyph. The icon sits in normal flow (a 40px spacer above it)
+        // so only the panel height changes between the two builds: its rect
+        // is identical, one is cut, one is not. Inside the clip the pixels
+        // must be identical (no move, no resize); below it the cut frame is
+        // background where the reference still shows ink.
+        let build = |clip_h: f32| {
+            let mut app = App::new("win");
+            app.add(
+                "win",
+                Component::new("panel", Role::Panel, "panel")
+                    .with_prop("w", "120")
+                    .with_prop("h", &clip_h.to_string())
+                    .with_prop("pad", "0")
+                    .with_prop("gap", "0"),
+            );
+            app.add(
+                "panel",
+                Component::new("sp", Role::Panel, "spacer")
+                    .with_prop("ghost", "true")
+                    .with_prop("h", "40")
+                    .with_prop("pad", "0"),
+            );
+            app.add(
+                "panel",
+                Component::new("ico", Role::Panel, "icon")
+                    .with_prop("icon", "activity")
+                    .with_prop("text_token", "accent")
+                    .with_prop("surface", "bg")
+                    .with_prop("w", "48")
+                    .with_prop("h", "48")
+                    .with_prop("pad", "0"),
+            );
+            let layout = hamesh_layout::compute(&app, 240.0, 240.0);
+            (app, layout)
+        };
+        // Tight panel: the icon (y 40..88) is cut at y=60.
+        let (app_tight, lay_tight) = build(60.0);
+        let scene_tight = hamesh_scene::build(&app_tight, &lay_tight, 1);
+        let ico = scene_tight
+            .nodes
+            .iter()
+            .find(|n| n.id == "ico")
+            .unwrap()
+            .clone();
+        assert!(ico.overflow, "precondition: the icon is cut");
+        assert!(
+            (ico.rect.h - 48.0).abs() < 0.5,
+            "clip must not resize the box"
+        );
+        // Tall panel: same icon rect, nothing cut.
+        let (app_tall, lay_tall) = build(200.0);
+        let scene_tall = hamesh_scene::build(&app_tall, &lay_tall, 1);
+        let ico_tall = scene_tall
+            .nodes
+            .iter()
+            .find(|n| n.id == "ico")
+            .unwrap()
+            .clone();
+        assert!(!ico_tall.overflow);
+        assert!((ico_tall.rect.x - ico.rect.x).abs() < 0.5);
+        assert!((ico_tall.rect.y - ico.rect.y).abs() < 0.5);
+        let f_tight = render(&scene_tight);
+        let f_tall = render(&scene_tall);
+        let win_bg = scene_tight
+            .nodes
+            .iter()
+            .find(|n| n.id == "win")
+            .unwrap()
+            .color;
+        let (x0, y0) = (ico.rect.x as usize, ico.rect.y as usize);
+        let clip_bottom = (ico.clip.y + ico.clip.h) as usize;
+        let mut ink_inside = 0;
+        let mut cut_ink = 0;
+        for y in y0..(y0 + ico.rect.h as usize) {
+            for x in x0..(x0 + ico.rect.w as usize) {
+                let tight = px(&f_tight.pixmap, x, y);
+                let tall = px(&f_tall.pixmap, x, y);
+                if y < clip_bottom {
+                    // Masked blending rounds by up to one unit per channel;
+                    // a repositioned or rescaled glyph would differ by far
+                    // more than that, so a tight tolerance still proves the
+                    // geometry is untouched.
+                    let delta = tight
+                        .iter()
+                        .zip(tall.iter())
+                        .map(|(a, b)| (*a as i32 - *b as i32).abs())
+                        .max()
+                        .unwrap_or(0);
+                    assert!(
+                        delta <= 2,
+                        "inside the clip the glyph must not move at ({x},{y}): \
+                         tight={tight:?} tall={tall:?} delta={delta}"
+                    );
+                    if tall != win_bg {
+                        ink_inside += 1;
+                    }
+                } else {
+                    assert_eq!(tight, win_bg, "cut pixels must be background at ({x},{y})");
+                    if tall != win_bg {
+                        cut_ink += 1;
+                    }
+                }
+            }
+        }
+        assert!(
+            ink_inside > 0,
+            "the visible part of the icon must still paint"
+        );
+        assert!(
+            cut_ink > 0,
+            "precondition: the reference had ink below the cut"
+        );
     }
 
     #[test]

@@ -41,6 +41,14 @@
   "probes": [
     {
       "asked_about": "t-ok",
+      "coverage": [
+        "PaintCandidate",
+        "PaintCandidate",
+        "PaintCandidate",
+        "PaintCandidate",
+        "PaintCandidate",
+        "PaintCandidate"
+      ],
       "hit": "t-ok-value",
       "paint_order": [
         "ops",
@@ -50,10 +58,18 @@
         "t-ok",
         "t-ok-value"
       ],
-      "topmost": "t-ok-value"
+      "topmost_candidate": "t-ok-value"
     },
     {
       "asked_about": "e3",
+      "coverage": [
+        "PaintCandidate",
+        "PaintCandidate",
+        "PaintCandidate",
+        "PaintCandidate",
+        "PaintCandidate",
+        "Ghost"
+      ],
       "hit": "e3",
       "paint_order": [
         "ops",
@@ -63,7 +79,7 @@
         "e3",
         "e3-sp"
       ],
-      "topmost": "e3"
+      "topmost_candidate": "e3"
     }
   ],
   "report": {

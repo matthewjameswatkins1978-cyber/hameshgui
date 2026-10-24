@@ -53,7 +53,18 @@ fn compose(width: f32, height: f32) -> App {
                 );
                 b::title(s, "app-title", "Signal Ops");
                 b::spacer(s, "header-space");
-                b::badge(s, "state", "DEGRADED", b::Variant::Warning);
+                // Narrow widths keep the count in the header: the number of
+                // open alerts is never hidden, only their full list.
+                b::badge(
+                    s,
+                    "state",
+                    if narrow {
+                        "DEGRADED · 3 ALERTS"
+                    } else {
+                        "DEGRADED"
+                    },
+                    b::Variant::Warning,
+                );
                 b::button(
                     s,
                     "ack",
@@ -154,6 +165,36 @@ fn compose(width: f32, height: f32) -> App {
                                 }
                             },
                         );
+                        // Narrow: the full alert column is gone, so the
+                        // highest-priority alert and its action stay visible in
+                        // a compact strip. Critical information is preserved,
+                        // not merely eliminated to avoid overflow.
+                        if narrow {
+                            b::card(
+                                s,
+                                "alerts-compact",
+                                b::CardOpts {
+                                    grow: 0.0,
+                                    pad: hamesh_theme::space::M,
+                                    gap: hamesh_theme::space::S,
+                                    ..Default::default()
+                                },
+                                |t| {
+                                    b::caption(t, "alerts-compact-title", "OPEN ALERTS · 3");
+                                    b::body(
+                                        t,
+                                        "alerts-compact-top",
+                                        "Uplink / primary degraded: retransmits above threshold",
+                                    );
+                                    b::button(
+                                        t,
+                                        "escalate-compact",
+                                        "Escalate to on-call",
+                                        b::ButtonOpts::new(b::ButtonVariant::Outline, "escalate"),
+                                    );
+                                },
+                            );
+                        }
                         if !short {
                             b::card(
                                 s,
@@ -188,13 +229,19 @@ fn compose(width: f32, height: f32) -> App {
                             },
                             |t| {
                                 b::heading(t, "ev-title", "Event feed");
+                                // Short viewports trade feed depth for the alert
+                                // summary: the feed is secondary, the degraded
+                                // uplink is not.
                                 for (id, main, sub) in [
                                     ("e1", "Retransmit burst on uplink / primary", "12:04"),
                                     ("e2", "Peer 7 rejoined the mesh", "12:01"),
                                     ("e3", "Archive replay paused at 41%", "11:58"),
                                     ("e4", "Operator console reauthenticated", "11:52"),
                                     ("e5", "Latency above 40 ms for 3 minutes", "11:49"),
-                                ] {
+                                ]
+                                .iter()
+                                .take(if short { 3 } else { 5 })
+                                {
                                     b::activity(t, id, main, sub);
                                 }
                             },
@@ -306,8 +353,9 @@ fn main() {
                 .into_iter()
                 .map(|(id, p)| serde_json::json!({
                     "asked_about": id,
-                    "topmost": p.topmost,
+                    "topmost_candidate": p.topmost_candidate,
                     "hit": p.hit,
+                    "coverage": p.paint_order.iter().map(|h| format!("{:?}", h.coverage)).collect::<Vec<_>>(),
                     "paint_order": p.paint_order.iter().map(|h| h.id.clone()).collect::<Vec<_>>(),
                 }))
                 .collect::<Vec<_>>(),

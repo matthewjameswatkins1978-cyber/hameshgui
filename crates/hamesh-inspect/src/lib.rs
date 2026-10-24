@@ -191,7 +191,22 @@ pub fn detail(
     })
 }
 
-/// One node painting at a probed point, in paint order (last = topmost).
+/// Why a node is or is not a candidate at the probed point.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Coverage {
+    /// The clipped rect contains the point: this node may paint there.
+    PaintCandidate,
+    /// The rect contains the point but an ancestor clip does not.
+    OutsideAncestorClip,
+    /// Ghost/spacer: holds layout room, paints nothing.
+    Ghost,
+    /// Not visible.
+    Hidden,
+}
+
+/// One node whose rect contains the probed point, in paint order
+/// (last = topmost).
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct ProbeHit {
     pub id: String,
@@ -201,24 +216,36 @@ pub struct ProbeHit {
     pub z: i32,
     /// Position in paint order within the scene (0 = painted first).
     pub paint_index: usize,
-    /// True when this node's paint actually reaches the point: inside
-    /// both its rect and its ancestor clip.
-    pub paints_here: bool,
+    /// Geometric candidacy and its reason. A `PaintCandidate` means the
+    /// clipped *rect* covers the point — not that a glyph or a rounded
+    /// corner put ink there.
+    pub coverage: Coverage,
 }
 
-/// Pixels -> components. Given a point in a screenshot, report what
-/// paints there, in order, plus what a click would reach. This is the
-/// reverse of `map`: the mapper's entry point when an agent sees a
-/// problem in one region and needs its identity and telemetry.
+/// Geometric point resolution: which components *could* paint at a point,
+/// in paint order, and what a click would reach.
+///
+/// What this guarantees, exactly: every returned node's layout rect
+/// contains the point, ordered deterministically by `(z, tree order)`,
+/// with `coverage` explaining whether the ancestor clip still allows it.
+///
+/// What it does NOT do: it does not sample pixels. A rounded corner cut
+/// or a glyph's ink silhouette can leave a `PaintCandidate` with nothing
+/// actually painted at that exact coordinate. For those cases the exact
+/// instruments are `detail(...).text_geom` (ink, trim, advance, baseline)
+/// and the rendered frame itself. This is deliberate: a pixel-accurate
+/// identification engine costs far more than the ambiguity it removes.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Probe {
     pub x: f32,
     pub y: f32,
     pub viewport_w: f32,
     pub viewport_h: f32,
+    /// Candidates in paint order (last = painted last).
     pub paint_order: Vec<ProbeHit>,
-    /// Topmost node whose paint reaches the point (what the eye sees).
-    pub topmost: Option<String>,
+    /// Topmost *geometric* candidate whose ancestor clip allows paint at
+    /// this point. Not a pixel probe: see the type docs.
+    pub topmost_candidate: Option<String>,
     /// Framework hit-test result (what a click would reach).
     pub hit: Option<String>,
 }
@@ -230,7 +257,15 @@ pub fn probe(app: &App, layout: &LayoutOutput, scene: &Scene, x: f32, y: f32) ->
         if !n.rect.contains(x, y) {
             continue;
         }
-        let paints_here = n.visible && !n.ghost && n.clip.contains(x, y);
+        let coverage = if n.ghost {
+            Coverage::Ghost
+        } else if !n.visible {
+            Coverage::Hidden
+        } else if !n.clip.contains(x, y) {
+            Coverage::OutsideAncestorClip
+        } else {
+            Coverage::PaintCandidate
+        };
         paint_order.push(ProbeHit {
             id: n.id.clone(),
             role: n.role.clone(),
@@ -238,13 +273,13 @@ pub fn probe(app: &App, layout: &LayoutOutput, scene: &Scene, x: f32, y: f32) ->
             parent: n.parent.clone(),
             z: n.z,
             paint_index: i,
-            paints_here,
+            coverage,
         });
     }
-    let topmost = paint_order
+    let topmost_candidate = paint_order
         .iter()
         .rev()
-        .find(|h| h.paints_here)
+        .find(|h| h.coverage == Coverage::PaintCandidate)
         .map(|h| h.id.clone());
     Probe {
         x,
@@ -252,7 +287,7 @@ pub fn probe(app: &App, layout: &LayoutOutput, scene: &Scene, x: f32, y: f32) ->
         viewport_w: scene.viewport_w,
         viewport_h: scene.viewport_h,
         paint_order,
-        topmost,
+        topmost_candidate,
         hit: hamesh_layout::hit_test(app, layout, x, y),
     }
 }
@@ -407,7 +442,13 @@ mod tests {
         let scene = hamesh_scene::build(&app, &layout, 1);
         let b = layout.get("btn").unwrap().rect.clone();
         let p = probe(&app, &layout, &scene, b.x + b.w / 2.0, b.y + b.h / 2.0);
-        assert_eq!(p.topmost.as_deref(), Some("btn"));
+        assert_eq!(p.topmost_candidate.as_deref(), Some("btn"));
+        assert!(
+            p.paint_order
+                .iter()
+                .all(|h| h.coverage == Coverage::PaintCandidate),
+            "every hit at a bare button centre is a paint candidate"
+        );
         assert_eq!(p.hit.as_deref(), Some("btn"));
         assert!(
             p.paint_order.iter().any(|h| h.id == "panel"),
@@ -418,7 +459,7 @@ mod tests {
         // Away from the button the window root still paints (it fills
         // the viewport), and nothing interactive hits.
         let empty = probe(&app, &layout, &scene, 399.0, 299.0);
-        assert_eq!(empty.topmost.as_deref(), Some("win"));
+        assert_eq!(empty.topmost_candidate.as_deref(), Some("win"));
         assert_ne!(
             empty.hit.as_deref(),
             Some("btn"),

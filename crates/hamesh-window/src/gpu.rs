@@ -36,6 +36,9 @@ impl std::fmt::Display for GpuError {
 pub struct GpuStats {
     pub frames_presented: u64,
     pub reconfigures: u64,
+    /// Clip layers emitted by the last frame: the GPU half of the shared
+    /// clip contract, observable without reading pixels.
+    pub last_clipped_layers: usize,
     pub last_error: Option<String>,
 }
 
@@ -64,11 +67,33 @@ fn node_color(c: [u8; 4]) -> Color {
 fn build_vscene(
     cache: &mut std::collections::HashMap<String, hamesh_text::TextLayout>,
     scene: &hamesh_scene::Scene,
-) -> VelloScene {
+) -> (VelloScene, usize) {
     let mut v = VelloScene::new();
+    // GPU honours the same clip contract as the CPU renderer: an
+    // overflowing node paints inside a clip layer, so escaped pixels are
+    // impossible on both backends rather than on one. The count is
+    // returned so the contract is testable without a GPU device.
+    let mut clipped = 0usize;
     for node in &scene.nodes {
         if !node.visible || node.ghost {
             continue;
+        }
+        if node.overflow {
+            let c = &node.clip;
+            let clip = vello::kurbo::Rect::new(
+                c.x as f64,
+                c.y as f64,
+                (c.x + c.w) as f64,
+                (c.y + c.h) as f64,
+            );
+            v.push_layer(
+                Fill::NonZero,
+                vello::peniko::BlendMode::default(),
+                1.0,
+                Affine::IDENTITY,
+                &clip,
+            );
+            clipped += 1;
         }
         let r = &node.rect;
         let shape = RoundedRect::new(
@@ -186,8 +211,11 @@ fn build_vscene(
             cache.get(&key).filter(|l| l.height() > 0.0)
         };
         draw_text(&mut v, node, layout);
+        if node.overflow {
+            v.pop_layer();
+        }
     }
-    v
+    (v, clipped)
 }
 
 fn draw_text(
@@ -298,7 +326,8 @@ impl GpuState {
         if self.surface.config.width != width || self.surface.config.height != height {
             self.resize(width, height);
         }
-        let vscene = build_vscene(&mut self.text_cache, scene);
+        let (vscene, clipped) = build_vscene(&mut self.text_cache, scene);
+        self.stats.last_clipped_layers = clipped;
         let visible = scene.nodes.iter().filter(|n| n.visible).count();
         let device = self.context.devices[dev_id].device.clone();
         let queue = self.context.devices[dev_id].queue.clone();
@@ -374,7 +403,7 @@ impl GpuState {
         let dev_id = self.surface.dev_id;
         let device = self.context.devices[dev_id].device.clone();
         let queue = self.context.devices[dev_id].queue.clone();
-        let vscene = build_vscene(&mut self.text_cache, scene);
+        let (vscene, _clipped) = build_vscene(&mut self.text_cache, scene);
         let visible = scene.nodes.iter().filter(|n| n.visible).count();
 
         let tex = device.create_texture(&wgpu::TextureDescriptor {
@@ -474,5 +503,53 @@ impl GpuState {
         pix.save_png(path)
             .map_err(|e| GpuError::Surface(format!("save_png: {e:?}")))?;
         Ok((visible, pix))
+    }
+}
+
+#[cfg(test)]
+mod clip_contract {
+    use super::*;
+    use hamesh_core::{App, Component, Role};
+
+    /// The GPU encoder must apply the same clip contract the CPU
+    /// renderer honours: an overflowing node paints inside a clip
+    /// layer. Verified at the encoder level, which needs no device.
+    /// Pixel parity on real hardware remains outstanding (see 033
+    /// notes) because no GPU adapter is available in this environment.
+    #[test]
+    fn overflowing_nodes_emit_clip_layers() {
+        let mut app = App::new("win");
+        app.add(
+            "win",
+            Component::new("panel", Role::Panel, "panel")
+                .with_prop("w", "100")
+                .with_prop("h", "24")
+                .with_prop("pad", "0")
+                .with_prop("gap", "0"),
+        );
+        for i in 0..3 {
+            app.add(
+                "panel",
+                Component::new(&format!("row{i}"), Role::Text, "row")
+                    .with_prop("text", "LABEL")
+                    .with_prop("h", "20")
+                    .with_prop("pad", "0")
+                    .with_prop("flex_grow", "0"),
+            );
+        }
+        let layout = hamesh_layout::compute(&app, 400.0, 300.0);
+        let scene = hamesh_scene::build(&app, &layout, 1);
+        let expect = scene
+            .nodes
+            .iter()
+            .filter(|n| n.visible && !n.ghost && n.overflow)
+            .count();
+        assert!(expect > 0, "precondition: something overflows");
+        let mut cache = std::collections::HashMap::new();
+        let (_vscene, clipped) = build_vscene(&mut cache, &scene);
+        assert_eq!(
+            clipped, expect,
+            "every overflowing node must emit exactly one clip layer"
+        );
     }
 }
