@@ -44,12 +44,13 @@ pub fn rasterize_parley(text: &str, max_width: f32) -> Vec<RasterGlyph> {
     rasterize_layout(&TextLayout::new(text, max_width, 16.0, None))
 }
 
-/// Bounded raster memoization: identical (text, width, size, lh)
-/// shapes identically, so steady-state frames hit instead of
+/// Bounded raster memoization: identical (text, width, size, lh,
+/// shaping) shapes identically, so steady-state frames hit instead of
 /// re-running swash per node per frame. Same 512-entry wholesale
 /// eviction as the ink/trim caches. Cloned on hit (cheap vs raster).
-type RasterCache =
-    std::sync::Mutex<std::collections::HashMap<(String, u32, u32, Option<u32>), Vec<RasterGlyph>>>;
+type RasterCache = std::sync::Mutex<
+    std::collections::HashMap<(String, u32, u32, Option<u32>, u64), Vec<RasterGlyph>>,
+>;
 static RASTER_CACHE: std::sync::OnceLock<RasterCache> = std::sync::OnceLock::new();
 
 pub fn rasterize_cached(
@@ -57,19 +58,27 @@ pub fn rasterize_cached(
     max_width: f32,
     font_size: f32,
     line_height: Option<f32>,
+    spec: &crate::FontSpec,
 ) -> Vec<RasterGlyph> {
     let key = (
         text.to_string(),
         max_width.to_bits(),
         font_size.to_bits(),
         line_height.map(|v| v.to_bits()),
+        spec.fingerprint(),
     );
     let cache =
         RASTER_CACHE.get_or_init(|| std::sync::Mutex::new(std::collections::HashMap::new()));
     if let Some(hit) = cache.lock().expect("raster cache").get(&key) {
         return hit.clone();
     }
-    let v = rasterize_layout(&TextLayout::new(text, max_width, font_size, line_height));
+    let v = rasterize_layout(&TextLayout::new_varied(
+        text,
+        max_width,
+        font_size,
+        line_height,
+        spec,
+    ));
     let mut c = cache.lock().expect("raster cache");
     if c.len() >= 512 {
         c.clear();
@@ -94,7 +103,24 @@ fn rasterize_run(ctx: &mut ScaleContext, run: &TextRun, out: &mut Vec<RasterGlyp
     let Some(font_ref) = FontRef::from_index(run.font.data.data(), run.font.index as usize) else {
         return;
     };
-    let mut scaler = ctx.builder(font_ref).size(run.size).hint(true).build();
+    // Scale with the run's variation coords: on a variable face the
+    // default-instance outlines are wider than the shaped advances,
+    // so scaling without coords crowds glyphs into each other.
+    // Unknown tags are ignored by swash; empty vars are a no-op.
+    let coords: Vec<swash::Setting<f32>> = run
+        .vars
+        .iter()
+        .map(|(tag, v)| swash::Setting {
+            tag: swash::tag_from_bytes(tag),
+            value: *v,
+        })
+        .collect();
+    let mut scaler = ctx
+        .builder(font_ref)
+        .size(run.size)
+        .hint(true)
+        .variations(coords.iter().copied())
+        .build();
     let mut render = Render::new(&[Source::Outline]);
     render.format(Format::Alpha);
     for (id, gx, gy) in run.glyphs.iter().copied() {

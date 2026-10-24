@@ -28,7 +28,15 @@ fn set_value(app: &mut App, id: &str, value: &str) {
 }
 
 /// Compose the dashboard. Reads initial values from state.
+/// Wears Signal Cabinet, the default profile.
 pub fn build_dashboard() -> App {
+    build_dashboard_with(&SIGNAL_CABINET)
+}
+
+/// Compose the dashboard wearing a design profile. The default
+/// composition wears Signal Cabinet; variety is proved by dressing
+/// the same composition in a second profile (see folio test).
+pub fn build_dashboard_with(profile: &Profile) -> App {
     let mut app = App::new("win");
     app.set_state("agents", "4");
     app.set_state("tasks", "12");
@@ -111,6 +119,7 @@ pub fn build_dashboard() -> App {
         );
     }
     refresh_dashboard(&mut app);
+    apply_profile(&mut app, profile);
     app
 }
 
@@ -371,5 +380,70 @@ mod tests {
             painted as f64 / total as f64 > 0.5,
             "dashboard should mostly paint surfaces, got {painted}/{total}"
         );
+    }
+
+    #[test]
+    fn folio_profile_gives_a_different_voice() {
+        // Variety proof: the same composition dressed in Living Folio
+        // must speak with different advances than Signal Cabinet —
+        // profiles are data, not a one-off treatment. Vendored faces
+        // are registered first, so this holds on every machine.
+        voice_proof(&LIVING_FOLIO, "folio", "target/folio-proof.png");
+    }
+
+    #[test]
+    fn grid_profile_gives_a_third_voice() {
+        // The Unquiet Grid: narrowed, weighted Instrument Sans display
+        // against the same Plex Mono technical voice. Three profiles,
+        // one composition, three unmistakable treatments.
+        voice_proof(&UNQUIET_GRID, "grid", "target/grid-proof.png");
+    }
+
+    /// Shared variety proof: `profile` voices the composition, the
+    /// title advance must differ from Cabinet, the composition stays
+    /// sound (single-line heading, no clipping), and a proof PNG is
+    /// saved for human eyes.
+    fn voice_proof(profile: &Profile, name: &str, png: &str) {
+        hamesh_text::register_fonts_from_dir(&hamesh_text::bundled_fonts_dir());
+        let cab = build_dashboard();
+        let alt = build_dashboard_with(profile);
+        let layout_c = hamesh_layout::compute(&cab, 800.0, 600.0);
+        let layout_a = hamesh_layout::compute(&alt, 800.0, 600.0);
+        let scene_c = hamesh_scene::build(&cab, &layout_c, 1);
+        let scene_a = hamesh_scene::build(&alt, &layout_a, 1);
+        let tc = scene_c.nodes.iter().find(|n| n.id == "dash-title").unwrap();
+        let ta = scene_a.nodes.iter().find(|n| n.id == "dash-title").unwrap();
+        eprintln!(
+            "{name} proof: cabinet title={:.1} {name} title={:.1}",
+            tc.advance, ta.advance
+        );
+        assert!(
+            (tc.advance - ta.advance).abs() >= 1.0,
+            "{name} must voice the title differently: {:.1} vs {:.1}",
+            tc.advance,
+            ta.advance
+        );
+        assert!(
+            ta.font_resolved,
+            "{name} display face must resolve, not substitute"
+        );
+        let pt = scene_a
+            .nodes
+            .iter()
+            .find(|n| n.id == "dash-prog-title")
+            .unwrap();
+        assert_eq!(pt.lines, 1, "{name} prog heading must not wrap");
+        for n in &scene_a.nodes {
+            if let Some(ink) = n.ink {
+                assert!(
+                    ink[0] >= -0.5 && ink[2] <= n.rect.w + 0.5,
+                    "{name} ink escapes box for {}",
+                    n.id
+                );
+            }
+        }
+        let f = hamesh_render::render(&scene_a);
+        std::fs::create_dir_all("target").unwrap();
+        hamesh_render::save_png(&f, png).unwrap();
     }
 }

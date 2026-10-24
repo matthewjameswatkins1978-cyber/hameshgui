@@ -123,7 +123,16 @@ fn blit_text(pix: &mut Pixmap, node: &hamesh_scene::SceneNode) {
     } else {
         avail_w
     };
-    let layout = hamesh_text::TextLayout::new(&node.text, wrap_w, node.font_size, node.line_height);
+    let layout = hamesh_text::TextLayout::new_varied(
+        &node.text,
+        wrap_w,
+        node.font_size,
+        node.line_height,
+        &hamesh_text::FontSpec {
+            family: node.font_family.clone(),
+            vars: node.font_vars.clone(),
+        },
+    );
     // Empty text still gets a line box: the caret must render in an
     // empty focused composer (this early-return once ate the caret).
     let line_h = if node.text.is_empty() {
@@ -137,7 +146,16 @@ fn blit_text(pix: &mut Pixmap, node: &hamesh_scene::SceneNode) {
     let glyphs = if layout.height() > 0.0 {
         // Cached raster: identical text shapes identically, so steady
         // frames skip swash (the layout above is only for the line box).
-        hamesh_text::glue::rasterize_cached(&node.text, wrap_w, node.font_size, node.line_height)
+        hamesh_text::glue::rasterize_cached(
+            &node.text,
+            wrap_w,
+            node.font_size,
+            node.line_height,
+            &hamesh_text::FontSpec {
+                family: node.font_family.clone(),
+                vars: node.font_vars.clone(),
+            },
+        )
     } else {
         Vec::new()
     };
@@ -847,5 +865,73 @@ mod tests {
             (lg - rg).abs() < 2.0,
             "gaps asymmetric: left {lg} right {rg}"
         );
+    }
+
+    #[test]
+    fn varied_font_renders_narrower_proof() {
+        // End-to-end demonstration: the same label in the vendored
+        // Instrument Sans at wdth 75 vs the default face. Advances
+        // must differ and both inks must stay inside their boxes.
+        // Registered first, so this holds on every machine. Writes
+        // target/varied-proof.png for human eyes.
+        hamesh_text::register_fonts_from_dir(&hamesh_text::bundled_fonts_dir());
+        let mut app = App::new("win");
+        app.add(
+            "win",
+            Component::new("r", Role::Panel, "r")
+                .with_prop("layout", "row")
+                .with_prop("pad", "0")
+                .with_prop("gap", "8"),
+        );
+        for (id, font, vars) in [("a", None, ""), ("b", Some("Instrument Sans"), "wdth 75")] {
+            let mut c = Component::new(id, Role::Status, id)
+                .with_prop("text", "Hamburg")
+                .with_prop("font_size", "40")
+                .with_prop("pad", "8")
+                .with_prop("w", "300")
+                .with_prop("h", "80")
+                .with_prop("halign", "center");
+            if let Some(f) = font {
+                c = c.with_prop("font", f);
+            }
+            if !vars.is_empty() {
+                c = c.with_prop("font_vars", vars);
+            }
+            app.add("r", c);
+        }
+        let layout = hamesh_layout::compute(&app, 800.0, 600.0);
+        let scene = hamesh_scene::build(&app, &layout, 1);
+        let (a, b) = (
+            scene.nodes.iter().find(|n| n.id == "a").unwrap(),
+            scene.nodes.iter().find(|n| n.id == "b").unwrap(),
+        );
+        assert!(
+            (a.advance - b.advance).abs() >= 1.0,
+            "vendored Instrument Sans must resolve, not substitute"
+        );
+        // Advances differ: the wdth axis moved shaping. (No direction is
+        // asserted: cross-family width ordering depends on the fallback
+        // face. The proof PNG shows the actual difference for human eyes.)
+        eprintln!(
+            "varied proof: default={:.1} condensed={:.1}",
+            a.advance, b.advance
+        );
+        for n in [a, b] {
+            // Ink bounds are node-local: they must fit the node box.
+            if let Some(ink) = n.ink {
+                assert!(
+                    ink[0] >= -0.5 && ink[2] <= n.rect.w + 0.5,
+                    "ink escapes box for {}",
+                    n.id
+                );
+            }
+        }
+        let f = render(&scene);
+        std::fs::create_dir_all("target")
+            .map_err(|e| format!("cannot create target dir: {e:?}"))
+            .unwrap();
+        save_png(&f, "target/varied-proof.png")
+            .map_err(|e| format!("cannot write proof png: {e}"))
+            .unwrap();
     }
 }

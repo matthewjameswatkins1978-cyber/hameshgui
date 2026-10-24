@@ -93,6 +93,38 @@ thread_local! {
         std::cell::RefCell::new(FontContext::new());
     static LAYOUT_CX: std::cell::RefCell<LayoutContext<peniko::Brush>> =
         std::cell::RefCell::new(LayoutContext::new());
+    static FONTS_LOADED: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// Directory holding Hamesh's vendored OFL profile faces
+/// (`assets/fonts` at the workspace root). Tests and apps resolve
+/// it from here so every crate shares one path.
+pub fn bundled_fonts_dir() -> std::path::PathBuf {
+    std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../assets/fonts")
+}
+
+/// Register additional fonts (e.g. [`bundled_fonts_dir`]) with this
+/// thread's shaping context. Must run before first shape on the
+/// thread; each thread loads once (guarded), so tests call this
+/// freely. Returns families added on the calling thread.
+pub fn register_fonts_from_dir(dir: &std::path::Path) -> usize {
+    FONT_CX.with(|fcx| {
+        let mut fcx = fcx.borrow_mut();
+        if FONTS_LOADED.get() {
+            return 0;
+        }
+        let before = fcx.collection.family_names().count();
+        fcx.collection.load_fonts_from_paths([dir]);
+        FONTS_LOADED.set(true);
+        fcx.collection.family_names().count().saturating_sub(before)
+    })
+}
+
+/// True when the shaping collection knows this family. False means
+/// shaping falls back — the interface stays correct, and the Eye
+/// reports the substitution via `font_resolved` (family-level).
+pub fn font_family_available(family: &str) -> bool {
+    FONT_CX.with(|fcx| fcx.borrow_mut().collection.family_id(family).is_some())
 }
 
 /// Owned parley layout: safe to hand to CPU (swash) and GPU (vello)
@@ -100,6 +132,7 @@ thread_local! {
 /// `FontContext` needs to outlive it — verified by the compiler.
 pub struct TextLayout {
     layout: parley::Layout<peniko::Brush>,
+    vars: Vec<([u8; 4], f32)>,
 }
 
 /// One run's positioned data, fully owned for consumer convenience.
@@ -107,8 +140,65 @@ pub struct TextLayout {
 pub struct TextRun {
     pub font: parley::FontData,
     pub size: f32,
+    /// Variation coords this run was shaped with (empty = default).
+    /// Rasterizers must scale with these or outlines disagree with
+    /// positions on variable faces.
+    pub vars: Vec<([u8; 4], f32)>,
     /// (glyph id, layout-absolute x, layout-absolute y)
     pub glyphs: Vec<(u32, f32, f32)>,
+}
+
+/// Font selection for shaping: optional family plus OpenType
+/// variation axes as (4-byte tag, value) pairs. `Default` is plain
+/// shaping (no family, no variations) — every existing caller keeps
+/// working unchanged. The scene resolves one per text node from its
+/// `font` / `font_vars` props and every consumer (advance, trim,
+/// ink, measure, render) shapes with the same spec, so boxes and
+/// paint cannot disagree. The CPU rasterizer scales with the run's
+/// coords, so varied outlines match varied positions; vello 0.11 has
+/// no variation-coords API, so the GPU path keeps default-instance
+/// outlines at varied positions until the vello upgrade.
+#[derive(Clone, Debug, Default)]
+pub struct FontSpec {
+    pub family: Option<String>,
+    pub vars: Vec<([u8; 4], f32)>,
+}
+
+impl FontSpec {
+    /// Stable identity for cache keys: family name plus each
+    /// axis tag and value bits, in declared order.
+    pub fn fingerprint(&self) -> u64 {
+        use std::hash::{Hash, Hasher};
+        let mut h = std::collections::hash_map::DefaultHasher::new();
+        self.family.hash(&mut h);
+        for (tag, v) in &self.vars {
+            tag.hash(&mut h);
+            v.to_bits().hash(&mut h);
+        }
+        h.finish()
+    }
+
+    /// Parse the `font` / `font_vars` component props (`font_vars`
+    /// is `"TAG value, ..."`, e.g. `"wdth 75, opsz 16"`). Malformed
+    /// entries are skipped, never fatal.
+    pub fn parse(font: Option<&str>, vars: Option<&str>) -> Self {
+        let family = font.map(str::to_string);
+        let mut out = Vec::new();
+        if let Some(v) = vars {
+            for item in v.split(',') {
+                let mut parts = item.split_whitespace();
+                if let (Some(tag), Some(val)) = (parts.next(), parts.next()) {
+                    let b = tag.as_bytes();
+                    if b.len() == 4 {
+                        if let Ok(f) = val.parse::<f32>() {
+                            out.push(([b[0], b[1], b[2], b[3]], f));
+                        }
+                    }
+                }
+            }
+        }
+        Self { family, vars: out }
+    }
 }
 
 impl TextLayout {
@@ -117,20 +207,60 @@ impl TextLayout {
     /// preferred metrics. Builders declare it from the type ramp so
     /// tokens and rendering agree; legacy nodes omit it.
     pub fn new(text: &str, max_width: f32, font_size: f32, line_height: Option<f32>) -> Self {
+        Self::new_varied(
+            text,
+            max_width,
+            font_size,
+            line_height,
+            &FontSpec::default(),
+        )
+    }
+
+    /// Lay out text with the given font selection: optional family plus
+    /// OpenType variation axes (e.g. family `"Instrument Sans"`,
+    /// `vars: [(b"wdth", 75.0)]`). `FontSpec::default()` keeps the
+    /// current behavior (default family, no variations). Axes the
+    /// resolved font lacks are ignored by the shaper - check the
+    /// design-profile probe before depending on a specific axis.
+    pub fn new_varied(
+        text: &str,
+        max_width: f32,
+        font_size: f32,
+        line_height: Option<f32>,
+        spec: &FontSpec,
+    ) -> Self {
         FONT_CX.with(|fcx| {
             LAYOUT_CX.with(|lcx| {
                 let mut fcx = fcx.borrow_mut();
                 let mut lcx = lcx.borrow_mut();
                 let mut builder = lcx.ranged_builder(&mut fcx, text, 1.0, false);
+                if let Some(f) = spec.family.as_deref() {
+                    builder.push_default(StyleProperty::FontFamily(
+                        parley::style::FontFamily::named(f),
+                    ));
+                }
                 builder.push_default(StyleProperty::FontSize(font_size));
                 if let Some(lh) = line_height {
                     builder.push_default(StyleProperty::LineHeight(
                         parley::style::LineHeight::Absolute(lh),
                     ));
                 }
+                if !spec.vars.is_empty() {
+                    let vars: Vec<parley::setting::FontVariation> = spec
+                        .vars
+                        .iter()
+                        .map(|(tag, v)| {
+                            parley::setting::FontVariation::new(parley::setting::Tag::new(tag), *v)
+                        })
+                        .collect();
+                    builder.push_default(StyleProperty::FontVariations((&vars[..]).into()));
+                }
                 let mut layout = builder.build(text);
                 layout.break_all_lines(Some(max_width));
-                Self { layout }
+                Self {
+                    layout,
+                    vars: spec.vars.clone(),
+                }
             })
         })
     }
@@ -174,6 +304,7 @@ impl TextLayout {
                 out.push(TextRun {
                     font: run.font().clone(),
                     size: run.font_size(),
+                    vars: self.vars.clone(),
                     glyphs: gr.positioned_glyphs().map(|g| (g.id, g.x, g.y)).collect(),
                 });
             }
@@ -215,11 +346,12 @@ fn ink_uncached(
     max_width: f32,
     font_size: f32,
     line_height: Option<f32>,
+    spec: &FontSpec,
 ) -> Option<InkBox> {
     if text.trim().is_empty() {
         return None;
     }
-    let layout = TextLayout::new(text, max_width, font_size, line_height);
+    let layout = TextLayout::new_varied(text, max_width, font_size, line_height, spec);
     let baseline = layout.first_baseline()?;
     let glyphs = glue::rasterize_layout(&layout);
     let mut x0 = f32::INFINITY;
@@ -255,8 +387,9 @@ fn ink_uncached(
 /// Bounded memoization: ink is a pure function of shaped text, and
 /// live frames re-query the same strings constantly. 512 entries,
 /// cleared wholesale when full (simplest correct eviction).
-type InkCache =
-    std::sync::Mutex<std::collections::HashMap<(String, u32, u32, Option<u32>), Option<InkBox>>>;
+type InkCache = std::sync::Mutex<
+    std::collections::HashMap<(String, u32, u32, Option<u32>, u64), Option<InkBox>>,
+>;
 static INK_CACHE: std::sync::OnceLock<InkCache> = std::sync::OnceLock::new();
 
 fn ink_key(
@@ -264,12 +397,14 @@ fn ink_key(
     max_width: f32,
     font_size: f32,
     line_height: Option<f32>,
-) -> (String, u32, u32, Option<u32>) {
+    spec: &FontSpec,
+) -> (String, u32, u32, Option<u32>, u64) {
     (
         text.to_string(),
         max_width.to_bits(),
         font_size.to_bits(),
         line_height.map(|v| v.to_bits()),
+        spec.fingerprint(),
     )
 }
 
@@ -280,13 +415,14 @@ pub fn ink_box(
     max_width: f32,
     font_size: f32,
     line_height: Option<f32>,
+    spec: &FontSpec,
 ) -> Option<InkBox> {
-    let key = ink_key(text, max_width, font_size, line_height);
+    let key = ink_key(text, max_width, font_size, line_height, spec);
     let cache = INK_CACHE.get_or_init(|| std::sync::Mutex::new(std::collections::HashMap::new()));
     if let Some(hit) = cache.lock().expect("ink cache").get(&key) {
         return *hit;
     }
-    let v = ink_uncached(text, max_width, font_size, line_height);
+    let v = ink_uncached(text, max_width, font_size, line_height, spec);
     let mut c = cache.lock().expect("ink cache");
     if c.len() >= 512 {
         c.clear();
@@ -295,20 +431,21 @@ pub fn ink_box(
     v
 }
 
-/// Font-relative cap height (px) for `font_size`: ink top of "H"
-/// vs its baseline. Depends only on font+size, never content, so a
-/// trim derived from it cannot jump when the label text changes.
-/// Cached per size; fallback 0.7*size keeps boxes sane if shaping fails.
-type CapCache = std::sync::Mutex<std::collections::HashMap<u32, f32>>;
+/// Font-relative cap height (px) for `font_size` and shaping: ink top
+/// of "H" vs its baseline. Depends only on font+size, never content,
+/// so a trim derived from it cannot jump when the label text changes.
+/// Cached per (size, shaping); fallback 0.7*size keeps boxes sane if
+/// shaping fails.
+type CapCache = std::sync::Mutex<std::collections::HashMap<(u32, u64), f32>>;
 static CAP_CACHE: std::sync::OnceLock<CapCache> = std::sync::OnceLock::new();
 
-pub fn cap_height_ref(font_size: f32) -> f32 {
-    let key = font_size.to_bits();
+pub fn cap_height_ref(font_size: f32, spec: &FontSpec) -> f32 {
+    let key = (font_size.to_bits(), spec.fingerprint());
     let cache = CAP_CACHE.get_or_init(|| std::sync::Mutex::new(std::collections::HashMap::new()));
     if let Some(hit) = cache.lock().expect("cap cache").get(&key) {
         return *hit;
     }
-    let v = ink_uncached("H", 400.0, font_size, None)
+    let v = ink_uncached("H", 400.0, font_size, None, spec)
         .map(|b| (b.baseline - b.y0).max(1.0))
         .unwrap_or(font_size * 0.7);
     let mut c = cache.lock().expect("cap cache");
@@ -344,18 +481,20 @@ pub fn trim_box(
     max_width: f32,
     font_size: f32,
     line_height: Option<f32>,
+    spec: &FontSpec,
 ) -> Option<FontTrim> {
     let key = (
         text.to_string(),
         max_width.to_bits(),
         font_size.to_bits(),
         line_height.map(|v| v.to_bits()),
+        spec.fingerprint(),
     );
     let cache = TRIM_CACHE.get_or_init(|| std::sync::Mutex::new(std::collections::HashMap::new()));
     if let Some(hit) = cache.lock().expect("trim cache").get(&key) {
         return *hit;
     }
-    let v = trim_uncached(text, max_width, font_size, line_height);
+    let v = trim_uncached(text, max_width, font_size, line_height, spec);
     let mut c = cache.lock().expect("trim cache");
     if c.len() >= 512 {
         c.clear();
@@ -364,8 +503,9 @@ pub fn trim_box(
     v
 }
 
-type TrimCache =
-    std::sync::Mutex<std::collections::HashMap<(String, u32, u32, Option<u32>), Option<FontTrim>>>;
+type TrimCache = std::sync::Mutex<
+    std::collections::HashMap<(String, u32, u32, Option<u32>, u64), Option<FontTrim>>,
+>;
 static TRIM_CACHE: std::sync::OnceLock<TrimCache> = std::sync::OnceLock::new();
 
 fn trim_uncached(
@@ -373,11 +513,12 @@ fn trim_uncached(
     max_width: f32,
     font_size: f32,
     line_height: Option<f32>,
+    spec: &FontSpec,
 ) -> Option<FontTrim> {
     if text.trim().is_empty() {
         return None;
     }
-    let layout = TextLayout::new(text, max_width, font_size, line_height);
+    let layout = TextLayout::new_varied(text, max_width, font_size, line_height, spec);
     if layout.line_count() != 1 {
         return None;
     }
@@ -385,7 +526,7 @@ fn trim_uncached(
     let line_height = layout.height().max(1.0);
     let ascent = baseline.max(1.0);
     let descent = (line_height - baseline).max(0.0);
-    let cap = cap_height_ref(font_size);
+    let cap = cap_height_ref(font_size, spec);
     Some(FontTrim {
         top: baseline - cap,
         bottom: baseline,
@@ -478,9 +619,9 @@ mod tests {
 
     #[test]
     fn ink_box_is_ground_truth() {
-        assert!(ink_box("", 400.0, 13.0, None).is_none());
-        assert!(ink_box("   ", 400.0, 13.0, None).is_none());
-        let ink = ink_box("Connected", 400.0, 13.0, None).expect("ink");
+        assert!(ink_box("", 400.0, 13.0, None, &FontSpec::default()).is_none());
+        assert!(ink_box("   ", 400.0, 13.0, None, &FontSpec::default()).is_none());
+        let ink = ink_box("Connected", 400.0, 13.0, None, &FontSpec::default()).expect("ink");
         let lay = TextLayout::new("Connected", 400.0, 13.0, None);
         // Bearings trimmed: ink narrower than the advance box.
         assert!(
@@ -499,9 +640,12 @@ mod tests {
             ink.y1
         );
         // Cached call agrees.
-        assert_eq!(ink_box("Connected", 400.0, 13.0, None), Some(ink));
+        assert_eq!(
+            ink_box("Connected", 400.0, 13.0, None, &FontSpec::default()),
+            Some(ink)
+        );
         // Descenders extend ink below the baseline.
-        let desc = ink_box("Inspected", 400.0, 13.0, None).expect("ink");
+        let desc = ink_box("Inspected", 400.0, 13.0, None, &FontSpec::default()).expect("ink");
         assert!(desc.y1 > desc.baseline, "p tail should pass the baseline");
     }
 
@@ -540,8 +684,8 @@ mod tests {
     #[test]
     fn trim_is_font_relative_not_content_relative() {
         // Stability: Connected -> Disconnected must not move the box.
-        let a = trim_box("Connected", 400.0, 13.0, None).expect("trim a");
-        let b = trim_box("Disconnected", 400.0, 13.0, None).expect("trim b");
+        let a = trim_box("Connected", 400.0, 13.0, None, &FontSpec::default()).expect("trim a");
+        let b = trim_box("Disconnected", 400.0, 13.0, None, &FontSpec::default()).expect("trim b");
         assert!(
             (a.top - b.top).abs() < 0.01,
             "top moved: {:?} vs {:?}",
@@ -556,7 +700,7 @@ mod tests {
         );
         // Accents share the box: trim never clips diacritics by construction
         // (renderers align by trim, clip only to node rect).
-        let c = trim_box("Caf\u{e9}", 400.0, 13.0, None).expect("trim c");
+        let c = trim_box("Caf\u{e9}", 400.0, 13.0, None, &FontSpec::default()).expect("trim c");
         assert!(
             (a.top - c.top).abs() < 0.01,
             "accent moved top: {:?} vs {:?}",
@@ -564,8 +708,8 @@ mod tests {
             c
         );
         // Empty and wrapped text opt out to line-box placement.
-        assert!(trim_box("", 400.0, 13.0, None).is_none());
-        assert!(trim_box("a b c d e f g", 10.0, 13.0, None).is_none());
+        assert!(trim_box("", 400.0, 13.0, None, &FontSpec::default()).is_none());
+        assert!(trim_box("a b c d e f g", 10.0, 13.0, None, &FontSpec::default()).is_none());
         // Cap-alphabetic trim sits inside the line box: top at or below
         // the line top, bottom (baseline) strictly above the line bottom
         // whenever the font carries descender space.
@@ -576,5 +720,115 @@ mod tests {
             "trim height is cap: {:?}",
             a
         );
+    }
+
+    #[test]
+    fn variable_axes_reach_shaping_when_supported() {
+        // Design profiles need wdth/opsz and beyond. Shapes one word
+        // in the vendored Instrument Sans (variable) at two widths.
+        // Advances MUST differ if family + axes work end to end.
+        // Registered first, so this holds on every machine.
+        register_fonts_from_dir(&bundled_fonts_dir());
+        let probe = |wdth: f32| -> f32 {
+            TextLayout::new_varied(
+                "Hamburg",
+                f32::INFINITY,
+                64.0,
+                None,
+                &FontSpec {
+                    family: Some("Instrument Sans".to_string()),
+                    vars: vec![(*b"wdth", wdth)],
+                },
+            )
+            .width()
+        };
+        let (narrow, wide) = (probe(75.0), probe(100.0));
+        assert!(
+            (narrow - wide).abs() >= 1.0,
+            "vendored Instrument Sans must resolve, not substitute"
+        );
+        assert!(
+            narrow < wide,
+            "wdth 75 must shape narrower than wdth 100: {narrow} vs {wide}"
+        );
+    }
+
+    #[test]
+    fn varied_outlines_match_varied_positions() {
+        // Raster follow-up: the scaler must use the run's variation
+        // coords, or default-instance outlines crowd into condensed
+        // advances. Ink spans must track their own advance, not the
+        // other instance's. Vendored faces are registered first.
+        register_fonts_from_dir(&bundled_fonts_dir());
+        let spec = |wdth: Option<f32>| FontSpec {
+            family: Some("Instrument Sans".to_string()),
+            vars: wdth.map(|w| vec![(*b"wdth", w)]).unwrap_or_default(),
+        };
+        let lay = |s: &FontSpec| TextLayout::new_varied("Hamburg", f32::INFINITY, 64.0, None, s);
+        let (ld, lv) = (lay(&spec(None)), lay(&spec(Some(75.0))));
+        assert!(
+            (ld.width() - lv.width()).abs() >= 1.0,
+            "vendored Instrument Sans must resolve, not substitute"
+        );
+        let span = |l: &TextLayout| -> f32 {
+            let g = glue::rasterize_layout(l);
+            assert!(!g.is_empty(), "expected raster glyphs");
+            let (mut lo, mut hi) = (f32::INFINITY, f32::NEG_INFINITY);
+            for r in &g {
+                lo = lo.min(r.pen_x + r.left as f32);
+                hi = hi.max(r.pen_x + r.left as f32 + r.w as f32);
+            }
+            hi - lo
+        };
+        let (sd, sv) = (span(&ld), span(&lv));
+        eprintln!(
+            "raster proof: default adv={:.1} span={:.1} / condensed adv={:.1} span={:.1}",
+            ld.width(),
+            sd,
+            lv.width(),
+            sv
+        );
+        assert!(
+            (sv - sd).abs() > 10.0,
+            "varied outlines must differ from default: {sv} vs {sd}"
+        );
+        for (adv, sp, name) in [(ld.width(), sd, "default"), (lv.width(), sv, "condensed")] {
+            assert!(
+                (adv - sp).abs() < 12.0,
+                "{name} ink span {sp} must track its advance {adv}"
+            );
+        }
+    }
+
+    #[test]
+    fn font_spec_parse_keeps_valid_axes_drops_garbage() {
+        let s = FontSpec::parse(
+            Some("Bahnschrift"),
+            Some("wdth 75, bogus, opsz nope, toolongtag 1, wght 700"),
+        );
+        assert_eq!(s.family.as_deref(), Some("Bahnschrift"));
+        assert_eq!(s.vars, vec![(*b"wdth", 75.0), (*b"wght", 700.0)]);
+        let empty = FontSpec::parse(None, None);
+        assert!(empty.family.is_none() && empty.vars.is_empty());
+        // Fingerprint distinguishes shaping configurations.
+        assert_ne!(s.fingerprint(), empty.fingerprint());
+    }
+
+    #[test]
+    fn bundled_faces_register_and_resolve() {
+        // The vendored OFL faces must shape identically on every
+        // machine (including CI): register, then every profile
+        // voice resolves and a bogus family does not.
+        let n = register_fonts_from_dir(&bundled_fonts_dir());
+        eprintln!("test fonts: {n} families registered on this thread");
+        for f in [
+            "Barlow Condensed",
+            "IBM Plex Mono",
+            "Newsreader",
+            "Instrument Sans",
+        ] {
+            assert!(font_family_available(f), "missing vendored face {f}");
+        }
+        assert!(!font_family_available("NoSuchFaceXYZ"));
     }
 }
