@@ -155,7 +155,7 @@ fn build_vscene(
                 avail
             };
             let key = format!(
-                "{}|{:.0}|{:.0}|{:?}|{}|{}|{:?}|{:?}",
+                "{}|{:.0}|{:.0}|{:?}|{}|{}|{:?}|{:?}|{:?}|{}|{}",
                 node.id,
                 avail,
                 node.font_size,
@@ -163,7 +163,10 @@ fn build_vscene(
                 node.lines,
                 node.text,
                 node.font_family,
-                node.font_vars
+                node.font_vars,
+                node.font_style,
+                node.tracking,
+                hamesh_text::font_generation()
             );
             if !cache.contains_key(&key) {
                 let layout = hamesh_text::TextLayout::new_varied(
@@ -174,6 +177,8 @@ fn build_vscene(
                     &hamesh_text::FontSpec {
                         family: node.font_family.clone(),
                         vars: node.font_vars.clone(),
+                        style: hamesh_text::FontSpec::parse_style(node.font_style.as_deref()),
+                        tracking: node.tracking,
                     },
                 );
                 cache.insert(key.clone(), layout);

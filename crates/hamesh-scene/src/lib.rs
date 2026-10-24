@@ -88,6 +88,12 @@ pub struct SceneNode {
     /// back: the interface stays correct, and the Eye reports the
     /// substitution here (family-level). True when no `font` prop.
     pub font_resolved: bool,
+    /// Requested style (`font_style` prop): `Some("italic")` voices
+    /// the italic face through font matching. `None` = upright.
+    pub font_style: Option<String>,
+    /// Extra inter-glyph px (`tracking` prop, may be negative).
+    /// Part of scene truth: advances and origins include it.
+    pub tracking: f32,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -197,6 +203,8 @@ pub fn build(app: &App, layout: &LayoutOutput, scene_revision: u64) -> Scene {
             let font_spec = hamesh_text::FontSpec::parse(
                 c.props.get("font").map(String::as_str),
                 c.props.get("font_vars").map(String::as_str),
+                c.props.get("font_style").map(String::as_str),
+                c.props.get("tracking").map(String::as_str),
             );
             // Substitution signal: a named family the collection does
             // not know falls back. Layout and paint stay correct;
@@ -335,6 +343,8 @@ pub fn build(app: &App, layout: &LayoutOutput, scene_revision: u64) -> Scene {
                 font_family: font_spec.family.clone(),
                 font_vars: font_spec.vars.clone(),
                 font_resolved,
+                font_style: c.props.get("font_style").cloned(),
+                tracking: font_spec.tracking,
             })
         })
         .collect();
@@ -393,6 +403,8 @@ mod tests {
         let spec = hamesh_text::FontSpec {
             family: Some("Instrument Sans".to_string()),
             vars: vec![(*b"wdth", 75.0)],
+            style: None,
+            tracking: 0.0,
         };
         let direct =
             hamesh_text::trim_box("Connected", f32::INFINITY, 13.0, None, &spec).expect("trim");
@@ -442,6 +454,38 @@ mod tests {
         assert!(n.advance > 1.0, "fallback must still shape");
         assert!(n.ink.is_some(), "fallback must still paint");
         assert_eq!(n.lines, 1);
+    }
+
+    #[test]
+    fn fresh_threads_shape_with_vendored_faces() {
+        // Cache-poisoning regression: a thread that never explicitly
+        // registered must still resolve bundled faces (auto-register
+        // on first shape), so parallel tests can never cache fallback
+        // geometry under a key a voiced thread later reuses.
+        let shape_plex = || {
+            // Pristine collection: Plex is vendored, never systemic.
+            assert!(
+                !hamesh_text::font_family_available("IBM Plex Mono"),
+                "fresh thread must start unregistered"
+            );
+            let mut app = App::new("win");
+            app.add(
+                "win",
+                Component::new("b", Role::Status, "badge")
+                    .with_prop("text", "Connected")
+                    .with_prop("font", "IBM Plex Mono")
+                    .with_prop("font_size", "13")
+                    .with_prop("lh", "18"),
+            );
+            let layout = hamesh_layout::compute(&app, 800.0, 600.0);
+            let scene = build(&app, &layout, 1);
+            let n = scene.nodes.iter().find(|n| n.id == "b").unwrap();
+            assert!(n.font_resolved, "fresh thread must auto-register");
+            n.advance
+        };
+        let other = std::thread::scope(|s| s.spawn(shape_plex).join().unwrap());
+        let here = shape_plex();
+        assert_eq!(here, other, "one shaper, one answer, any thread");
     }
 
     #[test]

@@ -392,11 +392,55 @@ mod tests {
     }
 
     #[test]
+    fn activity_rows_share_one_right_edge() {
+        // Objective geometry check (finding 3): the three activity
+        // metadata captions must end at the same x — the row spacer
+        // absorbs the slack, not the eye. Holds for every profile
+        // since rows share structure; advances differ, edges don't.
+        hamesh_text::register_fonts_from_dir(&hamesh_text::bundled_fonts_dir());
+        for (profile, name) in [
+            (&SIGNAL_CABINET, "cabinet"),
+            (&LIVING_FOLIO, "folio"),
+            (&UNQUIET_GRID, "grid"),
+        ] {
+            let app = build_dashboard_with(profile);
+            let layout = hamesh_layout::compute(&app, 800.0, 600.0);
+            let scene = hamesh_scene::build(&app, &layout, 1);
+            let mut edges = Vec::new();
+            for id in ["a1-sub", "a2-sub", "a3-sub"] {
+                let n = scene.nodes.iter().find(|n| n.id == id).unwrap();
+                edges.push(n.rect.x + n.origin[0] + n.advance);
+            }
+            eprintln!("{name} activity right edges: {edges:.1?}");
+            for w in edges.windows(2) {
+                assert!(
+                    (w[0] - w[1]).abs() < 1.5,
+                    "{name}: activity rows misaligned: {edges:.1?}"
+                );
+            }
+        }
+    }
+
+    #[test]
     fn grid_profile_gives_a_third_voice() {
         // The Unquiet Grid: narrowed, weighted Instrument Sans display
         // against the same Plex Mono technical voice. Three profiles,
         // one composition, three unmistakable treatments.
         voice_proof(&UNQUIET_GRID, "grid", "target/grid-proof.png");
+        // The guest appearance: the subtitle speaks Newsreader Italic.
+        let alt = build_dashboard_with(&UNQUIET_GRID);
+        let sub = alt.get("dash-sub").unwrap();
+        assert_eq!(
+            sub.props.get("font_style").map(|s| s.as_str()),
+            Some("italic")
+        );
+        let layout = hamesh_layout::compute(&alt, 800.0, 600.0);
+        let scene = hamesh_scene::build(&alt, &layout, 1);
+        let sn = scene.nodes.iter().find(|n| n.id == "dash-sub").unwrap();
+        assert!(
+            sn.font_resolved,
+            "italic kicker must resolve, not substitute"
+        );
     }
 
     /// Shared variety proof: `profile` voices the composition, the
@@ -407,6 +451,17 @@ mod tests {
         hamesh_text::register_fonts_from_dir(&hamesh_text::bundled_fonts_dir());
         let cab = build_dashboard();
         let alt = build_dashboard_with(profile);
+        // Independence: identical content — only the voices differ.
+        let words = |app: &App| -> Vec<(String, String)> {
+            let mut v: Vec<(String, String)> = app
+                .components
+                .values()
+                .filter_map(|c| c.props.get("text").map(|t| (c.id.0.clone(), t.clone())))
+                .collect();
+            v.sort();
+            v
+        };
+        assert_eq!(words(&cab), words(&alt), "{name} must not change content");
         let layout_c = hamesh_layout::compute(&cab, 800.0, 600.0);
         let layout_a = hamesh_layout::compute(&alt, 800.0, 600.0);
         let scene_c = hamesh_scene::build(&cab, &layout_c, 1);
@@ -445,5 +500,9 @@ mod tests {
         let f = hamesh_render::render(&scene_a);
         std::fs::create_dir_all("target").unwrap();
         hamesh_render::save_png(&f, png).unwrap();
+        // Cabinet reference from the SAME run: identical content,
+        // viewport and state — the three PNGs are directly comparable.
+        let fc = hamesh_render::render(&scene_c);
+        hamesh_render::save_png(&fc, "target/cabinet-proof.png").unwrap();
     }
 }

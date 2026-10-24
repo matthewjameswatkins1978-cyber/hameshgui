@@ -1073,6 +1073,8 @@ impl HameshWindowApp {
                                 "font_family": n.font_family,
                                 "font_vars": n.font_vars,
                                 "font_resolved": n.font_resolved,
+                                "font_style": n.font_style,
+                                "tracking": n.tracking,
                             },
                         })
                     })

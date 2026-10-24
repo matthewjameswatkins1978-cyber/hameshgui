@@ -584,14 +584,16 @@ pub fn button(s: &mut Scope, id: &str, label: &str, o: ButtonOpts) {
 
 // ---- Design profiles ----
 
-/// One typographic voice: a face plus its variation axes. Empty
-/// `vars` means the default instance. Faces that are absent on a
-/// machine fall back silently (parley/fontdb); profiles must only
-/// be asserted through structural properties, never absolute widths.
+/// One typographic voice: a face, its variation axes, and an
+/// optional style. Empty `vars` means the default instance;
+/// `style: Some("italic")` voices the italic face through font
+/// matching. Faces that are absent on a machine fall back silently
+/// (parley/fontdb) and the Eye reports the substitution.
 #[derive(Clone, Copy, Debug)]
 pub struct Voice {
     pub family: &'static str,
     pub vars: &'static str,
+    pub style: Option<&'static str>,
 }
 
 /// A design language's type contract: which voice speaks each
@@ -603,6 +605,9 @@ pub struct Profile {
     pub display: Voice,
     /// Readouts, labels, annotations (instrumental mono).
     pub technical: Voice,
+    /// The guest appearance: subtitles and kickers (humanist
+    /// break). `None` leaves them in the default face.
+    pub accent: Option<Voice>,
 }
 
 /// Signal Cabinet: Barlow Condensed display, IBM Plex Mono
@@ -612,11 +617,14 @@ pub const SIGNAL_CABINET: Profile = Profile {
     display: Voice {
         family: "Barlow Condensed",
         vars: "",
+        style: None,
     },
     technical: Voice {
         family: "IBM Plex Mono",
         vars: "",
+        style: None,
     },
+    accent: None,
 };
 
 /// Living Folio: Newsreader at display optical size for titles
@@ -626,48 +634,64 @@ pub const LIVING_FOLIO: Profile = Profile {
     display: Voice {
         family: "Newsreader",
         vars: "opsz 72",
+        style: None,
     },
     technical: Voice {
         family: "IBM Plex Mono",
         vars: "",
+        style: None,
     },
+    accent: None,
 };
 
 /// Unquiet Grid: Instrument Sans narrowed and weighted for
-/// display, Plex Mono technical. Width contrast, not weight
-/// shouting — one family keeps the grid calm.
+/// display, Plex Mono technical, Newsreader Italic kicker for
+/// the guest appearance. Width contrast, not weight shouting —
+/// one family keeps the grid calm, the italic breaks it once.
 pub const UNQUIET_GRID: Profile = Profile {
     display: Voice {
         family: "Instrument Sans",
         vars: "wdth 80, wght 650",
+        style: None,
     },
     technical: Voice {
         family: "IBM Plex Mono",
         vars: "",
+        style: None,
     },
+    accent: Some(Voice {
+        family: "Newsreader",
+        vars: "opsz 16",
+        style: Some("italic"),
+    }),
 };
 
-/// Reapplication contract: a profile owns `font` and `font_vars`
-/// on the block kinds it voices (Title, MetricValue, Caption,
-/// MetricLabel). Reapplying reconciles those two props on every
-/// node of a voiced kind with the new profile's desired state —
-/// set when voiced, removed when not — so Grid → Cabinet cannot
-/// leave `wdth 80, wght 650` behind. Props on other kinds (Button,
-/// Badge, Body, Heading, panels…) are never touched: genuine
-/// overrides there survive every switch. Overrides on voiced kinds
-/// are profile-managed — set them after `apply_profile`, or
-/// re-apply to reset. The app revision bumps iff a prop actually
-/// changed, so revision-dependent caches (frame cache, Eye
-/// staleness, drill rev tracking) invalidate exactly when paint can
-/// differ — and an idempotent reapply is a no-op down to the
-/// revision.
+/// Reapplication contract: a profile owns `font`, `font_vars`
+/// and `font_style` on the block kinds it voices (Title,
+/// MetricValue, Caption, MetricLabel, Subtle). Reapplying
+/// reconciles those three props on every node of a voiced kind
+/// with the new profile's desired state — set when voiced,
+/// removed when not — so Grid → Cabinet cannot leave `wdth 80`
+/// or `italic` behind. Props on other kinds (Button, Badge, Body,
+/// Heading, panels…) are never touched: genuine overrides there
+/// survive every switch. Overrides on voiced kinds are
+/// profile-managed — set them after `apply_profile`, or re-apply
+/// to reset. `tracking` is never profile-managed and always
+/// survives. The app revision bumps iff a prop actually changed,
+/// so revision-dependent caches (frame cache, Eye staleness, drill
+/// rev tracking) invalidate exactly when paint can differ — and an
+/// idempotent reapply is a no-op down to the revision.
 pub fn apply_profile(app: &mut App, p: &Profile) {
     let mut changed = false;
     for c in app.components.values_mut() {
         let kind = c.props.get("block").map(|s| s.as_str());
         let voiced = matches!(
             kind,
-            Some("Title") | Some("MetricValue") | Some("Caption") | Some("MetricLabel")
+            Some("Title")
+                | Some("MetricValue")
+                | Some("Caption")
+                | Some("MetricLabel")
+                | Some("Subtle")
         );
         if !voiced {
             continue;
@@ -675,17 +699,20 @@ pub fn apply_profile(app: &mut App, p: &Profile) {
         let v = match kind {
             Some("Title") | Some("MetricValue") => Some(&p.display),
             Some("Caption") | Some("MetricLabel") => Some(&p.technical),
+            Some("Subtle") => p.accent.as_ref(),
             _ => None,
         };
-        let (font, vars) = match v {
+        let (font, vars, style) = match v {
             Some(v) => (
                 Some(v.family.to_string()),
                 (!v.vars.is_empty()).then(|| v.vars.to_string()),
+                v.style.map(str::to_string),
             ),
-            None => (None, None),
+            None => (None, None, None),
         };
         reconcile_prop(c, "font", font, &mut changed);
         reconcile_prop(c, "font_vars", vars, &mut changed);
+        reconcile_prop(c, "font_style", style, &mut changed);
     }
     if changed {
         app.bump();
@@ -879,6 +906,65 @@ mod tests {
                 .map(|s| s.as_str()),
             Some("2")
         );
+    }
+
+    #[test]
+    fn profile_switching_clears_accents_and_axes() {
+        // Finding 1, style-branch half: Grid voices the Subtle
+        // kicker italic; switching to Cabinet (no accent) must
+        // remove `font_style`, and switching display voices must
+        // swap `font_vars` — never accumulate. Revision bumps iff
+        // something changed.
+        let mut app = App::new("win");
+        {
+            let mut s = Scope::root(&mut app, "win");
+            card(&mut s, "c", CardOpts::default(), |t| {
+                title(t, "t", "Agent X");
+                subtle(t, "sub", "overview");
+            });
+        }
+        let r0 = app.revision;
+        apply_profile(&mut app, &UNQUIET_GRID);
+        assert!(app.revision > r0, "first voicing must bump");
+        let sub = app.get("sub").unwrap();
+        assert_eq!(
+            sub.props.get("font_style").map(|s| s.as_str()),
+            Some("italic")
+        );
+        assert_eq!(
+            app.get("t")
+                .unwrap()
+                .props
+                .get("font_vars")
+                .map(|s| s.as_str()),
+            Some("wdth 80, wght 650")
+        );
+        // Cabinet has no accent and static display: both the italic
+        // and Grid's axes must be GONE, not stale.
+        let r1 = app.revision;
+        apply_profile(&mut app, &SIGNAL_CABINET);
+        assert!(app.revision > r1, "voice change must bump");
+        let sub = app.get("sub").unwrap();
+        assert!(!sub.props.contains_key("font"), "no accent: no voice");
+        assert!(
+            !sub.props.contains_key("font_style"),
+            "italic must be cleared"
+        );
+        assert!(!app.get("t").unwrap().props.contains_key("font_vars"));
+        // Back to Grid restores the kicker exactly.
+        apply_profile(&mut app, &UNQUIET_GRID);
+        assert_eq!(
+            app.get("sub")
+                .unwrap()
+                .props
+                .get("font_style")
+                .map(|s| s.as_str()),
+            Some("italic")
+        );
+        // Idempotent reapply: revision stable.
+        let r3 = app.revision;
+        apply_profile(&mut app, &UNQUIET_GRID);
+        assert_eq!(app.revision, r3, "idempotent reapply must not bump");
     }
 
     #[test]
