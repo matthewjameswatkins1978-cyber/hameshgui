@@ -251,7 +251,20 @@ fn child_style(comp: &hamesh_core::Component) -> Style {
         .and_then(|v| v.parse::<f32>().ok())
         .filter(|v| *v > 0.0)
         .map(taffy::style::LengthPercentageAuto::length)
-        .unwrap_or(taffy::style::LengthPercentageAuto::AUTO);
+        .unwrap_or_else(|| match parse("w") {
+            // A declared width is a floor too: shrinking a pinned box
+            // produces a control that is neither its own size nor
+            // readable. Overflow is now named instead of hidden.
+            Some(v) => taffy::style::LengthPercentageAuto::length(v),
+            None => taffy::style::LengthPercentageAuto::AUTO,
+        });
+    // Same for height: an icon declaring h=20 used to collapse to 0px
+    // inside an overflowing column, rendering as a dot. Declared sizes
+    // are floors; only `auto` sizes compress.
+    let min_h = match parse("h") {
+        Some(v) => taffy::style::LengthPercentageAuto::length(v),
+        None => taffy::style::LengthPercentageAuto::AUTO,
+    };
     Style {
         size: Size {
             width: w,
@@ -259,7 +272,7 @@ fn child_style(comp: &hamesh_core::Component) -> Style {
         },
         min_size: Size {
             width: min_w,
-            height: taffy::style::LengthPercentageAuto::AUTO,
+            height: min_h,
         },
         flex_direction: dir,
         flex_grow: grow,
@@ -766,6 +779,48 @@ mod tests {
         );
         let out = compute(&app, 400.0, 300.0);
         assert_eq!(out.get("bar").unwrap().rect.h, 6.0);
+    }
+
+    #[test]
+    fn declared_height_is_a_floor_when_the_column_overflows() {
+        // Field defect: a 20px icon inside a metric tile collapsed to
+        // 0px height because the column had less room than its content,
+        // so the icon painted as a dot. Declared sizes are floors now:
+        // the box overflows (named by the Eye) instead of vanishing.
+        let mut app = App::new("win");
+        app.add(
+            "win",
+            Component::new("tile", Role::Panel, "tile")
+                .with_prop("layout", "column")
+                .with_prop("w", "120")
+                .with_prop("h", "40")
+                .with_prop("pad", "0")
+                .with_prop("gap", "0"),
+        );
+        app.add(
+            "tile",
+            Component::new("ico", Role::Panel, "icon")
+                .with_prop("w", "20")
+                .with_prop("h", "20")
+                .with_prop("pad", "0"),
+        );
+        for i in 0..2 {
+            app.add(
+                "tile",
+                Component::new(&format!("t{i}"), Role::Text, "text")
+                    .with_prop("text", "VALUE")
+                    .with_prop("h", "40")
+                    .with_prop("pad", "0"),
+            );
+        }
+        let layout = compute(&app, 400.0, 300.0);
+        let ico = layout.get("ico").unwrap().rect.clone();
+        assert!(
+            (ico.h - 20.0).abs() < 0.5,
+            "declared 20px height must survive overflow, got {}",
+            ico.h
+        );
+        assert!((ico.w - 20.0).abs() < 0.5, "declared width is a floor");
     }
 
     #[test]

@@ -1,0 +1,80 @@
+{
+  "icon_rects": [
+    [
+      "t-ok-icon",
+      [
+        248.0,
+        84.0,
+        20.0,
+        20.0
+      ]
+    ],
+    [
+      "t-lat-icon",
+      [
+        485.0,
+        84.0,
+        20.0,
+        20.0
+      ]
+    ],
+    [
+      "t-drop-icon",
+      [
+        722.0,
+        84.0,
+        20.0,
+        20.0
+      ]
+    ],
+    [
+      "t-peers-icon",
+      [
+        959.0,
+        84.0,
+        20.0,
+        20.0
+      ]
+    ]
+  ],
+  "png": "target/033/ops-1440x900.png",
+  "probes": [
+    {
+      "asked_about": "t-ok",
+      "hit": "t-ok-value",
+      "paint_order": [
+        "ops",
+        "body",
+        "main",
+        "tiles",
+        "t-ok",
+        "t-ok-value"
+      ],
+      "topmost": "t-ok-value"
+    },
+    {
+      "asked_about": "e3",
+      "hit": "e3",
+      "paint_order": [
+        "ops",
+        "body",
+        "main",
+        "events",
+        "e3",
+        "e3-sp"
+      ],
+      "topmost": "e3"
+    }
+  ],
+  "report": {
+    "clipped_content": [],
+    "off_viewport": [],
+    "overlaps": [],
+    "viewport_h": 900.0,
+    "viewport_w": 1440.0
+  },
+  "size": [
+    1440,
+    900
+  ]
+}
