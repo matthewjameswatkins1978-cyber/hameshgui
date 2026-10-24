@@ -100,6 +100,35 @@ impl Rect {
             && self.y < other.y + other.h
             && self.y + self.h > other.y
     }
+
+    /// Overlap rectangle, or `None` when the rects are disjoint.
+    /// Clip composition uses this: intersecting ancestor rects
+    /// yields the region a descendant is still allowed to paint.
+    pub fn intersect(&self, other: &Rect) -> Option<Rect> {
+        let x0 = self.x.max(other.x);
+        let y0 = self.y.max(other.y);
+        let x1 = (self.x + self.w).min(other.x + other.w);
+        let y1 = (self.y + self.h).min(other.y + other.h);
+        if x1 > x0 && y1 > y0 {
+            Some(Rect {
+                x: x0,
+                y: y0,
+                w: x1 - x0,
+                h: y1 - y0,
+            })
+        } else {
+            None
+        }
+    }
+
+    /// True when `inner` lies wholly inside this rect (0.5px slop
+    /// absorbs float rounding from flex distribution).
+    pub fn contains_rect(&self, inner: &Rect) -> bool {
+        inner.x >= self.x - 0.5
+            && inner.y >= self.y - 0.5
+            && inner.x + inner.w <= self.x + self.w + 0.5
+            && inner.y + inner.h <= self.y + self.h + 0.5
+    }
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]

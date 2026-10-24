@@ -94,6 +94,18 @@ pub struct SceneNode {
     /// Extra inter-glyph px (`tracking` prop, may be negative).
     /// Part of scene truth: advances and origins include it.
     pub tracking: f32,
+    /// Parent component id (`None` for the window root). The Eye uses
+    /// it to walk from a pixel back up the tree.
+    pub parent: Option<String>,
+    /// Effective paint clip: the intersection of every ancestor rect
+    /// and the viewport. Paint is bounded by this, so a child cannot
+    /// draw outside its panel — the defect class that used to need a
+    /// hand-written regression in every application.
+    pub clip: Rect,
+    /// True when this node's own rect escapes [`clip`] and paint is
+    /// therefore cut. Prevention is silent by nature; this flag keeps
+    /// it honest by naming exactly how much content was hidden.
+    pub overflow: bool,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -345,10 +357,97 @@ pub fn build(app: &App, layout: &LayoutOutput, scene_revision: u64) -> Scene {
                 font_resolved,
                 font_style: c.props.get("font_style").cloned(),
                 tracking: font_spec.tracking,
+                // Filled by the clip pass below (needs the whole
+                // tree, not just this component).
+                parent: None,
+                clip: layout.viewport.clone(),
+                overflow: false,
             })
         })
         .collect();
-    nodes.sort_by_key(|n| n.z);
+    // ---- Effective clip + overflow (paint-time truth) -------------
+    // Walking parents here (not in layout) keeps layout's job intact:
+    // layout decides where a box goes, the scene decides what paint is
+    // allowed to touch. Nodes placed deliberately outside flow (the
+    // Eye's own guides, modals) opt out with `overlay`/`clip=false`;
+    // their children still clip to them.
+    for n in &mut nodes {
+        let me = app.components.get(&n.id);
+        let opts_out = me
+            .map(|c| {
+                c.props.get("overlay").map(|v| v == "true").unwrap_or(false)
+                    || c.props.get("clip").map(|v| v == "false").unwrap_or(false)
+            })
+            .unwrap_or(false);
+        n.parent = me.and_then(|c| c.parent.as_ref().map(|p| p.0.clone()));
+        let mut clip = layout.viewport.clone();
+        if !opts_out {
+            let mut cursor = n.parent.clone();
+            while let Some(pid) = cursor {
+                if let Some(pl) = layout.nodes.get(&pid) {
+                    clip = match clip.intersect(&pl.rect) {
+                        Some(r) => r,
+                        None => {
+                            // Entirely outside an ancestor: nothing may
+                            // paint. A zero rect keeps the arithmetic
+                            // honest instead of clamping to a sliver.
+                            Rect {
+                                x: 0.0,
+                                y: 0.0,
+                                w: 0.0,
+                                h: 0.0,
+                            }
+                        }
+                    };
+                }
+                let Some(pc) = app.components.get(&pid) else {
+                    break;
+                };
+                let stop = pc
+                    .props
+                    .get("overlay")
+                    .map(|v| v == "true")
+                    .unwrap_or(false)
+                    || pc.props.get("clip").map(|v| v == "false").unwrap_or(false);
+                if stop {
+                    break;
+                }
+                cursor = pc.parent.as_ref().map(|p| p.0.clone());
+            }
+        }
+        n.overflow = !clip.contains_rect(&n.rect);
+        n.clip = clip;
+    }
+    // Deterministic paint order. `z` alone was not enough: equal-z
+    // siblings inherited HashMap iteration order, so the same app
+    // could paint (and the Eye could report) two different topmost
+    // nodes across runs. Tie-break on tree order — a pre-order walk
+    // following each parent's declared child list — so paint order is
+    // a property of the tree, not of hashing.
+    let mut order = std::collections::HashMap::new();
+    {
+        let mut seq = 0usize;
+        let mut stack = vec![app.root.0.clone()];
+        while let Some(id) = stack.pop() {
+            if order.insert(id.clone(), seq).is_none() {
+                seq += 1;
+            }
+            if let Some(c) = app.components.get(&id) {
+                // Reverse so the first declared child is visited first.
+                for child in c.children.iter().rev() {
+                    stack.push(child.0.clone());
+                }
+            }
+        }
+    }
+    nodes.sort_by(|a, b| {
+        let (za, zb) = (a.z, b.z);
+        let (oa, ob) = (
+            order.get(&a.id).copied().unwrap_or(usize::MAX),
+            order.get(&b.id).copied().unwrap_or(usize::MAX),
+        );
+        za.cmp(&zb).then(oa.cmp(&ob))
+    });
     Scene {
         scene_revision,
         app_revision: app.revision,
@@ -372,6 +471,116 @@ mod tests {
         assert_eq!(scene.app_revision, app.revision);
         assert_eq!(scene.scene_revision, 7);
         assert!(scene.nodes.iter().any(|n| n.id == "b1"));
+    }
+
+    #[test]
+    fn equal_z_paint_order_is_deterministic_tree_order() {
+        // Regression for the documented equal-z defect: two overlay
+        // siblings in the same z layer used to paint in hash order, so
+        // "what is on top" changed between runs. Tree order is the
+        // contract: later-declared siblings paint on top.
+        for attempt in 0..8 {
+            let mut app = App::new("win");
+            for name in ["lower", "upper"] {
+                app.add(
+                    "win",
+                    Component::new(name, Role::Panel, name)
+                        .with_prop("overlay", "true")
+                        .with_prop("ox", "10")
+                        .with_prop("oy", "10")
+                        .with_prop("w", "40")
+                        .with_prop("h", "40"),
+                );
+            }
+            let layout = hamesh_layout::compute(&app, 200.0, 200.0);
+            let scene = build(&app, &layout, attempt);
+            let ids: Vec<&str> = scene
+                .nodes
+                .iter()
+                .filter(|n| n.id == "lower" || n.id == "upper")
+                .map(|n| n.id.as_str())
+                .collect();
+            assert_eq!(
+                ids,
+                vec!["lower", "upper"],
+                "attempt {attempt}: equal-z order must follow declaration"
+            );
+        }
+    }
+
+    #[test]
+    fn child_clip_is_the_ancestor_intersection_and_flags_overflow() {
+        // Layout still places boxes where flex says; the scene now
+        // states what paint may touch. Three stacked LABELS in a short
+        // panel push the third past the panel edge. Text is
+        // incompressible (panels shrink, labels cannot), which is why
+        // the field defect was a label and never a panel.
+        let mut app = App::new("win");
+        app.add(
+            "win",
+            Component::new("panel", Role::Panel, "panel")
+                .with_prop("w", "100")
+                .with_prop("h", "40")
+                .with_prop("pad", "0")
+                .with_prop("gap", "0"),
+        );
+        for i in 0..3 {
+            app.add(
+                "panel",
+                Component::new(&format!("row{i}"), Role::Text, "row")
+                    .with_prop("text", "LABEL")
+                    .with_prop("h", "20")
+                    .with_prop("pad", "0")
+                    .with_prop("flex_grow", "0"),
+            );
+        }
+        let layout = hamesh_layout::compute(&app, 400.0, 300.0);
+        let scene = build(&app, &layout, 1);
+        let panel = layout.get("panel").unwrap().rect.clone();
+        let inside = scene.nodes.iter().find(|n| n.id == "row1").unwrap();
+        assert!(!inside.overflow, "row1 sits inside the panel");
+        assert!((inside.clip.h - panel.h).abs() < 0.5);
+        let escaped = scene.nodes.iter().find(|n| n.id == "row2").unwrap();
+        assert!(
+            escaped.overflow,
+            "row2 escapes the panel bottom and must report overflow"
+        );
+        assert!(
+            (escaped.clip.y + escaped.clip.h - (panel.y + panel.h)).abs() < 0.5,
+            "clip must end at the panel bottom, got {:?}",
+            escaped.clip
+        );
+    }
+
+    #[test]
+    fn overlay_nodes_opt_out_of_ancestor_clipping() {
+        // The Eye's own guides and modals live outside flow on purpose.
+        // `overlay` keeps them paintable; everything else clips.
+        let mut app = App::new("win");
+        app.add(
+            "win",
+            Component::new("panel", Role::Panel, "panel")
+                .with_prop("w", "40")
+                .with_prop("h", "40")
+                .with_prop("pad", "0"),
+        );
+        app.add(
+            "panel",
+            Component::new("guide", Role::Panel, "guide")
+                .with_prop("overlay", "true")
+                .with_prop("ox", "200")
+                .with_prop("oy", "200")
+                .with_prop("w", "20")
+                .with_prop("h", "20"),
+        );
+        let layout = hamesh_layout::compute(&app, 400.0, 300.0);
+        let scene = build(&app, &layout, 1);
+        let guide = scene.nodes.iter().find(|n| n.id == "guide").unwrap();
+        assert!(!guide.overflow, "overlay must not be clipped by its parent");
+        assert!(
+            (guide.clip.w - 400.0).abs() < 0.5,
+            "overlay clips to viewport"
+        );
     }
 
     #[test]

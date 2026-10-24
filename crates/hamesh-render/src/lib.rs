@@ -114,7 +114,12 @@ pub struct Frame {
 /// node's own rect so text never bleeds into siblings. Placement is
 /// the scene's resolved origin, verbatim — this function performs no
 /// positioning math of its own (one geometry contract, §H2).
-fn blit_text(pix: &mut Pixmap, node: &hamesh_scene::SceneNode) {
+fn blit_text(pix: &mut Pixmap, node: &hamesh_scene::SceneNode, paint_rect: &hamesh_layout::Rect) {
+    // Bounds the glyph blit may touch: the node rect, further narrowed
+    // by the ancestor clip only when this node actually overflows it
+    // (non-overflowing nodes pay no extra per-pixel work).
+    let (clip_x0, clip_y0) = (paint_rect.x, paint_rect.y);
+    let (clip_x1, clip_y1) = (paint_rect.x + paint_rect.w, paint_rect.y + paint_rect.h);
     let avail_w = (node.rect.w - 2.0 * hamesh_text::TEXT_INSET_X).max(8.0);
     // Same wrap rule as scene build: single-line nodes lay out
     // unwrapped so paint can never re-wrap what layout kept whole.
@@ -170,7 +175,7 @@ fn blit_text(pix: &mut Pixmap, node: &hamesh_scene::SceneNode) {
         if let Some(cx) = node.caret_x {
             let bx = ox + cx;
             let bh = line_h.max(8.0);
-            if bx >= node.rect.x && bx + 2.0 <= node.rect.x + node.rect.w {
+            if bx >= clip_x0 && bx + 2.0 <= clip_x1 {
                 let mut cp = Paint::default();
                 cp.set_color(Color::from_rgba8(120, 220, 200, 255));
                 if let Some(bar) = SkRect::from_xywh(bx, oy_line, 2.0, bh) {
@@ -188,11 +193,12 @@ fn blit_text(pix: &mut Pixmap, node: &hamesh_scene::SceneNode) {
             }
             let px = x0 + (i as u32 % g.w) as i32;
             let py = y0 + (i as u32 / g.w) as i32;
-            // Clip to the node rect AND the frame.
-            if px < node.rect.x as i32
-                || py < node.rect.y as i32
-                || px >= (node.rect.x + node.rect.w) as i32
-                || py >= (node.rect.y + node.rect.h) as i32
+            // Clip to the paintable rect (node rect ∩ ancestor clip)
+            // AND the frame.
+            if px < clip_x0 as i32
+                || py < clip_y0 as i32
+                || px >= clip_x1 as i32
+                || py >= clip_y1 as i32
                 || px < 0
                 || py < 0
                 || px >= fw
@@ -315,11 +321,28 @@ fn render_uncached(scene: &Scene, w: u32, h: u32) -> Pixmap {
         if !node.visible || node.ghost {
             continue;
         }
+        // Paint-time ancestor clip. An overflowing node paints only the
+        // part inside its clip window, so escaped content is impossible
+        // rather than merely reported. Rectangular content intersects
+        // exactly; text keeps its resolved origin and is bounded
+        // per-pixel instead (clamping a text rect would move glyphs).
+        let paint_rect = if node.overflow {
+            node.rect
+                .intersect(&node.clip)
+                .unwrap_or(hamesh_layout::Rect {
+                    x: node.rect.x,
+                    y: node.rect.y,
+                    w: 0.0,
+                    h: 0.0,
+                })
+        } else {
+            node.rect.clone()
+        };
         let [rr, gg, bb, aa] = node.color;
         let mut paint = Paint::default();
         paint.set_color(Color::from_rgba8(rr, gg, bb, aa));
         if node.radius > 0.0 {
-            if let Some(path) = rounded_path(&node.rect, node.radius) {
+            if let Some(path) = rounded_path(&paint_rect, node.radius) {
                 pix.fill_path(
                     &path,
                     &paint,
@@ -332,10 +355,10 @@ fn render_uncached(scene: &Scene, w: u32, h: u32) -> Pixmap {
                 // Inset half the stroke so the border stays inside the rect.
                 let half = node.border_w / 2.0;
                 let inset = hamesh_layout::Rect {
-                    x: node.rect.x + half,
-                    y: node.rect.y + half,
-                    w: (node.rect.w - node.border_w).max(1.0),
-                    h: (node.rect.h - node.border_w).max(1.0),
+                    x: paint_rect.x + half,
+                    y: paint_rect.y + half,
+                    w: (paint_rect.w - node.border_w).max(1.0),
+                    h: (paint_rect.h - node.border_w).max(1.0),
                 };
                 if let Some(bp) = rounded_path(&inset, (node.radius - half).max(0.0)) {
                     let mut paint_b = Paint::default();
@@ -349,7 +372,7 @@ fn render_uncached(scene: &Scene, w: u32, h: u32) -> Pixmap {
                 }
             }
         } else {
-            let Some(r) = rounded_clip_rect(&node.rect) else {
+            let Some(r) = rounded_clip_rect(&paint_rect) else {
                 continue;
             };
             // Simple rounded look: draw rect; overlay translucency shows through.
@@ -378,10 +401,10 @@ fn render_uncached(scene: &Scene, w: u32, h: u32) -> Pixmap {
             if frac > 0.0 {
                 let bw = (node.rect.w * frac).max(1.0);
                 let bar = hamesh_layout::Rect {
-                    x: node.rect.x,
-                    y: node.rect.y,
-                    w: bw,
-                    h: node.rect.h,
+                    x: paint_rect.x,
+                    y: paint_rect.y,
+                    w: bw.min(paint_rect.w),
+                    h: paint_rect.h,
                 };
                 let mut paint_f = Paint::default();
                 let [fr, fg, fb, fa] = node.fill_rgba;
@@ -405,9 +428,9 @@ fn render_uncached(scene: &Scene, w: u32, h: u32) -> Pixmap {
         // names silently draw nothing (the Eye still shows the prop).
         if let Some(ref iname) = node.icon {
             if let Some(bez) = icons::icon_bez(iname) {
-                let (scale, dx, dy) = icons::icon_placement(node.rect.w, node.rect.h);
-                let ox = node.rect.x as f64 + dx;
-                let oy = node.rect.y as f64 + dy;
+                let (scale, dx, dy) = icons::icon_placement(paint_rect.w, paint_rect.h);
+                let ox = paint_rect.x as f64 + dx;
+                let oy = paint_rect.y as f64 + dy;
                 if let Some(ipath) = icons::bez_to_tinyskia(&bez, ox, oy, scale) {
                     let mut paint_i = Paint::default();
                     let [ir, ig, ib, _] = node.text_rgba;
@@ -426,7 +449,7 @@ fn render_uncached(scene: &Scene, w: u32, h: u32) -> Pixmap {
         // pixel and clipped to the node's rect. The caret draws even for
         // empty text, so blit_text itself decides what to skip — never
         // gate the whole call on text presence (that ate the caret twice).
-        blit_text(&mut pix, node);
+        blit_text(&mut pix, node, &paint_rect);
     }
 
     pix
@@ -631,6 +654,67 @@ mod tests {
             hamesh_theme::resolve("raised"),
             "center must be surface"
         );
+    }
+
+    #[test]
+    fn escaped_content_cannot_paint_outside_its_panel() {
+        // The field defect, as pixels: a label whose box spills past the
+        // panel used to paint over whatever was below it while layout
+        // tests stayed green (only controls were asserted). Paint is
+        // now bounded by the ancestor clip, so the escape is impossible:
+        // outside the panel the frame keeps the window background.
+        let mut app = App::new("win");
+        app.add(
+            "win",
+            Component::new("panel", Role::Panel, "panel")
+                .with_prop("w", "120")
+                .with_prop("h", "24")
+                .with_prop("pad", "0")
+                .with_prop("gap", "0")
+                .with_prop("surface", "raised"),
+        );
+        for i in 0..3 {
+            app.add(
+                "panel",
+                Component::new(&format!("lbl{i}"), Role::Text, "label")
+                    .with_prop("text", "ESCAPED")
+                    .with_prop("h", "20")
+                    .with_prop("pad", "0")
+                    .with_prop("flex_grow", "0"),
+            );
+        }
+        let layout = hamesh_layout::compute(&app, 300.0, 300.0);
+        let scene = hamesh_scene::build(&app, &layout, 1);
+        let lbl2 = scene.nodes.iter().find(|n| n.id == "lbl2").unwrap();
+        assert!(lbl2.overflow, "precondition: the third label escapes");
+        let f = render(&scene);
+        let win_bg = scene.nodes.iter().find(|n| n.id == "win").unwrap().color;
+        // Sample inside the escaped label but outside the panel.
+        let sx = (lbl2.rect.x + lbl2.rect.w / 2.0) as usize;
+        let sy = (lbl2.rect.y + lbl2.rect.h / 2.0) as usize;
+        assert!(
+            (sy as f32) > lbl2.clip.y + lbl2.clip.h,
+            "sample must lie past the clip (y={sy})"
+        );
+        assert_eq!(
+            px(&f.pixmap, sx, sy),
+            win_bg,
+            "escaped label must leave no pixel outside its panel"
+        );
+        // Inside the panel the label still paints (clipping is not hiding
+        // everything): sample the first label's row.
+        let lbl0 = scene.nodes.iter().find(|n| n.id == "lbl0").unwrap();
+        let mut painted = false;
+        for x in (lbl0.rect.x as usize)..((lbl0.rect.x + lbl0.rect.w) as usize) {
+            for y in (lbl0.rect.y as usize)..((lbl0.rect.y + lbl0.rect.h) as usize) {
+                if px(&f.pixmap, x, y) != win_bg
+                    && px(&f.pixmap, x, y) != hamesh_theme::resolve("raised")
+                {
+                    painted = true;
+                }
+            }
+        }
+        assert!(painted, "the in-panel label must still paint its text");
     }
 
     #[test]
