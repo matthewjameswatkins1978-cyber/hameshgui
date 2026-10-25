@@ -8,7 +8,7 @@
 
 use hamesh_blocks as b;
 use hamesh_core::App;
-use hamesh_widgets::{ListView, Nav, Picker};
+use hamesh_widgets::{Hit, ListView, Nav, Picker};
 
 pub const ROW_H: f32 = 32.0;
 const FIELD_H: f32 = 36.0;
@@ -385,37 +385,9 @@ pub fn refresh(g: &mut Gallery, w: f32, h: f32) -> (App, hamesh_layout::LayoutOu
     (app, layout)
 }
 
-/// Where a hit belongs. Labels, icons and rows all resolve to the
-/// row: the driver never parses ids, it reads props up the tree.
-enum Route {
-    LayerRow(usize),
-    PickOpt(usize),
-    PickerField,
-    Chrome(String),
-}
-
-fn route(app: &App, id: &str) -> Route {
-    let mut cur = Some(id.to_string());
-    while let Some(cid) = cur {
-        let Some(c) = app.get(&cid) else { break };
-        if let Some(r) = c.props.get("row").and_then(|v| v.parse::<usize>().ok()) {
-            if c.props.contains_key("list") {
-                return Route::LayerRow(r);
-            }
-        }
-        if let Some(p) = c.props.get("pick").and_then(|v| v.parse::<usize>().ok()) {
-            return Route::PickOpt(p);
-        }
-        if c.props.contains_key("picker") {
-            return Route::PickerField;
-        }
-        cur = c.parent.as_ref().map(|p| p.0.clone());
-    }
-    Route::Chrome(id.to_string())
-}
-
-/// Pointer press through the consumer's whole routing: hit-test, read
-/// the row/option identity props, drive the widget. Returns a note.
+/// Pointer press through the shared `hamesh_widgets::Hit` router:
+/// hit-test, match the identity props, drive the widget. This gallery
+/// only owns one list and one picker. Returns a note.
 pub fn press(g: &mut Gallery, app: &App, scene: &hamesh_scene::Scene, x: f32, y: f32) -> String {
     match hamesh_scene::hit_test(app, scene, x, y) {
         None => {
@@ -426,8 +398,8 @@ pub fn press(g: &mut Gallery, app: &App, scene: &hamesh_scene::Scene, x: f32, y:
                 "press hit nothing".to_string()
             }
         }
-        Some(id) => match route(app, &id) {
-            Route::LayerRow(row) => {
+        Some(id) => match Hit::of(app, &id) {
+            Hit::ListRow { row, .. } => {
                 g.focus = 0;
                 let note = if g.layers.select(row) {
                     format!("selected layer {row}")
@@ -444,7 +416,7 @@ pub fn press(g: &mut Gallery, app: &App, scene: &hamesh_scene::Scene, x: f32, y:
                     note
                 }
             }
-            Route::PickOpt(pick) => {
+            Hit::PickOption { option: pick, .. } => {
                 g.focus = 1;
                 // Human two-step: highlight under the pointer, then commit.
                 let popup = scene
@@ -460,7 +432,7 @@ pub fn press(g: &mut Gallery, app: &App, scene: &hamesh_scene::Scene, x: f32, y:
                     None => "commit found nothing (unchanged)".to_string(),
                 }
             }
-            Route::PickerField => {
+            Hit::PickerField { .. } => {
                 g.focus = 1;
                 if g.fonts.toggle() {
                     "picker opened".to_string()
@@ -468,7 +440,7 @@ pub fn press(g: &mut Gallery, app: &App, scene: &hamesh_scene::Scene, x: f32, y:
                     "picker closed".to_string()
                 }
             }
-            Route::Chrome(hit) => {
+            Hit::Chrome(hit) | Hit::Action { command: hit } => {
                 if g.fonts.is_open() {
                     g.fonts.close();
                     format!("hit {hit} (chrome, popup dismissed)")
@@ -494,11 +466,11 @@ pub fn hover(g: &mut Gallery, scene: &hamesh_scene::Scene, x: f32, y: f32, app: 
         .iter()
         .find(|n| n.id == "fonts-popup")
         .map(|n| n.rect.clone());
-    match route(app, &id) {
-        Route::LayerRow(_) => view
+    match Hit::of(app, &id) {
+        Hit::ListRow { .. } => view
             .map(|r| g.layers.hover_at_viewport(y - r.y))
             .unwrap_or(false),
-        Route::PickOpt(_) => popup
+        Hit::PickOption { .. } => popup
             .map(|r| {
                 g.fonts.highlight_at_viewport(y - r.y);
                 true

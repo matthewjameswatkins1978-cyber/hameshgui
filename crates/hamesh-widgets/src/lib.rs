@@ -331,6 +331,58 @@ fn collect_focusable(app: &App, id: &str, out: &mut Vec<String>) {
     }
 }
 
+/// A pointer hit resolved to an interaction, independent of any
+/// application. Drivers hit-test, call `Hit::of`, and drive their
+/// widgets — they never climb parents or parse identity props
+/// themselves. Precedence is structural: a picker option carries both
+/// `picker` and `pick`, so `pick` wins; a field carries `picker` alone.
+/// Unrecognized nodes stay `Chrome` (inert, still reported honestly).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Hit {
+    ListRow { list: String, row: usize },
+    PickOption { picker: String, option: usize },
+    PickerField { picker: String },
+    Action { command: String },
+    Chrome(String),
+}
+
+impl Hit {
+    pub fn of(app: &App, id: &str) -> Hit {
+        let mut cur = Some(id.to_string());
+        while let Some(cid) = cur {
+            let Some(c) = app.get(&cid) else { break };
+            if let Some(row) = c.props.get("row").and_then(|v| v.parse::<usize>().ok()) {
+                if let Some(list) = c.props.get("list") {
+                    return Hit::ListRow {
+                        list: list.clone(),
+                        row,
+                    };
+                }
+            }
+            if let Some(option) = c.props.get("pick").and_then(|v| v.parse::<usize>().ok()) {
+                if let Some(picker) = c.props.get("picker") {
+                    return Hit::PickOption {
+                        picker: picker.clone(),
+                        option,
+                    };
+                }
+            }
+            if let Some(picker) = c.props.get("picker") {
+                return Hit::PickerField {
+                    picker: picker.clone(),
+                };
+            }
+            if let Some(command) = c.props.get("action") {
+                return Hit::Action {
+                    command: command.clone(),
+                };
+            }
+            cur = c.parent.as_ref().map(|p| p.0.clone());
+        }
+        Hit::Chrome(id.to_string())
+    }
+}
+
 /// Key events, shared by real winit input and synthetic drill input.
 #[derive(Clone, Debug, PartialEq)]
 pub enum Key {
@@ -561,6 +613,79 @@ mod tests {
         };
         // Focus starts on the feed (document order); Tab reaches composer.
         (app, w)
+    }
+
+    fn hit_tree() -> App {
+        let mut app = App::new("win");
+        app.add("win", Component::new("l", Role::List, "list"));
+        app.add(
+            "l",
+            Component::new("l-row-4", Role::ListItem, "row")
+                .with_prop("list", "l")
+                .with_prop("row", "4"),
+        );
+        app.add(
+            "l-row-4",
+            Component::new("l-row-4-label", Role::Text, "label"),
+        );
+        app.add(
+            "win",
+            Component::new("pk-opt-1", Role::ListItem, "opt")
+                .with_prop("picker", "pk")
+                .with_prop("pick", "1"),
+        );
+        app.add(
+            "win",
+            Component::new("pk-field", Role::TextInput, "field").with_prop("picker", "pk"),
+        );
+        app.add(
+            "win",
+            Component::new("go", Role::Button, "go").with_prop("action", "run"),
+        );
+        app.add("win", Component::new("plain", Role::Panel, "plain"));
+        app
+    }
+
+    #[test]
+    fn hit_resolves_identity_through_nested_leaves() {
+        let app = hit_tree();
+        // Labels and icons paint atop their row: the climb finds it.
+        assert_eq!(
+            Hit::of(&app, "l-row-4-label"),
+            Hit::ListRow {
+                list: "l".into(),
+                row: 4
+            }
+        );
+        assert_eq!(
+            Hit::of(&app, "l-row-4"),
+            Hit::ListRow {
+                list: "l".into(),
+                row: 4
+            }
+        );
+        // An option carries both picker and pick: the option wins.
+        assert_eq!(
+            Hit::of(&app, "pk-opt-1"),
+            Hit::PickOption {
+                picker: "pk".into(),
+                option: 1
+            }
+        );
+        assert_eq!(
+            Hit::of(&app, "pk-field"),
+            Hit::PickerField {
+                picker: "pk".into()
+            }
+        );
+        assert_eq!(
+            Hit::of(&app, "go"),
+            Hit::Action {
+                command: "run".into()
+            }
+        );
+        assert_eq!(Hit::of(&app, "plain"), Hit::Chrome("plain".into()));
+        assert_eq!(Hit::of(&app, "missing"), Hit::Chrome("missing".into()));
     }
 
     #[test]
