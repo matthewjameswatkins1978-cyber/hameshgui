@@ -568,7 +568,10 @@ pub fn compute(app: &App, viewport_w: f32, viewport_h: f32) -> LayoutOutput {
 
 /// Out-of-flow overlay: zero parent footprint, positioned by ox/oy/w/h.
 fn is_overlay(comp: &hamesh_core::Component) -> bool {
-    comp.props.get("overlay").map(|s| s == "true").unwrap_or(false)
+    comp.props
+        .get("overlay")
+        .map(|s| s == "true")
+        .unwrap_or(false)
 }
 
 /// Declared overlay origin (viewport space).
@@ -1015,8 +1018,14 @@ mod tests {
         // Out-of-flow contract: a 500px overlay must not move or
         // shrink its in-flow siblings.
         let mut app = App::new("win");
-        app.get_mut("win").unwrap().props.insert("pad".to_string(), "0".to_string());
-        app.get_mut("win").unwrap().props.insert("gap".to_string(), "0".to_string());
+        app.get_mut("win")
+            .unwrap()
+            .props
+            .insert("pad".to_string(), "0".to_string());
+        app.get_mut("win")
+            .unwrap()
+            .props
+            .insert("gap".to_string(), "0".to_string());
         app.add(
             "win",
             Component::new("panel", Role::Panel, "panel").with_prop("h", "100"),
@@ -1032,7 +1041,10 @@ mod tests {
         );
         let out = compute(&app, 400.0, 600.0);
         let panel = out.get("panel").unwrap().rect.clone();
-        assert_eq!((panel.x, panel.y, panel.w, panel.h), (0.0, 0.0, 400.0, 100.0));
+        assert_eq!(
+            (panel.x, panel.y, panel.w, panel.h),
+            (0.0, 0.0, 400.0, 100.0)
+        );
         let pop = out.get("pop").unwrap().rect.clone();
         assert_eq!((pop.x, pop.y, pop.w, pop.h), (50.0, 70.0, 500.0, 500.0));
     }
@@ -1042,8 +1054,14 @@ mod tests {
         // The popup panel's rows lay out against the overlay rect,
         // not against the root flow.
         let mut app = App::new("win");
-        app.get_mut("win").unwrap().props.insert("pad".to_string(), "0".to_string());
-        app.get_mut("win").unwrap().props.insert("gap".to_string(), "0".to_string());
+        app.get_mut("win")
+            .unwrap()
+            .props
+            .insert("pad".to_string(), "0".to_string());
+        app.get_mut("win")
+            .unwrap()
+            .props
+            .insert("gap".to_string(), "0".to_string());
         app.add(
             "win",
             Component::new("pop", Role::Panel, "pop")
@@ -1062,15 +1080,25 @@ mod tests {
         let out = compute(&app, 400.0, 600.0);
         let row = out.get("row").unwrap().rect.clone();
         assert_eq!((row.x, row.y, row.w, row.h), (50.0, 70.0, 200.0, 40.0));
-        assert_eq!(out.get("row").unwrap().z, 100, "popup content paints on top");
+        assert_eq!(
+            out.get("row").unwrap().z,
+            100,
+            "popup content paints on top"
+        );
     }
 
     #[test]
     fn overlay_child_clips_to_the_overlay_rect() {
         // A row taller than the popup is honestly clipped to it.
         let mut app = App::new("win");
-        app.get_mut("win").unwrap().props.insert("pad".to_string(), "0".to_string());
-        app.get_mut("win").unwrap().props.insert("gap".to_string(), "0".to_string());
+        app.get_mut("win")
+            .unwrap()
+            .props
+            .insert("pad".to_string(), "0".to_string());
+        app.get_mut("win")
+            .unwrap()
+            .props
+            .insert("gap".to_string(), "0".to_string());
         app.add(
             "win",
             Component::new("pop", Role::Panel, "pop")
@@ -1088,7 +1116,10 @@ mod tests {
         );
         let out = compute(&app, 400.0, 600.0);
         assert!(out.get("row").unwrap().clipped_by_parent);
-        assert!(!out.get("pop").unwrap().clipped_by_parent, "roots answer to no parent");
+        assert!(
+            !out.get("pop").unwrap().clipped_by_parent,
+            "roots answer to no parent"
+        );
     }
 
     #[test]
@@ -1096,8 +1127,14 @@ mod tests {
         // An overlay inside an overlay still anchors to the viewport:
         // ox/oy are always viewport space.
         let mut app = App::new("win");
-        app.get_mut("win").unwrap().props.insert("pad".to_string(), "0".to_string());
-        app.get_mut("win").unwrap().props.insert("gap".to_string(), "0".to_string());
+        app.get_mut("win")
+            .unwrap()
+            .props
+            .insert("pad".to_string(), "0".to_string());
+        app.get_mut("win")
+            .unwrap()
+            .props
+            .insert("gap".to_string(), "0".to_string());
         app.add(
             "win",
             Component::new("outer", Role::Panel, "outer")
@@ -1120,7 +1157,10 @@ mod tests {
         );
         let out = compute(&app, 400.0, 600.0);
         let inner = out.get("inner").unwrap().rect.clone();
-        assert_eq!((inner.x, inner.y, inner.w, inner.h), (100.0, 120.0, 50.0, 50.0));
+        assert_eq!(
+            (inner.x, inner.y, inner.w, inner.h),
+            (100.0, 120.0, 50.0, 50.0)
+        );
     }
 
     #[test]
@@ -1128,8 +1168,14 @@ mod tests {
         // No w/h: shrink-wrap the content instead of the legacy
         // 240x120 fallback.
         let mut app = App::new("win");
-        app.get_mut("win").unwrap().props.insert("pad".to_string(), "0".to_string());
-        app.get_mut("win").unwrap().props.insert("gap".to_string(), "0".to_string());
+        app.get_mut("win")
+            .unwrap()
+            .props
+            .insert("pad".to_string(), "0".to_string());
+        app.get_mut("win")
+            .unwrap()
+            .props
+            .insert("gap".to_string(), "0".to_string());
         app.add(
             "win",
             Component::new("tip", Role::Panel, "tip")
