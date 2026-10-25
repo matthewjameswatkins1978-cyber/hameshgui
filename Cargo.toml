@@ -21,6 +21,7 @@ members = [
   "apps/hamesh-blocks-drill",
   "apps/hamesh-033-lab",
   "apps/hamesh-035-lab",
+  "apps/hamesh-036-lab",
   "apps/hamesh-mcp",
   "apps/hamesh-mcp-drill",
 ]

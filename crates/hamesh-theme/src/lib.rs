@@ -4,6 +4,19 @@
 //! Components reference semantic token names; the scene resolves them
 //! to RGBA. A future light/high-contrast theme changes this table,
 //! never component semantics.
+//!
+//! Control-state contract (one system, every interactive composer):
+//!
+//! * rest: the baseline surface + label (e.g. `surface` + `text`).
+//! * hover: the next raised step (`raised`, or `accent_hover` for
+//!   primary actions). Never a new hue, always the lighter sibling.
+//! * pressed/active: the deeper step (`accent_active` for primary
+//!   actions; `accent` for selected rows). Dark `bg` text stays legible.
+//! * disabled: baseline surface with `muted` text; the node still wins
+//!   the hit so automation can report "disabled" honestly.
+//! * focus: border 2 in `focus` (never a fill change); focus never
+//!   moves paint by itself.
+//! * precedence: disabled > pressed/active > hover > rest.
 
 /// An sRGB color token: semantic name + RGBA values.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -57,6 +70,20 @@ pub const ACCENT_BRIGHT: Token = Token {
     name: "accent_bright",
     rgba: [120, 220, 200, 255],
 };
+
+/// Primary-action hover: accent lifted ~15%. Dark `bg` text stays
+/// above 3:1 here (state-system contract below).
+pub const ACCENT_HOVER: Token = Token {
+    name: "accent_hover",
+    rgba: [66, 174, 156, 255],
+};
+
+/// Primary-action pressed: accent deepened ~12%. Dark `bg` text stays
+/// above 3:1 here (state-system contract below).
+pub const ACCENT_ACTIVE: Token = Token {
+    name: "accent_active",
+    rgba: [32, 132, 116, 255],
+};
 pub const SUCCESS: Token = Token {
     name: "success",
     rgba: [74, 178, 128, 255],
@@ -101,6 +128,8 @@ pub fn resolve(name: &str) -> [u8; 4] {
         "muted" => MUTED.rgba,
         "accent" => ACCENT.rgba,
         "accent_bright" => ACCENT_BRIGHT.rgba,
+        "accent_hover" => ACCENT_HOVER.rgba,
+        "accent_active" => ACCENT_ACTIVE.rgba,
         "success" => SUCCESS.rgba,
         "warning" => WARNING.rgba,
         "error" => ERROR.rgba,
@@ -187,6 +216,9 @@ mod tests {
             (MUTED.rgba, RAISED.rgba, 3.0),
             (SUCCESS.rgba, RAISED.rgba, 3.0),
             (TEXT.rgba, ACCENT.rgba, 3.0),
+            (BG.rgba, ACCENT_HOVER.rgba, 3.0),
+            (BG.rgba, ACCENT_ACTIVE.rgba, 3.0),
+            (MUTED.rgba, SURFACE.rgba, 3.0),
         ] {
             let c = contrast(fg, bg);
             assert!(c >= min, "contrast {c:.2} < {min} for {fg:?} on {bg:?}");
