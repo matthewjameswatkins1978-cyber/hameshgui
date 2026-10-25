@@ -11,6 +11,8 @@
 use hamesh_core::{App, Component, ComponentId, Role};
 use serde::{Deserialize, Serialize};
 
+pub mod select;
+
 /// Authoring scope: the app plus a parent stack. `branch` pushes,
 /// builds children, pops — nesting without lifetime juggling.
 pub struct Scope<'a> {
