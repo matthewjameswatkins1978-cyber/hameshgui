@@ -308,23 +308,39 @@ fn child_style(comp: &hamesh_core::Component) -> Style {
 /// node context and are measured with parley, so labels size to
 /// their text. Every other leaf measures zero (style sizes win).
 pub fn compute(app: &App, viewport_w: f32, viewport_h: f32) -> LayoutOutput {
-    let mut taffy: TaffyTree<Option<TextMeasure>> = TaffyTree::new();
-    let mut node_of: HashMap<String, NodeId> = HashMap::new();
+    // One Taffy tree per positioning context: the main tree plus a
+    // separate tree for every overlay-rooted subtree. Overlays take
+    // no space in their parent's flow; their subtree lays out
+    // against the overlay's own rect instead.
+    let mut trees: Vec<TaffyTree<Option<TextMeasure>>> = vec![TaffyTree::new()];
+    let mut node_of: HashMap<String, (usize, NodeId)> = HashMap::new();
     let mut order: Vec<String> = Vec::new();
+    // Component id of each tree's root (tree 0 is the app root).
+    let mut tree_roots: Vec<String> = vec![app.root.0.clone()];
 
     // Post-order creation: children first so parents can reference them.
     fn build(
         app: &App,
         id: &str,
-        taffy: &mut TaffyTree<Option<TextMeasure>>,
-        node_of: &mut HashMap<String, NodeId>,
+        trees: &mut Vec<TaffyTree<Option<TextMeasure>>>,
+        tree_idx: usize,
+        node_of: &mut HashMap<String, (usize, NodeId)>,
         order: &mut Vec<String>,
+        tree_roots: &mut Vec<String>,
     ) {
         let comp = app.components.get(id).expect("missing component");
         let mut kids = Vec::new();
         for c in &comp.children {
-            build(app, &c.0, taffy, node_of, order);
-            kids.push(node_of[&c.0]);
+            let child = app.components.get(&c.0).expect("missing child");
+            if is_overlay(child) {
+                trees.push(TaffyTree::new());
+                let overlay_idx = trees.len() - 1;
+                tree_roots.push(c.0.clone());
+                build(app, &c.0, trees, overlay_idx, node_of, order, tree_roots);
+            } else {
+                build(app, &c.0, trees, tree_idx, node_of, order, tree_roots);
+                kids.push(node_of[&c.0].1);
+            }
         }
         let style = child_style(comp);
         let node = if kids.is_empty()
@@ -343,7 +359,7 @@ pub fn compute(app: &App, viewport_w: f32, viewport_h: f32) -> LayoutOutput {
                 .and_then(|v| v.parse::<f32>().ok())
                 .filter(|v| *v > 0.0);
             let text = comp.props.get("text").cloned().unwrap_or_default();
-            taffy
+            trees[tree_idx]
                 .new_leaf_with_context(
                     style,
                     Some(TextMeasure {
@@ -360,44 +376,62 @@ pub fn compute(app: &App, viewport_w: f32, viewport_h: f32) -> LayoutOutput {
                 )
                 .expect("taffy text leaf")
         } else if kids.is_empty() {
-            taffy.new_leaf(style).expect("taffy leaf")
+            trees[tree_idx].new_leaf(style).expect("taffy leaf")
         } else {
-            taffy.new_with_children(style, &kids).expect("taffy node")
+            trees[tree_idx]
+                .new_with_children(style, &kids)
+                .expect("taffy node")
         };
-        node_of.insert(id.to_string(), node);
+        node_of.insert(id.to_string(), (tree_idx, node));
         order.push(id.to_string());
     }
 
-    build(app, &app.root.0, &mut taffy, &mut node_of, &mut order);
+    build(
+        app,
+        &app.root.0,
+        &mut trees,
+        0,
+        &mut node_of,
+        &mut order,
+        &mut tree_roots,
+    );
 
-    let root_node = node_of[&app.root.0];
-    // Root fills the viewport exactly: Taffy AvailableSpace alone does not
-    // force an auto-sized root to expand, so pin it explicitly.
+    // The main tree fills the viewport exactly: Taffy AvailableSpace
+    // alone does not force an auto-sized root to expand, so pin it
+    // explicitly. Overlay trees size from their declared w/h (or hug
+    // content bounded by the viewport — see the overlay rect below).
     {
-        let mut root_style = taffy.style(root_node).expect("root style").clone();
+        let root_node = node_of[&app.root.0].1;
+        let mut root_style = trees[0].style(root_node).expect("root style").clone();
         root_style.size = Size {
             width: Dimension::length(viewport_w),
             height: Dimension::length(viewport_h),
         };
-        taffy.set_style(root_node, root_style).expect("root size");
+        trees[0]
+            .set_style(root_node, root_style)
+            .expect("root size");
     }
-    taffy
-        .compute_layout_with_measure(
-            root_node,
-            Size {
-                width: AvailableSpace::Definite(viewport_w),
-                height: AvailableSpace::Definite(viewport_h),
-            },
-            |inputs, _node, ctx, style| {
-                taffy::compute::compute_leaf_layout(
-                    inputs,
-                    style,
-                    |_, _| 0.0,
-                    |known, avail| measure_text(ctx.and_then(|c| c.as_ref()), known, avail),
-                )
-            },
-        )
-        .expect("taffy layout");
+    for root_id in &tree_roots {
+        let tnode = node_of[root_id].1;
+        let ti = node_of[root_id].0;
+        trees[ti]
+            .compute_layout_with_measure(
+                tnode,
+                Size {
+                    width: AvailableSpace::Definite(viewport_w),
+                    height: AvailableSpace::Definite(viewport_h),
+                },
+                |inputs, _node, ctx, style| {
+                    taffy::compute::compute_leaf_layout(
+                        inputs,
+                        style,
+                        |_, _| 0.0,
+                        |known, avail| measure_text(ctx.and_then(|c| c.as_ref()), known, avail),
+                    )
+                },
+            )
+            .expect("taffy layout");
+    }
 
     // Parent rects are needed for clipped_by_parent detection.
     let mut nodes: HashMap<String, LayoutNode> = HashMap::new();
@@ -411,8 +445,9 @@ pub fn compute(app: &App, viewport_w: f32, viewport_h: f32) -> LayoutOutput {
     // First pass: rects + effective visibility.
     for id in &order {
         let comp = &app.components[&id.clone()];
-        let tnode = node_of[&id.clone()];
-        let l = taffy.layout(tnode).expect("layout");
+        let (tree_idx, tnode) = node_of[&id.clone()];
+        let l = trees[tree_idx].layout(tnode).expect("layout");
+        let overlay_self = is_overlay(comp);
         // Taffy locations are parent-relative: accumulate absolute offset.
         // A scrolled ancestor (`scroll_y`) hides that many pixels of its
         // content above its top edge, so every descendant shifts up by
@@ -423,21 +458,31 @@ pub fn compute(app: &App, viewport_w: f32, viewport_h: f32) -> LayoutOutput {
         {
             let mut cur = comp.parent.clone();
             while let Some(pid) = cur {
-                if let Some(pnode) = node_of.get(&pid.0) {
-                    if let Ok(pl) = taffy.layout(*pnode) {
+                let Some(pc) = app.components.get(&pid.0) else {
+                    break;
+                };
+                if is_overlay(pc) {
+                    // Positioning-context boundary: the overlay's
+                    // declared origin replaces everything above it.
+                    // (Scroll above an overlay lives in another space.)
+                    let (ox, oy) = overlay_origin(pc);
+                    abs_x += ox;
+                    abs_y += oy;
+                    break;
+                }
+                if let Some((pti, pnode)) = node_of.get(&pid.0) {
+                    if let Ok(pl) = trees[*pti].layout(*pnode) {
                         abs_x += pl.location.x;
                         abs_y += pl.location.y;
                     }
                 }
-                if let Some(pc) = app.components.get(&pid.0) {
-                    abs_y -= pc
-                        .props
-                        .get("scroll_y")
-                        .and_then(|v| v.parse::<f32>().ok())
-                        .unwrap_or(0.0)
-                        .max(0.0);
-                }
-                cur = app.components.get(&pid.0).and_then(|pc| pc.parent.clone());
+                abs_y -= pc
+                    .props
+                    .get("scroll_y")
+                    .and_then(|v| v.parse::<f32>().ok())
+                    .unwrap_or(0.0)
+                    .max(0.0);
+                cur = pc.parent.clone();
             }
         }
         let mut eff = comp.visible;
@@ -454,17 +499,23 @@ pub fn compute(app: &App, viewport_w: f32, viewport_h: f32) -> LayoutOutput {
             }
         }
         // Overlay components float above layout at a fixed spot with z boost.
-        let is_overlay = comp
-            .props
-            .get("overlay")
-            .map(|s| s == "true")
-            .unwrap_or(false);
-        let rect = if is_overlay {
+        // Their subtree lays out in a separate tree against this rect,
+        // so they take no space in their parent's flow.
+        let rect = if overlay_self {
+            let (ox, oy) = overlay_origin(comp);
             Rect {
-                x: parse_or(comp.props.get("ox"), 200.0),
-                y: parse_or(comp.props.get("oy"), 60.0),
-                w: parse_or(comp.props.get("w"), 240.0),
-                h: parse_or(comp.props.get("h"), 120.0),
+                x: ox,
+                y: oy,
+                w: comp
+                    .props
+                    .get("w")
+                    .and_then(|v| v.parse::<f32>().ok())
+                    .unwrap_or(l.size.width),
+                h: comp
+                    .props
+                    .get("h")
+                    .and_then(|v| v.parse::<f32>().ok())
+                    .unwrap_or(l.size.height),
             }
         } else {
             Rect {
@@ -480,13 +531,22 @@ pub fn compute(app: &App, viewport_w: f32, viewport_h: f32) -> LayoutOutput {
                 rect,
                 effectively_visible: eff,
                 clipped_by_parent: false, // second pass
-                z: if is_overlay { 100 } else { depth(app, id) },
+                z: if overlay_self || under_overlay(app, id) {
+                    100
+                } else {
+                    depth(app, id)
+                },
             },
         );
     }
 
     // Second pass: clipped_by_parent — rect extends beyond parent rect.
+    // Overlay roots live in another positioning context: nothing
+    // above them means anything to them.
     for id in &order {
+        if is_overlay(&app.components[&id.clone()]) {
+            continue;
+        }
         let parent = app.components[&id.clone()].parent.clone();
         if let Some(pid) = parent {
             if let (Some(n), Some(p)) =
@@ -504,6 +564,35 @@ pub fn compute(app: &App, viewport_w: f32, viewport_h: f32) -> LayoutOutput {
     }
 
     LayoutOutput { nodes, viewport }
+}
+
+/// Out-of-flow overlay: zero parent footprint, positioned by ox/oy/w/h.
+fn is_overlay(comp: &hamesh_core::Component) -> bool {
+    comp.props.get("overlay").map(|s| s == "true").unwrap_or(false)
+}
+
+/// Declared overlay origin (viewport space).
+fn overlay_origin(comp: &hamesh_core::Component) -> (f32, f32) {
+    (
+        parse_or(comp.props.get("ox"), 200.0),
+        parse_or(comp.props.get("oy"), 60.0),
+    )
+}
+
+/// True when an overlay sits between this node and the root: the node
+/// paints, clips and hit-tests in overlay space.
+fn under_overlay(app: &App, id: &str) -> bool {
+    let mut cur = app.components.get(id).and_then(|c| c.parent.clone());
+    while let Some(p) = cur {
+        let Some(pc) = app.components.get(&p.0) else {
+            break;
+        };
+        if is_overlay(pc) {
+            return true;
+        }
+        cur = pc.parent.clone();
+    }
+    false
 }
 
 fn parse_or(v: Option<&String>, d: f32) -> f32 {
@@ -919,6 +1008,147 @@ mod tests {
         assert_eq!(out.get("outer").unwrap().rect.y, 0.0);
         assert_eq!(out.get("inner").unwrap().rect.y, -20.0);
         assert_eq!(out.get("leaf").unwrap().rect.y, -30.0);
+    }
+
+    #[test]
+    fn overlay_takes_no_flow_space() {
+        // Out-of-flow contract: a 500px overlay must not move or
+        // shrink its in-flow siblings.
+        let mut app = App::new("win");
+        app.get_mut("win").unwrap().props.insert("pad".to_string(), "0".to_string());
+        app.get_mut("win").unwrap().props.insert("gap".to_string(), "0".to_string());
+        app.add(
+            "win",
+            Component::new("panel", Role::Panel, "panel").with_prop("h", "100"),
+        );
+        app.add(
+            "win",
+            Component::new("pop", Role::Panel, "pop")
+                .with_prop("overlay", "true")
+                .with_prop("ox", "50")
+                .with_prop("oy", "70")
+                .with_prop("w", "500")
+                .with_prop("h", "500"),
+        );
+        let out = compute(&app, 400.0, 600.0);
+        let panel = out.get("panel").unwrap().rect.clone();
+        assert_eq!((panel.x, panel.y, panel.w, panel.h), (0.0, 0.0, 400.0, 100.0));
+        let pop = out.get("pop").unwrap().rect.clone();
+        assert_eq!((pop.x, pop.y, pop.w, pop.h), (50.0, 70.0, 500.0, 500.0));
+    }
+
+    #[test]
+    fn overlay_children_position_in_overlay_space() {
+        // The popup panel's rows lay out against the overlay rect,
+        // not against the root flow.
+        let mut app = App::new("win");
+        app.get_mut("win").unwrap().props.insert("pad".to_string(), "0".to_string());
+        app.get_mut("win").unwrap().props.insert("gap".to_string(), "0".to_string());
+        app.add(
+            "win",
+            Component::new("pop", Role::Panel, "pop")
+                .with_prop("overlay", "true")
+                .with_prop("ox", "50")
+                .with_prop("oy", "70")
+                .with_prop("w", "200")
+                .with_prop("h", "200")
+                .with_prop("pad", "0")
+                .with_prop("gap", "0"),
+        );
+        app.add(
+            "pop",
+            Component::new("row", Role::Panel, "row").with_prop("h", "40"),
+        );
+        let out = compute(&app, 400.0, 600.0);
+        let row = out.get("row").unwrap().rect.clone();
+        assert_eq!((row.x, row.y, row.w, row.h), (50.0, 70.0, 200.0, 40.0));
+        assert_eq!(out.get("row").unwrap().z, 100, "popup content paints on top");
+    }
+
+    #[test]
+    fn overlay_child_clips_to_the_overlay_rect() {
+        // A row taller than the popup is honestly clipped to it.
+        let mut app = App::new("win");
+        app.get_mut("win").unwrap().props.insert("pad".to_string(), "0".to_string());
+        app.get_mut("win").unwrap().props.insert("gap".to_string(), "0".to_string());
+        app.add(
+            "win",
+            Component::new("pop", Role::Panel, "pop")
+                .with_prop("overlay", "true")
+                .with_prop("ox", "50")
+                .with_prop("oy", "70")
+                .with_prop("w", "200")
+                .with_prop("h", "100")
+                .with_prop("pad", "0")
+                .with_prop("gap", "0"),
+        );
+        app.add(
+            "pop",
+            Component::new("row", Role::Panel, "row").with_prop("h", "300"),
+        );
+        let out = compute(&app, 400.0, 600.0);
+        assert!(out.get("row").unwrap().clipped_by_parent);
+        assert!(!out.get("pop").unwrap().clipped_by_parent, "roots answer to no parent");
+    }
+
+    #[test]
+    fn nested_overlay_positions_independently() {
+        // An overlay inside an overlay still anchors to the viewport:
+        // ox/oy are always viewport space.
+        let mut app = App::new("win");
+        app.get_mut("win").unwrap().props.insert("pad".to_string(), "0".to_string());
+        app.get_mut("win").unwrap().props.insert("gap".to_string(), "0".to_string());
+        app.add(
+            "win",
+            Component::new("outer", Role::Panel, "outer")
+                .with_prop("overlay", "true")
+                .with_prop("ox", "10")
+                .with_prop("oy", "20")
+                .with_prop("w", "300")
+                .with_prop("h", "300")
+                .with_prop("pad", "0")
+                .with_prop("gap", "0"),
+        );
+        app.add(
+            "outer",
+            Component::new("inner", Role::Panel, "inner")
+                .with_prop("overlay", "true")
+                .with_prop("ox", "100")
+                .with_prop("oy", "120")
+                .with_prop("w", "50")
+                .with_prop("h", "50"),
+        );
+        let out = compute(&app, 400.0, 600.0);
+        let inner = out.get("inner").unwrap().rect.clone();
+        assert_eq!((inner.x, inner.y, inner.w, inner.h), (100.0, 120.0, 50.0, 50.0));
+    }
+
+    #[test]
+    fn undeclared_overlay_hugs_content() {
+        // No w/h: shrink-wrap the content instead of the legacy
+        // 240x120 fallback.
+        let mut app = App::new("win");
+        app.get_mut("win").unwrap().props.insert("pad".to_string(), "0".to_string());
+        app.get_mut("win").unwrap().props.insert("gap".to_string(), "0".to_string());
+        app.add(
+            "win",
+            Component::new("tip", Role::Panel, "tip")
+                .with_prop("overlay", "true")
+                .with_prop("ox", "10")
+                .with_prop("oy", "10")
+                .with_prop("pad", "0")
+                .with_prop("gap", "0"),
+        );
+        app.add(
+            "tip",
+            Component::new("t", Role::Text, "t")
+                .with_prop("text", "Hi")
+                .with_prop("font_size", "16"),
+        );
+        let out = compute(&app, 400.0, 600.0);
+        let tip = out.get("tip").unwrap().rect.clone();
+        assert!(tip.w > 0.0 && tip.w < 100.0, "hugs the label: {tip:?}");
+        assert!(tip.h > 0.0 && tip.h < 100.0, "hugs the line: {tip:?}");
     }
 
     #[test]
