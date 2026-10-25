@@ -142,6 +142,32 @@ pub fn font_family_available(family: &str) -> bool {
     FONT_CX.with(|fcx| fcx.borrow_mut().collection.family_id(family).is_some())
 }
 
+/// All known family names, sorted and de-duplicated: bundled
+/// faces, profile faces and installed system fonts. Loads system
+/// fonts on first call for the calling thread (idempotent; each
+/// thread keeps its own shaping collection) and bumps the font
+/// generation when the set grows, like `register_fonts_from_dir`.
+/// Powers the installed-font picker: prefer this over hand-rolled
+/// directory scans or a "next available font" fallback.
+pub fn installed_family_names() -> Vec<String> {
+    FONT_CX.with(|fcx| {
+        let mut fcx = fcx.borrow_mut();
+        let before = fcx.collection.family_names().count();
+        fcx.collection.load_system_fonts();
+        if fcx.collection.family_names().count() != before {
+            FONT_GEN.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        }
+        let mut names: Vec<String> = fcx
+            .collection
+            .family_names()
+            .map(|s| s.to_string())
+            .collect();
+        names.sort();
+        names.dedup();
+        names
+    })
+}
+
 /// Owned parley layout: safe to hand to CPU (swash) and GPU (vello)
 /// consumers. The `Layout` owns its font data (Arc-backed), so no
 /// `FontContext` needs to outlive it — verified by the compiler.
@@ -894,6 +920,20 @@ mod tests {
         assert!(empty.style.is_none() && empty.tracking == 0.0);
         // Fingerprint distinguishes shaping configurations.
         assert_ne!(s.fingerprint(), empty.fingerprint());
+    }
+
+    #[test]
+    #[test]
+    fn installed_families_cover_bundled_fonts_without_duplicates() {
+        register_fonts_from_dir(&bundled_fonts_dir());
+        let first = installed_family_names();
+        assert!(first.contains(&"Newsreader".to_string()), "bundled voice listed");
+        // Idempotent: a second call neither duplicates nor loses.
+        assert_eq!(first, installed_family_names());
+        // The list agrees with lookup: no ghost entries sampled.
+        for f in first.iter().take(50) {
+            assert!(font_family_available(f), "listed family must resolve: {f}");
+        }
     }
 
     #[test]

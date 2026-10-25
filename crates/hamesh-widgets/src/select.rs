@@ -45,6 +45,7 @@ pub struct ListView {
     focused: bool,
     scroll: f32,
     viewport_h: f32,
+    typeahead: String,
 }
 
 impl ListView {
@@ -55,6 +56,7 @@ impl ListView {
             row_h: row_h.max(1.0),
             selected: None,
             hover: None,
+            typeahead: String::new(),
             focused: false,
             scroll: 0.0,
             viewport_h: 0.0,
@@ -248,6 +250,50 @@ impl ListView {
         let changed = self.hover.is_some();
         self.hover = None;
         changed
+    }
+
+    /// APG type-ahead: typing a character moves selection to the
+    /// next row whose name starts with the typed prefix; rapid
+    /// successive characters extend the prefix, and the search
+    /// wraps around the end of the list. `name_at` maps a row to
+    /// its searchable name so the widget itself stays string-free.
+    /// A prefix with no match restarts from the single character,
+    /// so fast typists never get stuck on a dead buffer. The host
+    /// clears the buffer after ~500 ms without typing via
+    /// `clear_typeahead`.
+    pub fn typeahead(&mut self, ch: char, name_at: &dyn Fn(usize) -> String) -> bool {
+        if ch.is_control() || self.count == 0 {
+            return false;
+        }
+        self.typeahead.push(ch);
+        let prefix = self.typeahead.clone();
+        if self.jump_to_prefix(&prefix, name_at) {
+            return true;
+        }
+        // No match for the accumulated prefix: restart from the
+        // single character (standard single-select listbox behaviour).
+        self.typeahead.clear();
+        self.typeahead.push(ch);
+        let prefix = self.typeahead.clone();
+        self.jump_to_prefix(&prefix, name_at)
+    }
+
+    fn jump_to_prefix(&mut self, prefix: &str, name_at: &dyn Fn(usize) -> String) -> bool {
+        let prefix = prefix.to_lowercase();
+        let start = self.selected.map(|s| s + 1).unwrap_or(0);
+        for off in 0..self.count {
+            let i = (start + off) % self.count;
+            if name_at(i).to_lowercase().starts_with(&prefix) {
+                return self.select(i);
+            }
+        }
+        false
+    }
+
+    /// Drop the accumulated type-ahead prefix. The host calls
+    /// this after ~500 ms without typing.
+    pub fn clear_typeahead(&mut self) {
+        self.typeahead.clear();
     }
 
     /// The half-open range of rows that can be painted. This is the
@@ -656,6 +702,54 @@ mod tests {
         assert_eq!(l.scroll(), 0.0);
         l.set_viewport(100.0);
         assert!(l.visible().contains(&19));
+    }
+
+    fn typeahead_names() -> Vec<String> {
+        vec![
+            "Alpha".into(),
+            "Archive".into(),
+            "Beta".into(),
+            "Instrument Sans".into(),
+            "Inter".into(),
+        ]
+    }
+
+    #[test]
+    fn typeahead_moves_to_the_next_match_and_wraps() {
+        let mut l = list(5, 100.0);
+        let n = typeahead_names();
+        assert!(l.typeahead('b', &|i| n[i].clone()));
+        assert_eq!(l.selected(), Some(2));
+        // A second 'b' makes "bb": no match, so the prefix
+        // restarts at 'b' and Beta is already selected.
+        assert!(!l.typeahead('b', &|i| n[i].clone()));
+        assert_eq!(l.selected(), Some(2));
+    }
+
+    #[test]
+    fn typeahead_prefix_narrows_across_keystrokes() {
+        let mut l = list(5, 100.0);
+        let n = typeahead_names();
+        assert!(l.typeahead('i', &|i| n[i].clone()));
+        assert_eq!(l.selected(), Some(3), "first 'i' match");
+        assert!(l.typeahead('n', &|i| n[i].clone()));
+        assert_eq!(l.selected(), Some(4), "'in' moves to the next match after the current row");
+        // 'x' kills the prefix and matches nothing on its own:
+        // selection stays where the 'in' search left it.
+        assert!(!l.typeahead('x', &|i| n[i].clone()));
+        assert_eq!(l.selected(), Some(4));
+    }
+
+    #[test]
+    fn typeahead_is_case_insensitive_and_ignores_control_keys() {
+        let mut l = list(5, 100.0);
+        let n = typeahead_names();
+        assert!(l.typeahead('A', &|i| n[i].clone()));
+        assert_eq!(l.selected(), Some(0));
+        assert!(!l.typeahead('\u{8}', &|i| n[i].clone()), "backspace is not a typeahead char");
+        l.clear_typeahead();
+        assert!(l.typeahead('a', &|i| n[i].clone()));
+        assert_eq!(l.selected(), Some(1), "fresh buffer finds the next 'a' after Alpha");
     }
 
     fn picker() -> Picker {
