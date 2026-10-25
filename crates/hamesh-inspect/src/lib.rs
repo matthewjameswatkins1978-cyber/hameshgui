@@ -250,8 +250,9 @@ pub struct Probe {
     pub hit: Option<String>,
 }
 
-/// Probe the scene at `(x, y)`.
-pub fn probe(app: &App, layout: &LayoutOutput, scene: &Scene, x: f32, y: f32) -> Probe {
+/// Probe the scene at `(x, y)`. `layout` is retained for API
+/// stability; all targeting comes from `scene` (paint truth).
+pub fn probe(_app: &App, _layout: &LayoutOutput, scene: &Scene, x: f32, y: f32) -> Probe {
     let mut paint_order = Vec::new();
     for (i, n) in scene.nodes.iter().enumerate() {
         if !n.rect.contains(x, y) {
@@ -287,8 +288,10 @@ pub fn probe(app: &App, layout: &LayoutOutput, scene: &Scene, x: f32, y: f32) ->
         viewport_w: scene.viewport_w,
         viewport_h: scene.viewport_h,
         paint_order,
+        // The probe's own topmost candidate IS the framework hit:
+        // clip-aware, ghost-skipping, deterministically ordered.
+        hit: topmost_candidate.clone(),
         topmost_candidate,
-        hit: hamesh_layout::hit_test(app, layout, x, y),
     }
 }
 

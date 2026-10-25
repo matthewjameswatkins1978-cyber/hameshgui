@@ -946,6 +946,7 @@ dependencies = [
  "hamesh-core",
  "hamesh-diag",
  "hamesh-layout",
+ "hamesh-scene",
  "hamesh-widgets",
  "serde",
 ]

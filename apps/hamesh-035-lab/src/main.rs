@@ -370,14 +370,8 @@ fn route(app: &App, id: &str) -> Route {
 
 /// Pointer press through the consumer's whole routing: hit-test, read
 /// the row/option identity props, drive the widget. Returns a note.
-fn press(
-    g: &mut Gallery,
-    app: &App,
-    layout: &hamesh_layout::LayoutOutput,
-    x: f32,
-    y: f32,
-) -> String {
-    match hamesh_layout::hit_test(app, layout, x, y) {
+fn press(g: &mut Gallery, app: &App, scene: &hamesh_scene::Scene, x: f32, y: f32) -> String {
+    match hamesh_scene::hit_test(app, scene, x, y) {
         None => "press hit nothing".to_string(),
         Some(id) => match route(app, &id) {
             Route::LayerRow(row) => {
@@ -391,7 +385,11 @@ fn press(
             Route::PickOpt(pick) => {
                 g.focus = 1;
                 // Human two-step: highlight under the pointer, then commit.
-                let popup = layout.nodes.get("fonts-popup").map(|n| n.rect.clone());
+                let popup = scene
+                    .nodes
+                    .iter()
+                    .find(|n| n.id == "fonts-popup")
+                    .map(|n| n.rect.clone());
                 if let Some(r) = popup {
                     g.fonts.highlight_at_viewport(y - r.y);
                 }
@@ -413,12 +411,20 @@ fn press(
     }
 }
 
-fn hover(g: &mut Gallery, layout: &hamesh_layout::LayoutOutput, x: f32, y: f32, app: &App) {
-    let Some(id) = hamesh_layout::hit_test(app, layout, x, y) else {
+fn hover(g: &mut Gallery, scene: &hamesh_scene::Scene, x: f32, y: f32, app: &App) {
+    let Some(id) = hamesh_scene::hit_test(app, scene, x, y) else {
         return;
     };
-    let view = layout.nodes.get("layers-view").map(|n| n.rect.clone());
-    let popup = layout.nodes.get("fonts-popup").map(|n| n.rect.clone());
+    let view = scene
+        .nodes
+        .iter()
+        .find(|n| n.id == "layers-view")
+        .map(|n| n.rect.clone());
+    let popup = scene
+        .nodes
+        .iter()
+        .find(|n| n.id == "fonts-popup")
+        .map(|n| n.rect.clone());
     match route(app, &id) {
         Route::LayerRow(_) => {
             if let Some(r) = view {
@@ -501,10 +507,11 @@ fn key(g: &mut Gallery, k: GKey, label_names: &[String]) -> String {
     }
 }
 
-fn center(layout: &hamesh_layout::LayoutOutput, id: &str) -> Option<(f32, f32)> {
-    layout
+fn center(scene: &hamesh_scene::Scene, id: &str) -> Option<(f32, f32)> {
+    scene
         .nodes
-        .get(id)
+        .iter()
+        .find(|n| n.id == id)
         .map(|n| (n.rect.x + n.rect.w / 2.0, n.rect.y + n.rect.h / 2.0))
 }
 
@@ -569,10 +576,10 @@ fn main() {
 
         // 2. Pointer: select a row visible at every size, hover its
         // neighbour. Selection stays put while hover previews.
-        let (cx, cy) = center(&layout, "layers-row-5").expect("row 5 visible");
-        let note = press(&mut g, &app, &layout, cx, cy);
+        let (cx, cy) = center(&scene, "layers-row-5").expect("row 5 visible");
+        let note = press(&mut g, &app, &scene, cx, cy);
         assert_eq!(g.layers.selected(), Some(5), "{note}");
-        hover(&mut g, &layout, cx, cy + ROW_H + 4.0, &app);
+        hover(&mut g, &scene, cx, cy + ROW_H + 4.0, &app);
         assert_eq!(g.layers.hover(), Some(6));
         assert_eq!(g.layers.selected(), Some(5));
 
@@ -612,8 +619,9 @@ fn main() {
         key(&mut g, GKey::Tab, &label_names);
         rev += 1;
         (app, layout) = refresh(&mut g, w as f32, h as f32);
-        let (fx, fy) = center(&layout, "fonts-field").expect("field");
-        let note = press(&mut g, &app, &layout, fx, fy);
+        scene = hamesh_scene::build(&app, &layout, rev);
+        let (fx, fy) = center(&scene, "fonts-field").expect("field");
+        let note = press(&mut g, &app, &scene, fx, fy);
         assert!(g.fonts.is_open(), "{note}");
         for c in "ne".chars() {
             key(&mut g, GKey::Char(c), &label_names);

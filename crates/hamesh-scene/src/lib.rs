@@ -457,6 +457,40 @@ pub fn build(app: &App, layout: &LayoutOutput, scene_revision: u64) -> Scene {
     }
 }
 
+/// Hit-test in paint truth: the topmost effectively-visible node
+/// whose rect contains the point AND whose paint clip still covers
+/// it. Clipped-away content cannot intercept the Hand — layout rects
+/// alone over-report (a scrolled-out row still owns its old rect).
+/// Ghosts never intercept; disabled nodes still win the hit (a human
+/// would hit them, and the caller reports "disabled" honestly).
+/// Nodes paint back-to-front, so the pointer meets them front-to-back.
+pub fn hit_test(app: &App, scene: &Scene, x: f32, y: f32) -> Option<String> {
+    for n in scene.nodes.iter().rev() {
+        if !n.visible {
+            continue;
+        }
+        let Some(comp) = app.components.get(&n.id) else {
+            continue;
+        };
+        if comp
+            .props
+            .get("ghost")
+            .map(|s| s == "true")
+            .unwrap_or(false)
+        {
+            continue;
+        }
+        if !n.rect.contains(x, y) {
+            continue;
+        }
+        if !n.clip.contains(x, y) {
+            continue;
+        }
+        return Some(n.id.clone());
+    }
+    None
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -550,6 +584,143 @@ mod tests {
             "clip must end at the panel bottom, got {:?}",
             escaped.clip
         );
+    }
+
+    #[test]
+    fn hit_test_ignores_fully_clipped_rows_but_keeps_partial_ones() {
+        // A row scrolled fully out keeps its layout rect but must
+        // not intercept the Hand; its half-visible sibling stays
+        // clickable. Only paint truth tells them apart.
+        let mut app = App::new("win");
+        app.get_mut("win")
+            .unwrap()
+            .props
+            .insert("pad".to_string(), "0".to_string());
+        app.get_mut("win")
+            .unwrap()
+            .props
+            .insert("gap".to_string(), "0".to_string());
+        app.add(
+            "win",
+            Component::new("filler", Role::Panel, "filler").with_prop("h", "500"),
+        );
+        app.add(
+            "win",
+            Component::new("view", Role::Panel, "view")
+                .with_prop("layout", "column")
+                .with_prop("h", "80")
+                .with_prop("pad", "0")
+                .with_prop("gap", "0")
+                .with_prop("scroll_y", "60"),
+        );
+        app.add(
+            "view",
+            Component::new("r0", Role::Panel, "row").with_prop("h", "40"),
+        );
+        app.add(
+            "view",
+            Component::new("r1", Role::Panel, "row").with_prop("h", "40"),
+        );
+        let layout = hamesh_layout::compute(&app, 400.0, 600.0);
+        let scene = build(&app, &layout, 1);
+        // r0 sits at 440..480, fully above the viewport panel
+        // (500..580). Its rect contains (10,470) but its clip ends
+        // at 500: the filler underneath wins.
+        assert_eq!(
+            hit_test(&app, &scene, 10.0, 470.0),
+            Some("filler".to_string())
+        );
+        // r1 spans 480..520: the visible half stays clickable.
+        assert_eq!(hit_test(&app, &scene, 10.0, 510.0), Some("r1".to_string()));
+    }
+
+    #[test]
+    fn hit_test_prefers_the_overlay_over_covered_content() {
+        // Fullscreen veil above a button: the veil wins.
+        let mut app = App::new("win");
+        app.get_mut("win")
+            .unwrap()
+            .props
+            .insert("pad".to_string(), "0".to_string());
+        app.get_mut("win")
+            .unwrap()
+            .props
+            .insert("gap".to_string(), "0".to_string());
+        app.add("win", Component::new("btn", Role::Button, "Increment"));
+        app.add(
+            "win",
+            Component::new("veil", Role::Overlay, "veil")
+                .with_prop("overlay", "true")
+                .with_prop("ox", "0")
+                .with_prop("oy", "0")
+                .with_prop("w", "400")
+                .with_prop("h", "600"),
+        );
+        let layout = hamesh_layout::compute(&app, 400.0, 600.0);
+        let scene = build(&app, &layout, 1);
+        assert_eq!(hit_test(&app, &scene, 10.0, 10.0), Some("veil".to_string()));
+    }
+
+    #[test]
+    fn hit_test_skips_ghosts_hidden_and_off_viewport_options() {
+        // Ghost spacers hold layout room but never intercept; hidden
+        // nodes are unreachable; popup rows past the viewport edge
+        // cannot be clicked.
+        let mut app = App::new("win");
+        app.get_mut("win")
+            .unwrap()
+            .props
+            .insert("pad".to_string(), "0".to_string());
+        app.get_mut("win")
+            .unwrap()
+            .props
+            .insert("gap".to_string(), "0".to_string());
+        app.add(
+            "win",
+            Component::new("sp", Role::Panel, "spacer")
+                .with_prop("ghost", "true")
+                .with_prop("h", "100")
+                .with_prop("w", "400"),
+        );
+        app.add(
+            "win",
+            Component::new("btn", Role::Button, "ok").with_prop("h", "32"),
+        );
+        app.add(
+            "win",
+            Component::new("gone", Role::Panel, "gone")
+                .with_prop("h", "32")
+                .hidden(),
+        );
+        app.add(
+            "win",
+            Component::new("pop", Role::Panel, "pop")
+                .with_prop("overlay", "true")
+                .with_prop("ox", "50")
+                .with_prop("oy", "500")
+                .with_prop("w", "200")
+                .with_prop("h", "200")
+                .with_prop("pad", "0")
+                .with_prop("gap", "0"),
+        );
+        for i in 0..6 {
+            app.add(
+                "pop",
+                Component::new(&format!("opt{i}"), Role::Panel, "opt").with_prop("h", "40"),
+            );
+        }
+        let layout = hamesh_layout::compute(&app, 400.0, 600.0);
+        let scene = build(&app, &layout, 1);
+        // Ghost spacer covers (10,50) but never intercepts: the root wins.
+        assert_eq!(hit_test(&app, &scene, 10.0, 50.0), Some("win".to_string()));
+        // Hidden panel below the button is skipped even where it paints.
+        assert_eq!(hit_test(&app, &scene, 10.0, 140.0), Some("win".to_string()));
+        // opt4 spans 660..700: past the 600px viewport edge.
+        assert_eq!(
+            hit_test(&app, &scene, 100.0, 590.0),
+            Some("opt2".to_string())
+        );
+        assert_eq!(hit_test(&app, &scene, 100.0, 680.0), None);
     }
 
     #[test]

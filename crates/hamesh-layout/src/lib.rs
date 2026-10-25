@@ -612,8 +612,14 @@ fn depth(app: &App, id: &str) -> i32 {
     d
 }
 
-/// Hit-test: topmost (highest z, then later in tree) effectively-visible,
-/// enabled node containing the point. Returns component id or None.
+/// Hit-test on layout rects: topmost (highest z, then hash order)
+/// effectively-visible, enabled node containing the point.
+///
+/// Geometry only: layout rects survive scrolling and clipping, so a
+/// scrolled-out row still "contains" its old point. Production input
+/// (automation, Eye probes, application drivers) must use
+/// `hamesh_scene::hit_test`, which intersects the paint clip. Kept
+/// for unit tests of pure geometry.
 pub fn hit_test(app: &App, layout: &LayoutOutput, x: f32, y: f32) -> Option<String> {
     let mut best: Option<(i32, String)> = None;
     for (id, n) in &layout.nodes {
