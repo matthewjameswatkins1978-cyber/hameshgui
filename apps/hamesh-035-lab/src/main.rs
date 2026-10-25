@@ -13,7 +13,8 @@
 //! native loop would forward, lay out, render, then ask the Eye.
 //! Run: `cargo run -p hamesh-035-lab -- target/035`
 
-use hamesh_gallery::{hover, key, press, refresh, wheel, GKey, Gallery, ROW_H};
+use hamesh_gallery::{hover, key, press, refresh, wheel, Gallery, ROW_H};
+use hamesh_widgets::Key;
 
 /// Chrome rects that must not move when the popup opens or closes.
 fn snapshot_chrome(layout: &hamesh_layout::LayoutOutput) -> Vec<(String, (f32, f32, f32, f32))> {
@@ -130,28 +131,28 @@ fn main() {
         assert_only_edge_rows_clip(&rep2, 2, "scrolled");
 
         // 4. Keyboard on the list: move, then type ahead.
-        assert!(key(&mut g, GKey::Down, &label_names).ends_with("true"));
-        assert!(key(&mut g, GKey::Down, &label_names).ends_with("true"));
+        assert!(key(&mut g, Key::Down, &label_names).ends_with("true"));
+        assert!(key(&mut g, Key::Down, &label_names).ends_with("true"));
         assert_eq!(g.layers.selected(), Some(7));
-        let typeahead_note = key(&mut g, GKey::Char('s'), &label_names);
+        let typeahead_note = key(&mut g, Key::Char('s'), &label_names);
         let after = g.layers.selected().unwrap();
         assert_eq!(after, 8, "{typeahead_note}");
         assert!(label_names[after].to_lowercase().starts_with('s'));
-        assert!(key(&mut g, GKey::Up, &label_names).ends_with("true"));
+        assert!(key(&mut g, Key::Up, &label_names).ends_with("true"));
         assert_eq!(g.layers.selected(), Some(7));
         // Full keyboard range: jump, page, then home.
-        key(&mut g, GKey::End, &label_names);
+        key(&mut g, Key::End, &label_names);
         assert_eq!(g.layers.selected(), Some(199));
         let per_page = g.layers.rows_per_page().max(1);
-        key(&mut g, GKey::PageUp, &label_names);
+        key(&mut g, Key::PageUp, &label_names);
         assert_eq!(g.layers.selected(), Some(199 - per_page));
-        key(&mut g, GKey::Home, &label_names);
+        key(&mut g, Key::Home, &label_names);
         assert_eq!(g.layers.selected(), Some(0));
-        key(&mut g, GKey::PageDown, &label_names);
+        key(&mut g, Key::PageDown, &label_names);
         assert_eq!(g.layers.selected(), Some(per_page));
 
         // 5. Picker: Tab over, open from the field, filter, commit.
-        key(&mut g, GKey::Tab, &label_names);
+        key(&mut g, Key::Tab, &label_names);
         rev += 1;
         (app, layout) = refresh(&mut g, w as f32, h as f32);
         scene = hamesh_scene::build(&app, &layout, rev);
@@ -159,15 +160,15 @@ fn main() {
         let note = press(&mut g, &app, &scene, fx, fy);
         assert!(g.fonts.is_open(), "{note}");
         for c in "ne".chars() {
-            key(&mut g, GKey::Char(c), &label_names);
+            key(&mut g, Key::Char(c), &label_names);
         }
         let narrowed = g.fonts.filtered_len();
-        assert!(key(&mut g, GKey::Backspace, &label_names).ends_with("true"));
+        assert!(key(&mut g, Key::Backspace, &label_names).ends_with("true"));
         assert!(
             g.fonts.filtered_len() >= narrowed,
             "erasing widens the search"
         );
-        key(&mut g, GKey::Char('e'), &label_names);
+        key(&mut g, Key::Char('e'), &label_names);
         rev += 1;
         (app, layout) = refresh(&mut g, w as f32, h as f32);
         scene = hamesh_scene::build(&app, &layout, rev);
@@ -231,13 +232,13 @@ fn main() {
                 .all(|&i| g.fonts.items()[i].to_lowercase().contains("ne")),
             "every visible option matches the query"
         );
-        let committed = key(&mut g, GKey::Enter, &label_names);
+        let committed = key(&mut g, Key::Enter, &label_names);
         let value = g.fonts.value().unwrap_or("").to_string();
         assert!(
             !g.fonts.is_open() && value.to_lowercase().contains("ne"),
             "{committed} -> {value}"
         );
-        let dismissed = key(&mut g, GKey::Escape, &label_names);
+        let dismissed = key(&mut g, Key::Escape, &label_names);
         assert!(
             dismissed.ends_with("false"),
             "nothing to dismiss: {dismissed}"
@@ -301,7 +302,7 @@ fn main() {
         assert!(g.fonts.is_open(), "{note}");
         assert_eq!(g.focus, 1);
         // No refresh needed: key() drives widget state only.
-        key(&mut g, GKey::Tab, &label_names);
+        key(&mut g, Key::Tab, &label_names);
         assert!(!g.fonts.is_open(), "tab dismisses the popup");
         assert_eq!(g.focus, 0, "tab moves focus on");
         rev += 1;
@@ -318,7 +319,7 @@ fn main() {
         );
 
         // 5e. Escape cancels without committing.
-        key(&mut g, GKey::Tab, &label_names);
+        key(&mut g, Key::Tab, &label_names);
         assert_eq!(g.focus, 1);
         rev += 1;
         (app, layout) = refresh(&mut g, w as f32, h as f32);
@@ -327,12 +328,12 @@ fn main() {
         let note = press(&mut g, &app, &scene, fx3, fy3);
         assert!(g.fonts.is_open(), "{note}");
         // No refresh needed: key() drives widget state only.
-        key(&mut g, GKey::Down, &label_names);
+        key(&mut g, Key::Down, &label_names);
         assert!(
             g.fonts.highlight().unwrap_or(999) > 0,
             "highlight moved off the top"
         );
-        key(&mut g, GKey::Escape, &label_names);
+        key(&mut g, Key::Escape, &label_names);
         assert!(!g.fonts.is_open(), "escape dismisses the popup");
         rev += 1;
         (app, layout) = refresh(&mut g, w as f32, h as f32);
@@ -358,7 +359,7 @@ fn main() {
         let (fx4, fy4) = center(&scene, "fonts-field").expect("field");
         let note = press(&mut g, &app, &scene, fx4, fy4);
         assert!(g.fonts.is_open(), "{note}");
-        key(&mut g, GKey::End, &label_names);
+        key(&mut g, Key::End, &label_names);
         rev += 1;
         // A real resize at every size, never below a viable chrome:
         // 1440x560 drops the popup budget 8->5 rows, exercising
@@ -385,7 +386,7 @@ fn main() {
             g.fonts.visible().contains(&hi),
             "resized highlight revealed in actual geometry"
         );
-        key(&mut g, GKey::PageDown, &label_names);
+        key(&mut g, Key::PageDown, &label_names);
         assert!(
             g.fonts.visible().contains(&g.fonts.highlight().unwrap()),
             "resized paging stays visible"
@@ -397,7 +398,7 @@ fn main() {
         assert_only_edge_rows_clip(&rep_c, 2, "short open popup");
         // Leave the popup closed so the final frame matches the
         // established closed-state evidence.
-        key(&mut g, GKey::Escape, &label_names);
+        key(&mut g, Key::Escape, &label_names);
         assert!(!g.fonts.is_open(), "short popup dismisses cleanly");
 
         // 6. Final frame: the canvas headline is set in the picked font.

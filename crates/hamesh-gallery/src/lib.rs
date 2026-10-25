@@ -8,7 +8,7 @@
 
 use hamesh_blocks as b;
 use hamesh_core::App;
-use hamesh_widgets::{Hit, ListView, Nav, Picker};
+use hamesh_widgets::{list_nav, picker_nav, Hit, Key, ListView, Picker};
 
 pub const ROW_H: f32 = 32.0;
 const FIELD_H: f32 = 36.0;
@@ -16,21 +16,8 @@ const ROOT_PAD: f32 = 12.0;
 const HEADER_PAD: f32 = 12.0;
 const FOOTER_H: f32 = 28.0;
 
-/// Keyboard intents a native loop forwards. Paging included: long
-/// lists are unusable without it.
-pub enum GKey {
-    Up,
-    Down,
-    PageUp,
-    PageDown,
-    Home,
-    End,
-    Char(char),
-    Enter,
-    Escape,
-    Backspace,
-    Tab,
-}
+/// Keyboard intents are the shared `hamesh_widgets::Key` vocabulary:
+/// no per-app key enum, no second mapping table.
 
 #[derive(Clone)]
 pub struct Gallery {
@@ -497,8 +484,8 @@ pub fn wheel(
     }
 }
 
-pub fn key(g: &mut Gallery, k: GKey, label_names: &[String]) -> String {
-    if matches!(k, GKey::Tab) {
+pub fn key(g: &mut Gallery, k: Key, label_names: &[String]) -> String {
+    if matches!(k, Key::Tab | Key::ShiftTab) {
         // Moving focus dismisses the popup (cancel: the committed
         // value is preserved). A fresh focus never inherits an open
         // popup from the other control.
@@ -511,14 +498,11 @@ pub fn key(g: &mut Gallery, k: GKey, label_names: &[String]) -> String {
         );
     }
     if g.focus == 0 {
+        if let Some(moved) = list_nav(&mut g.layers, &k) {
+            return format!("layers nav: {moved}");
+        }
         match k {
-            GKey::Up => format!("layers nav: {}", g.layers.nav(Nav::Up)),
-            GKey::Down => format!("layers nav: {}", g.layers.nav(Nav::Down)),
-            GKey::PageUp => format!("layers nav: {}", g.layers.nav(Nav::PageUp)),
-            GKey::PageDown => format!("layers nav: {}", g.layers.nav(Nav::PageDown)),
-            GKey::Home => format!("layers nav: {}", g.layers.nav(Nav::Home)),
-            GKey::End => format!("layers nav: {}", g.layers.nav(Nav::End)),
-            GKey::Char(c) => {
+            Key::Char(c) => {
                 // Idle timeout: a stale prefix never steers a new search.
                 let now = std::time::Instant::now();
                 if g.last_typed
@@ -533,34 +517,31 @@ pub fn key(g: &mut Gallery, k: GKey, label_names: &[String]) -> String {
                     g.layers.typeahead(c, &|i| names[i].clone())
                 )
             }
-            GKey::Backspace => {
+            Key::Backspace => {
                 g.layers.clear_typeahead();
                 "typeahead cleared".to_string()
             }
-            GKey::Enter | GKey::Escape => "layers: no popup to confirm or dismiss".to_string(),
-            GKey::Tab => unreachable!("handled above"),
+            Key::Enter | Key::Escape => "layers: no popup to confirm or dismiss".to_string(),
+            _ => unreachable!("navigation and Tab handled above"),
         }
     } else {
+        if let Some(moved) = picker_nav(&mut g.fonts, &k) {
+            return format!("picker nav: {moved}");
+        }
         match k {
-            GKey::Up => format!("picker nav: {}", g.fonts.nav(Nav::Up)),
-            GKey::Down => format!("picker nav: {}", g.fonts.nav(Nav::Down)),
-            GKey::PageUp => format!("picker nav: {}", g.fonts.nav(Nav::PageUp)),
-            GKey::PageDown => format!("picker nav: {}", g.fonts.nav(Nav::PageDown)),
-            GKey::Home => format!("picker nav: {}", g.fonts.nav(Nav::Home)),
-            GKey::End => format!("picker nav: {}", g.fonts.nav(Nav::End)),
-            GKey::Char(c) => {
+            Key::Char(c) => {
                 if !g.fonts.is_open() {
                     g.fonts.open();
                 }
                 format!("picker type: {}", g.fonts.push_char(c))
             }
-            GKey::Backspace => format!("picker erase: {}", g.fonts.backspace()),
-            GKey::Enter => match g.fonts.commit() {
+            Key::Backspace => format!("picker erase: {}", g.fonts.backspace()),
+            Key::Enter => match g.fonts.commit() {
                 Some(i) => format!("picker committed: {}", g.fonts.items()[i].clone()),
                 None => "picker commit found nothing".to_string(),
             },
-            GKey::Escape => format!("picker dismissed: {}", g.fonts.close()),
-            GKey::Tab => unreachable!("handled above"),
+            Key::Escape => format!("picker dismissed: {}", g.fonts.close()),
+            _ => unreachable!("navigation and Tab handled above"),
         }
     }
 }
@@ -619,10 +600,10 @@ mod tests {
         g.focus = 1;
         g.fonts.open();
         let names = names_of(&g);
-        let _ = key(&mut g, GKey::Tab, &names);
+        let _ = key(&mut g, Key::Tab, &names);
         assert!(!g.fonts.is_open());
         assert_eq!(g.focus, 0);
-        let _ = key(&mut g, GKey::Tab, &names);
+        let _ = key(&mut g, Key::Tab, &names);
         assert_eq!(g.focus, 1);
         assert!(!g.fonts.is_open());
     }
@@ -634,8 +615,8 @@ mod tests {
         g.focus = 1;
         g.fonts.open();
         let names = names_of(&g);
-        let _ = key(&mut g, GKey::Down, &names);
-        let _ = key(&mut g, GKey::Escape, &names);
+        let _ = key(&mut g, Key::Down, &names);
+        let _ = key(&mut g, Key::Escape, &names);
         assert!(!g.fonts.is_open());
         assert_eq!(g.fonts.value().unwrap_or(""), before);
     }
@@ -655,7 +636,7 @@ mod tests {
         g.fonts.open();
         // Drive the highlight to the bottom, then shorten the viewport.
         let names = names_of(&g);
-        let _ = key(&mut g, GKey::End, &names);
+        let _ = key(&mut g, Key::End, &names);
         let (app, _layout, scene) = frame(&mut g, 820.0, 300.0);
         let pop = scene
             .nodes
@@ -679,10 +660,10 @@ mod tests {
             "highlight revealed in actual geometry"
         );
         // Paging steps by actual rows and the pointer maps through scroll.
-        let _ = key(&mut g, GKey::PageDown, &names);
+        let _ = key(&mut g, Key::PageDown, &names);
         let hi2 = g.fonts.highlight().unwrap();
         assert!(g.fonts.visible().contains(&hi2));
-        let _ = key(&mut g, GKey::Home, &names);
+        let _ = key(&mut g, Key::Home, &names);
         assert!(g.fonts.visible().contains(&g.fonts.highlight().unwrap()));
         let _ = app;
     }

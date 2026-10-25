@@ -337,10 +337,10 @@ fn run_tasks(out: &str) {
         assert!(note.contains("done"), "{note}");
         assert_eq!(t.done_count(), 1);
         // Filter narrows the queue live; the committed count survives.
-        let _ = hamesh_tasks::key(&mut t, hamesh_tasks::TKey::Tab);
-        let _ = hamesh_tasks::key(&mut t, hamesh_tasks::TKey::Tab);
+        let _ = hamesh_tasks::key(&mut t, hamesh_widgets::Key::Tab);
+        let _ = hamesh_tasks::key(&mut t, hamesh_widgets::Key::Tab);
         assert_eq!(t.focus, 1);
-        let _ = hamesh_tasks::key(&mut t, hamesh_tasks::TKey::Char('o'));
+        let _ = hamesh_tasks::key(&mut t, hamesh_widgets::Key::Char('o'));
         assert!(t.filter.is_open());
         assert!(t.shown().len() < 8 && !t.shown().is_empty());
         let (app3, layout3) = hamesh_tasks::refresh(&mut t, w as f32, h as f32);

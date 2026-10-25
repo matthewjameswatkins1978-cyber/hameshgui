@@ -10,7 +10,7 @@
 
 use hamesh_blocks as b;
 use hamesh_core::App;
-use hamesh_widgets::{Hit, ListView, Nav, Picker};
+use hamesh_widgets::{list_nav, picker_nav, Hit, Key, ListView, Picker};
 
 pub const ROW_H: f32 = 32.0;
 const FIELD_W: f32 = 240.0;
@@ -25,20 +25,8 @@ pub struct Task {
     pub done: bool,
 }
 
-/// Keyboard intents a native loop forwards.
-pub enum TKey {
-    Up,
-    Down,
-    PageUp,
-    PageDown,
-    Home,
-    End,
-    Char(char),
-    Enter,
-    Escape,
-    Backspace,
-    Tab,
-}
+/// Keyboard intents are the shared `hamesh_widgets::Key` vocabulary:
+/// no per-app key enum, no second mapping table.
 
 #[derive(Clone)]
 pub struct Tasks {
@@ -460,47 +448,46 @@ pub fn wheel(t: &mut Tasks, layout: &hamesh_layout::LayoutOutput, x: f32, y: f32
     }
 }
 
-pub fn key(t: &mut Tasks, k: TKey) -> String {
-    if matches!(k, TKey::Tab) {
+pub fn key(t: &mut Tasks, k: Key) -> String {
+    if matches!(k, Key::Tab | Key::ShiftTab) {
+        // Moving focus dismisses the popup; ShiftTab walks back.
         t.filter.close();
-        t.focus = (t.focus + 1) % 3;
+        t.focus = if matches!(k, Key::Tab) {
+            (t.focus + 1) % 3
+        } else {
+            (t.focus + 2) % 3
+        };
         return format!("focus -> {}", ["list", "filter", "actions"][t.focus]);
     }
     if t.focus == 0 {
+        if let Some(moved) = list_nav(&mut t.list, &k) {
+            return format!("tasks nav: {moved}");
+        }
         match k {
-            TKey::Up => format!("tasks nav: {}", t.list.nav(Nav::Up)),
-            TKey::Down => format!("tasks nav: {}", t.list.nav(Nav::Down)),
-            TKey::PageUp => format!("tasks nav: {}", t.list.nav(Nav::PageUp)),
-            TKey::PageDown => format!("tasks nav: {}", t.list.nav(Nav::PageDown)),
-            TKey::Home => format!("tasks nav: {}", t.list.nav(Nav::Home)),
-            TKey::End => format!("tasks nav: {}", t.list.nav(Nav::End)),
-            TKey::Enter => toggle_selected(t),
-            TKey::Escape => "list: no popup to dismiss".to_string(),
+            Key::Enter => toggle_selected(t),
+            Key::Escape => "list: no popup to dismiss".to_string(),
             _ => "list: key ignored".to_string(),
         }
     } else if t.focus == 1 {
+        if let Some(moved) = picker_nav(&mut t.filter, &k) {
+            return format!("filter nav: {moved}");
+        }
         match k {
-            TKey::Up => format!("filter nav: {}", t.filter.nav(Nav::Up)),
-            TKey::Down => format!("filter nav: {}", t.filter.nav(Nav::Down)),
-            TKey::PageUp => format!("filter nav: {}", t.filter.nav(Nav::PageUp)),
-            TKey::PageDown => format!("filter nav: {}", t.filter.nav(Nav::PageDown)),
-            TKey::Home => format!("filter nav: {}", t.filter.nav(Nav::Home)),
-            TKey::End => format!("filter nav: {}", t.filter.nav(Nav::End)),
-            TKey::Char(c) => {
+            Key::Char(c) => {
                 if !t.filter.is_open() {
                     t.filter.open();
                 }
                 format!("filter type: {}", t.filter.push_char(c))
             }
-            TKey::Backspace => format!("filter erase: {}", t.filter.backspace()),
-            TKey::Enter => "filter: list follows the query".to_string(),
-            TKey::Escape => format!("filter dismissed: {}", t.filter.close()),
-            TKey::Tab => unreachable!("handled above"),
+            Key::Backspace => format!("filter erase: {}", t.filter.backspace()),
+            Key::Enter => "filter: list follows the query".to_string(),
+            Key::Escape => format!("filter dismissed: {}", t.filter.close()),
+            _ => unreachable!("navigation and Tab handled above"),
         }
     } else {
         match k {
-            TKey::Enter => toggle_selected(t),
-            TKey::Escape => "actions: nothing to dismiss".to_string(),
+            Key::Enter => toggle_selected(t),
+            Key::Escape => "actions: nothing to dismiss".to_string(),
             _ => "actions: pointer or Enter".to_string(),
         }
     }
@@ -587,7 +574,7 @@ mod tests {
         assert_eq!(t.list.selected(), Some(3));
         // Reopen, then Tab away: same cancel contract as the gallery.
         t.filter.open();
-        let _ = key(&mut t, TKey::Tab);
+        let _ = key(&mut t, Key::Tab);
         assert!(!t.filter.is_open());
         // The row press left focus on the list, so Tab lands on filter.
         assert_eq!(t.focus, 1);

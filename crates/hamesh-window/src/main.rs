@@ -475,7 +475,7 @@ impl HameshWindowApp {
 
     /// Gallery keyboard: map the winit event onto the shared intent core.
     fn gallery_key(&mut self, event: &winit::event::KeyEvent, event_loop: &ActiveEventLoop) {
-        use hamesh_gallery::GKey;
+        use hamesh_widgets::Key;
         let Some(g) = self.gallery.as_mut() else {
             return;
         };
@@ -483,35 +483,35 @@ impl HameshWindowApp {
             self.dump_inspection();
             return;
         }
-        let mut keys: Vec<GKey> = Vec::new();
+        let mut keys: Vec<Key> = Vec::new();
         if let Some(text) = event.text.as_ref() {
             for c in text.chars() {
                 // Tab arrives as text too; the physical key wins below.
                 if c != '\r' && c != '\n' && c != '\t' {
-                    keys.push(GKey::Char(c));
+                    keys.push(Key::Char(c));
                 }
             }
         }
         match event.physical_key {
-            PhysicalKey::Code(KeyCode::ArrowUp) => keys.push(GKey::Up),
-            PhysicalKey::Code(KeyCode::ArrowDown) => keys.push(GKey::Down),
-            PhysicalKey::Code(KeyCode::PageUp) => keys.push(GKey::PageUp),
-            PhysicalKey::Code(KeyCode::PageDown) => keys.push(GKey::PageDown),
-            PhysicalKey::Code(KeyCode::Home) => keys.push(GKey::Home),
-            PhysicalKey::Code(KeyCode::End) => keys.push(GKey::End),
+            PhysicalKey::Code(KeyCode::ArrowUp) => keys.push(Key::Up),
+            PhysicalKey::Code(KeyCode::ArrowDown) => keys.push(Key::Down),
+            PhysicalKey::Code(KeyCode::PageUp) => keys.push(Key::PageUp),
+            PhysicalKey::Code(KeyCode::PageDown) => keys.push(Key::PageDown),
+            PhysicalKey::Code(KeyCode::Home) => keys.push(Key::Home),
+            PhysicalKey::Code(KeyCode::End) => keys.push(Key::End),
             PhysicalKey::Code(KeyCode::Enter) | PhysicalKey::Code(KeyCode::NumpadEnter) => {
-                keys.push(GKey::Enter)
+                keys.push(Key::Enter)
             }
-            PhysicalKey::Code(KeyCode::Backspace) => keys.push(GKey::Backspace),
-            PhysicalKey::Code(KeyCode::Tab) => keys.push(GKey::Tab),
-            PhysicalKey::Code(KeyCode::Escape) => keys.push(GKey::Escape),
+            PhysicalKey::Code(KeyCode::Backspace) => keys.push(Key::Backspace),
+            PhysicalKey::Code(KeyCode::Tab) => keys.push(Key::Tab),
+            PhysicalKey::Code(KeyCode::Escape) => keys.push(Key::Escape),
             _ => {}
         }
         if keys.is_empty() {
             return;
         }
         // Escape with a closed popup quits; otherwise the popup owns it.
-        let escape_quits = keys.len() == 1 && matches!(keys[0], GKey::Escape) && !g.fonts.is_open();
+        let escape_quits = keys.len() == 1 && matches!(keys[0], Key::Escape) && !g.fonts.is_open();
         let names: Vec<String> = g.layer_rows.iter().map(|r| r.label.clone()).collect();
         let mut notes = Vec::new();
         for k in keys {

@@ -9,7 +9,7 @@ use hamesh_core::{App, Component, ComponentId, Role};
 use unicode_segmentation::UnicodeSegmentation;
 
 pub mod select;
-pub use select::{ListView, Nav, Picker};
+pub use select::{list_nav, picker_nav, ListView, Nav, Picker};
 
 /// Char offsets of every grapheme boundary in `text`, including 0 and the
 /// end. The caret stays char-indexed (cheap, stable across edits); all
@@ -384,6 +384,9 @@ impl Hit {
 }
 
 /// Key events, shared by real winit input and synthetic drill input.
+/// One vocabulary for every driver: the window, automation and the
+/// gallery/tasks compositions all speak `Key`. Paging included: long
+/// lists are unusable without it.
 #[derive(Clone, Debug, PartialEq)]
 pub enum Key {
     Char(char),
@@ -394,6 +397,8 @@ pub enum Key {
     Right,
     Up,
     Down,
+    PageUp,
+    PageDown,
     Home,
     End,
     Tab,
@@ -491,9 +496,15 @@ pub fn handle_key(app: &mut App, w: &mut Widgets, key: &Key) -> String {
                 }
                 return "submit empty (ignored)".to_string();
             }
-            Key::Up | Key::Down => {
-                // Single-line composer: vertical arrows scroll the feed.
-                let d = if *key == Key::Up { -40.0 } else { 40.0 };
+            Key::Up | Key::Down | Key::PageUp | Key::PageDown => {
+                // Single-line composer: vertical keys scroll the feed.
+                // Arrows nudge; paging moves a viewport.
+                let d = match key {
+                    Key::Up => -40.0,
+                    Key::Down => 40.0,
+                    Key::PageUp => -vh,
+                    _ => vh,
+                };
                 w.feed.scroll_by(d, vh);
                 return format!("feed scroll {d}");
             }
@@ -508,6 +519,14 @@ pub fn handle_key(app: &mut App, w: &mut Widgets, key: &Key) -> String {
             Key::Down => {
                 w.feed.scroll_by(60.0, vh);
                 return "feed scroll down".to_string();
+            }
+            Key::PageUp => {
+                w.feed.scroll_by(-vh, vh);
+                return "feed page up".to_string();
+            }
+            Key::PageDown => {
+                w.feed.scroll_by(vh, vh);
+                return "feed page down".to_string();
             }
             Key::Enter => {
                 return "feed enter (no-op)".to_string();
