@@ -159,7 +159,10 @@ impl LayoutOutput {
 /// `wrap: true` (flex-wrap for responsive equal-tile rows),
 /// `align: start|center|end` (cross-axis, default stretch),
 /// `basis` (flex base px; 0 = share space equally regardless of content),
-/// `min_w` (readability floor: wrapping rows break instead of squeezing).
+/// `min_w` (readability floor: wrapping rows break instead of squeezing),
+/// `scroll_y` (px of content hidden above the container top: the scroll
+/// primitive — descendants shift up verbatim, the container keeps its
+/// rect, and paint clips to it. Widgets clamp; layout does not).
 fn child_style(comp: &hamesh_core::Component) -> Style {
     let parse_nonneg = |k: &str, dflt: f32| -> f32 {
         comp.props
@@ -411,6 +414,10 @@ pub fn compute(app: &App, viewport_w: f32, viewport_h: f32) -> LayoutOutput {
         let tnode = node_of[&id.clone()];
         let l = taffy.layout(tnode).expect("layout");
         // Taffy locations are parent-relative: accumulate absolute offset.
+        // A scrolled ancestor (`scroll_y`) hides that many pixels of its
+        // content above its top edge, so every descendant shifts up by
+        // it. The container's own rect is untouched; paint clips to it
+        // (scene clip truth) and the Eye names what was hidden.
         let mut abs_x = l.location.x;
         let mut abs_y = l.location.y;
         {
@@ -421,6 +428,14 @@ pub fn compute(app: &App, viewport_w: f32, viewport_h: f32) -> LayoutOutput {
                         abs_x += pl.location.x;
                         abs_y += pl.location.y;
                     }
+                }
+                if let Some(pc) = app.components.get(&pid.0) {
+                    abs_y -= pc
+                        .props
+                        .get("scroll_y")
+                        .and_then(|v| v.parse::<f32>().ok())
+                        .unwrap_or(0.0)
+                        .max(0.0);
                 }
                 cur = app.components.get(&pid.0).and_then(|pc| pc.parent.clone());
             }
@@ -821,6 +836,99 @@ mod tests {
             ico.h
         );
         assert!((ico.w - 20.0).abs() < 0.5, "declared width is a floor");
+    }
+
+    #[test]
+    fn scroll_y_shifts_descendants_but_not_the_container() {
+        // The scroll primitive: a fixed-height viewport with three
+        // 40px rows and scroll_y=50 shows rows shifted up by 50 — the
+        // container keeps its own rect.
+        let mut app = App::new("win");
+        app.get_mut("win").unwrap().props.insert("pad".to_string(), "0".to_string());
+        app.get_mut("win").unwrap().props.insert("gap".to_string(), "0".to_string());
+        app.add(
+            "win",
+            Component::new("view", Role::Panel, "view")
+                .with_prop("layout", "column")
+                .with_prop("h", "80")
+                .with_prop("pad", "0")
+                .with_prop("gap", "0")
+                .with_prop("scroll_y", "50"),
+        );
+        for i in ["r0", "r1", "r2"] {
+            app.add(
+                "view",
+                Component::new(i, Role::Panel, i)
+                    .with_prop("h", "40")
+                    .with_prop("text", i)
+                    .with_prop("font_size", "13"),
+            );
+        }
+        let out = compute(&app, 400.0, 300.0);
+        let view = out.get("view").unwrap().rect.clone();
+        assert_eq!((view.x, view.y, view.h), (0.0, 0.0, 80.0));
+        for (i, top) in [("r0", -50.0), ("r1", -10.0), ("r2", 30.0)] {
+            let r = out.get(i).unwrap().rect.clone();
+            assert_eq!(r.y, top, "row {i} shifted by scroll_y");
+            assert_eq!(r.h, 40.0);
+        }
+    }
+
+    #[test]
+    fn scroll_y_stacks_through_nested_containers() {
+        // Nested scrolled viewports accumulate: outer hides 20px,
+        // inner hides 10px, the leaf shifts by 30.
+        let mut app = App::new("win");
+        app.get_mut("win").unwrap().props.insert("pad".to_string(), "0".to_string());
+        app.get_mut("win").unwrap().props.insert("gap".to_string(), "0".to_string());
+        app.add(
+            "win",
+            Component::new("outer", Role::Panel, "outer")
+                .with_prop("layout", "column")
+                .with_prop("h", "200")
+                .with_prop("pad", "0")
+                .with_prop("gap", "0")
+                .with_prop("scroll_y", "20"),
+        );
+        app.add(
+            "outer",
+            Component::new("inner", Role::Panel, "inner")
+                .with_prop("layout", "column")
+                .with_prop("h", "100")
+                .with_prop("pad", "0")
+                .with_prop("gap", "0")
+                .with_prop("scroll_y", "10"),
+        );
+        app.add(
+            "inner",
+            Component::new("leaf", Role::Panel, "leaf").with_prop("h", "40"),
+        );
+        let out = compute(&app, 400.0, 300.0);
+        assert_eq!(out.get("outer").unwrap().rect.y, 0.0);
+        assert_eq!(out.get("inner").unwrap().rect.y, -20.0);
+        assert_eq!(out.get("leaf").unwrap().rect.y, -30.0);
+    }
+
+    #[test]
+    fn scroll_y_without_a_prop_is_zero_and_negative_clamps() {
+        let mut app = App::new("win");
+        app.get_mut("win").unwrap().props.insert("pad".to_string(), "0".to_string());
+        app.get_mut("win").unwrap().props.insert("gap".to_string(), "0".to_string());
+        app.add(
+            "win",
+            Component::new("view", Role::Panel, "view")
+                .with_prop("layout", "column")
+                .with_prop("h", "80")
+                .with_prop("pad", "0")
+                .with_prop("gap", "0")
+                .with_prop("scroll_y", "-25"),
+        );
+        app.add(
+            "view",
+            Component::new("r0", Role::Panel, "r0").with_prop("h", "40"),
+        );
+        let out = compute(&app, 400.0, 300.0);
+        assert_eq!(out.get("r0").unwrap().rect.y, 0.0);
     }
 
     #[test]
