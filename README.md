@@ -4,8 +4,11 @@
 
 # Hamesh — the Eye and the Hand
 
-An AI-first native GUI framework in Rust. First platform: Windows.
-First real application: Agent X / Pi GUI.
+**Native interfaces that an AI can actually see, operate, and verify.**
+
+Hamesh is an experimental AI-first GUI framework in Rust, starting on Windows. Instead of bolting a screenshot-and-click automation layer onto an opaque app, it makes inspection, interaction and evidence part of the framework itself.
+
+[Specimen](https://github.com/matthewjameswatkins1978-cyber/Specimen), the typography and poster-making application, is a working client and useful demonstration. Agent X / Pi integration remains another intended application.
 
 Guiding concept: **See. Understand. Act. Prove it worked.**
 
@@ -16,7 +19,21 @@ the Memory (bounded diagnostic traces and replay evidence). Any agent —
 via the CLI or via MCP — can operate a live Hamesh app from a separate
 process and prove what it did.
 
-## Status (v0.1.0, `hamesh/m1-m2-slice`)
+## Try the framework
+
+Requires a stable Rust toolchain and the platform's native build dependencies (Windows is the primary development target).
+
+```powershell
+cargo test --workspace
+cargo run -p hamesh-demo
+cargo run -p hamesh-window -- --m3 --inspect --smoke-test=60
+```
+
+The demo runs headless checks; the last command opens a real window and leaves inspection evidence. Use the Eye/Hand CLI or MCP bridge to operate that window from another process. Human UI tests and GPU acceptance still need a desktop.
+
+## Implementation snapshot (workspace v0.2.0)
+
+The milestones below began with the v0.1.0 M1/M2 slice; the current workspace package version is **0.2.0**. They're engineering checkpoints rather than a promise of production API stability.
 
 - [x] M1 headless + native window + GPU: Taffy layout → scene → CPU
       (tiny-skia) or wgpu 30 + vello 0.11, with loss recovery and CPU
