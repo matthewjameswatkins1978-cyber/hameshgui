@@ -1,0 +1,16 @@
+[package]
+name = "hamesh-gallery"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish = false
+
+[dependencies]
+hamesh-core = { path = "../hamesh-core" }
+hamesh-layout = { path = "../hamesh-layout" }
+hamesh-scene = { path = "../hamesh-scene" }
+hamesh-blocks = { path = "../hamesh-blocks" }
+hamesh-widgets = { path = "../hamesh-widgets" }
+hamesh-text = { path = "../hamesh-text" }
+hamesh-theme = { path = "../hamesh-theme" }
+serde_json = "1"

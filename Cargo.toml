@@ -10,6 +10,7 @@ members = [
   "crates/hamesh-text",
   "crates/hamesh-theme",
   "crates/hamesh-blocks",
+  "crates/hamesh-gallery",
   "crates/hamesh-pi",
   "crates/hamesh-widgets",
   "crates/hamesh-window",

@@ -1054,6 +1054,44 @@ mod tests {
     }
 
     #[test]
+    fn place_popup_flips_above_a_bottom_field() {
+        // End-to-end flip: a picker near the viewport bottom gets
+        // an upward popup through real layout, not just geometry.
+        let mut p = Picker::new((0..20).map(|i| format!("Item {i:02}")).collect());
+        p.open();
+        let mut app = App::new("win");
+        {
+            let mut root = Scope::root(&mut app, "win");
+            crate::row(
+                &mut root,
+                "top",
+                crate::LayoutOpts {
+                    h: Some(480.0),
+                    ..Default::default()
+                },
+                |_| {},
+            );
+            picker(&mut root, "pk", PickerSpec::new(&mut p));
+        }
+        let layout = hamesh_layout::compute(&app, 400.0, 600.0);
+        let field = layout.nodes.get("pk-field").expect("field").rect.clone();
+        assert!(field.y > 400.0, "field sits near the bottom: {field:?}");
+        let metrics = PopupMetrics {
+            row_h: ROW_H,
+            max_rows: 8,
+            matches: p.filtered_len(),
+            scroll: 0.0,
+        };
+        let (x, y, w, h) =
+            place_popup(&mut app, &layout, "pk", &metrics, 400.0, 600.0).expect("placed");
+        assert!(
+            y + h <= field.y + 0.5,
+            "popup flipped above the field: y={y} h={h} field={field:?}"
+        );
+        assert!(x >= 0.0 && y >= 0.0 && x + w <= 400.0 && y + h <= 600.0);
+    }
+
+    #[test]
     fn popup_pointer_mapping_agrees_with_painted_rows() {
         // Painted pitch and widget pitch must agree, or pointer
         // commits land on the wrong option (a live 30-vs-32 drift).

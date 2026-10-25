@@ -16,6 +16,7 @@ hamesh-scene = { path = "../../crates/hamesh-scene" }
 hamesh-render = { path = "../../crates/hamesh-render" }
 hamesh-inspect = { path = "../../crates/hamesh-inspect" }
 hamesh-blocks = { path = "../../crates/hamesh-blocks" }
+hamesh-gallery = { path = "../../crates/hamesh-gallery" }
 hamesh-widgets = { path = "../../crates/hamesh-widgets" }
 hamesh-text = { path = "../../crates/hamesh-text" }
 hamesh-theme = { path = "../../crates/hamesh-theme" }

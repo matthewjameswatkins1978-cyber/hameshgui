@@ -929,6 +929,7 @@ version = "0.2.0"
 dependencies = [
  "hamesh-blocks",
  "hamesh-core",
+ "hamesh-gallery",
  "hamesh-inspect",
  "hamesh-layout",
  "hamesh-render",
@@ -1028,6 +1029,20 @@ dependencies = [
  "hamesh-layout",
  "hamesh-render",
  "hamesh-scene",
+ "hamesh-widgets",
+ "serde_json",
+]
+
+[[package]]
+name = "hamesh-gallery"
+version = "0.2.0"
+dependencies = [
+ "hamesh-blocks",
+ "hamesh-core",
+ "hamesh-layout",
+ "hamesh-scene",
+ "hamesh-text",
+ "hamesh-theme",
  "hamesh-widgets",
  "serde_json",
 ]

@@ -88,6 +88,11 @@ The installed-font picker lists real system families through
    6.48/AA. New: `hamesh_text::ellipsize` (grapheme-correct) + the
    list width contract (`viewport_w` → trim to remaining chrome,
    including the 16px text inset the measurer adds).
+4b. **Driver extracted, no behavior change.** The drill driver now
+   lives in its own `hamesh-gallery` crate (same intents a native loop
+   forwards: pointer, wheel, keys), so a real window can drive the
+   identical code paths. The lab binary is the drill only. All three
+   sizes still report zero Eye exceptions.
 4. **Narrow-row collision fixed with evidence.** The 820px rail showed
    option text painting into the scrollbar (Eye: overlap). Rows now
    ellipsize to their measured budget; the 820 frame is clean with
