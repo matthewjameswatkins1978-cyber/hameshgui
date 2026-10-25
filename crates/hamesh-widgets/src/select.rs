@@ -956,4 +956,47 @@ mod tests {
         assert!(p.close());
         assert_eq!(p.display(), "");
     }
+
+    #[test]
+    fn close_cancels_without_touching_the_committed_value() {
+        // Escape, outside-click and Tab all cancel through close():
+        // the popup goes away, the committed value stays.
+        let items: Vec<String> = (0..20).map(|i| format!("Item {i:02}")).collect();
+        let mut p = Picker::new(items);
+        p.open();
+        p.nav(Nav::End);
+        assert!(p.commit().is_some());
+        assert_eq!(p.selected(), Some(19));
+        p.open();
+        p.nav(Nav::Home);
+        assert_eq!(p.highlight(), Some(0));
+        assert!(p.close());
+        assert!(!p.is_open());
+        assert_eq!(p.selected(), Some(19), "committed value preserved");
+        assert_eq!(p.highlight(), None);
+        assert!(!p.close(), "closing a closed popup is a no-op");
+    }
+
+    #[test]
+    fn page_nav_follows_the_actual_viewport_not_the_request() {
+        // Placement shrank the popup to two rows after the request:
+        // paging and reveal must use the actual visible geometry.
+        let items: Vec<String> = (0..50).map(|i| format!("Item {i:02}")).collect();
+        let mut p = Picker::new(items);
+        p.set_row_h(32.0);
+        p.set_viewport(64.0);
+        p.open();
+        p.nav(Nav::PageDown);
+        assert_eq!(p.highlight(), Some(2), "a page is the actual two rows");
+        p.nav(Nav::End);
+        let h = p.highlight().expect("highlight");
+        assert_eq!(h, 49);
+        let v = p.visible();
+        assert!(v.contains(&h), "shrunk popup reveals the highlight: {v:?}");
+        assert!(
+            v.len() <= 4,
+            "virtualised to the actual height: {}",
+            v.len()
+        );
+    }
 }

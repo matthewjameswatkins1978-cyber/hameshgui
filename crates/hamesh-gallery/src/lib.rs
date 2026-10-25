@@ -348,6 +348,19 @@ pub fn refresh(g: &mut Gallery, w: f32, h: f32) -> (App, hamesh_layout::LayoutOu
     // transient and clipped honestly; resting states stay exact.
     let layers = ((body - ROOT_PAD * 2.0 - Gallery::rail_chrome()) / ROW_H).floor() * ROW_H;
     let layers = layers.max(96.0);
+    // Grant the popup its actual placed height BEFORE composing the
+    // live tree: the composer paints exactly the rows placement will
+    // show, so navigation, virtualisation and pointer mapping agree
+    // with rendered geometry by construction. Pass 1 measured the
+    // field; the header never depends on the layers budget, so the
+    // precomputed height is what placement will grant.
+    if g.fonts.is_open() {
+        let full = b::select::popup_height(g.fonts.filtered_len(), ROW_H, g.max_popup_rows(h));
+        if let Some(field) = lay1.nodes.get("fonts-field") {
+            let placed_h = b::select::popup_geom(&field.rect, w, h, full, field.rect.w).3;
+            g.fonts.set_viewport(placed_h);
+        }
+    }
     let mut app = compose_with(g, w, h, layers);
     let layout = layout_of(&app, w, h);
     // Anchor an open popup to its field: overlay geometry that
@@ -359,7 +372,14 @@ pub fn refresh(g: &mut Gallery, w: f32, h: f32) -> (App, hamesh_layout::LayoutOu
             matches: g.fonts.filtered_len(),
             scroll: g.fonts.scroll(),
         };
-        b::select::place_popup(&mut app, &layout, "fonts", &metrics, w, h);
+        if let Some((_, _, _, placed_h)) =
+            b::select::place_popup(&mut app, &layout, "fonts", &metrics, w, h)
+        {
+            // Convergence guard: the precompute reads the same field
+            // rect placement does, so this is a no-op in practice.
+            // The viewport (never the tree) is what must agree here.
+            g.fonts.set_viewport(placed_h);
+        }
     }
     let layout = layout_of(&app, w, h);
     (app, layout)
@@ -398,14 +418,30 @@ fn route(app: &App, id: &str) -> Route {
 /// the row/option identity props, drive the widget. Returns a note.
 pub fn press(g: &mut Gallery, app: &App, scene: &hamesh_scene::Scene, x: f32, y: f32) -> String {
     match hamesh_scene::hit_test(app, scene, x, y) {
-        None => "press hit nothing".to_string(),
+        None => {
+            if g.fonts.is_open() {
+                g.fonts.close();
+                "press hit nothing (popup dismissed)".to_string()
+            } else {
+                "press hit nothing".to_string()
+            }
+        }
         Some(id) => match route(app, &id) {
             Route::LayerRow(row) => {
                 g.focus = 0;
-                if g.layers.select(row) {
+                let note = if g.layers.select(row) {
                     format!("selected layer {row}")
                 } else {
                     format!("layer {row} already selected")
+                };
+                // An open popup never survives a press elsewhere:
+                // the row still gets its click; the popup cancels
+                // without touching the committed value.
+                if g.fonts.is_open() {
+                    g.fonts.close();
+                    format!("{note} (popup dismissed)")
+                } else {
+                    note
                 }
             }
             Route::PickOpt(pick) => {
@@ -432,7 +468,14 @@ pub fn press(g: &mut Gallery, app: &App, scene: &hamesh_scene::Scene, x: f32, y:
                     "picker closed".to_string()
                 }
             }
-            Route::Chrome(hit) => format!("hit {hit} (chrome, no action)"),
+            Route::Chrome(hit) => {
+                if g.fonts.is_open() {
+                    g.fonts.close();
+                    format!("hit {hit} (chrome, popup dismissed)")
+                } else {
+                    format!("hit {hit} (chrome, no action)")
+                }
+            }
         },
     }
 }
@@ -484,6 +527,10 @@ pub fn wheel(
 
 pub fn key(g: &mut Gallery, k: GKey, label_names: &[String]) -> String {
     if matches!(k, GKey::Tab) {
+        // Moving focus dismisses the popup (cancel: the committed
+        // value is preserved). A fresh focus never inherits an open
+        // popup from the other control.
+        g.fonts.close();
         g.focus = (g.focus + 1) % 2;
         g.layers.clear_typeahead();
         return format!(
@@ -543,5 +590,128 @@ pub fn key(g: &mut Gallery, k: GKey, label_names: &[String]) -> String {
             GKey::Escape => format!("picker dismissed: {}", g.fonts.close()),
             GKey::Tab => unreachable!("handled above"),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn frame(
+        g: &mut Gallery,
+        w: f32,
+        h: f32,
+    ) -> (App, hamesh_layout::LayoutOutput, hamesh_scene::Scene) {
+        let (app, layout) = refresh(g, w, h);
+        let scene = hamesh_scene::build(&app, &layout, 1);
+        (app, layout, scene)
+    }
+
+    fn center_of(scene: &hamesh_scene::Scene, id: &str) -> (f32, f32) {
+        let n = scene.nodes.iter().find(|n| n.id == id).unwrap();
+        (n.rect.x + n.rect.w / 2.0, n.rect.y + n.rect.h / 2.0)
+    }
+
+    fn names_of(g: &Gallery) -> Vec<String> {
+        g.layer_rows.iter().map(|r| r.label.clone()).collect()
+    }
+
+    #[test]
+    fn outside_press_dismisses_popup_and_keeps_the_click() {
+        let mut g = Gallery::new();
+        let before = g.fonts.value().unwrap_or("").to_string();
+        g.fonts.open();
+        let (app, _layout, scene) = frame(&mut g, 1440.0, 900.0);
+        let (cx, cy) = center_of(&scene, "layers-row-3");
+        let note = press(&mut g, &app, &scene, cx, cy);
+        assert!(!g.fonts.is_open(), "{note}");
+        assert_eq!(
+            g.layers.selected(),
+            Some(3),
+            "the row still gets its click: {note}"
+        );
+        assert_eq!(
+            g.fonts.value().unwrap_or(""),
+            before,
+            "dismissal preserves the value"
+        );
+        assert!(
+            note.contains("dismissed"),
+            "the note says what happened: {note}"
+        );
+    }
+
+    #[test]
+    fn tab_dismisses_popup_and_moves_focus() {
+        let mut g = Gallery::new();
+        g.focus = 1;
+        g.fonts.open();
+        let names = names_of(&g);
+        let _ = key(&mut g, GKey::Tab, &names);
+        assert!(!g.fonts.is_open());
+        assert_eq!(g.focus, 0);
+        let _ = key(&mut g, GKey::Tab, &names);
+        assert_eq!(g.focus, 1);
+        assert!(!g.fonts.is_open());
+    }
+
+    #[test]
+    fn escape_cancels_without_committing() {
+        let mut g = Gallery::new();
+        let before = g.fonts.value().unwrap_or("").to_string();
+        g.focus = 1;
+        g.fonts.open();
+        let names = names_of(&g);
+        let _ = key(&mut g, GKey::Down, &names);
+        let _ = key(&mut g, GKey::Escape, &names);
+        assert!(!g.fonts.is_open());
+        assert_eq!(g.fonts.value().unwrap_or(""), before);
+    }
+
+    #[test]
+    fn short_viewport_syncs_actual_placed_height() {
+        // End-to-end wiring at a short viewport: the driver grants
+        // the actual placed height before composing, so the painted
+        // window, reveal, paging and pointer mapping all agree with
+        // rendered geometry. (True placement shrink cannot trigger
+        // in this chrome — the popup caps at 5x32px under 620px
+        // while the field sits near the top — so shrink geometry
+        // itself is covered by the blocks placement tests, where the
+        // viewport is directly drivable.)
+        let mut g = Gallery::new();
+        g.focus = 1;
+        g.fonts.open();
+        // Drive the highlight to the bottom, then shorten the viewport.
+        let names = names_of(&g);
+        let _ = key(&mut g, GKey::End, &names);
+        let (app, _layout, scene) = frame(&mut g, 820.0, 300.0);
+        let pop = scene
+            .nodes
+            .iter()
+            .find(|n| n.id == "fonts-popup")
+            .expect("popup");
+        assert!(
+            pop.rect.y + pop.rect.h <= 300.5,
+            "short popup fits: {:?}",
+            pop.rect
+        );
+        let full = g.fonts.filtered_len().min(g.max_popup_rows(300.0)) as f32 * ROW_H;
+        assert!(
+            pop.rect.h <= full + 0.5,
+            "placement grants at most the request: {} <= {full}",
+            pop.rect.h
+        );
+        let hi = g.fonts.highlight().expect("highlight survives the crush");
+        assert!(
+            g.fonts.visible().contains(&hi),
+            "highlight revealed in actual geometry"
+        );
+        // Paging steps by actual rows and the pointer maps through scroll.
+        let _ = key(&mut g, GKey::PageDown, &names);
+        let hi2 = g.fonts.highlight().unwrap();
+        assert!(g.fonts.visible().contains(&hi2));
+        let _ = key(&mut g, GKey::Home, &names);
+        assert!(g.fonts.visible().contains(&g.fonts.highlight().unwrap()));
+        let _ = app;
     }
 }

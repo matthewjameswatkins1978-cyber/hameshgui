@@ -571,12 +571,12 @@ pub fn picker(s: &mut Scope, id: &str, spec: PickerSpec) {
         // Popup: fixed to the smaller of the match count and max_rows,
         // scrolling past that. Same rows, same states as a list.
         let filtered = spec.picker.filtered();
-        let rows_shown = filtered.len().min(spec.max_rows.max(1));
-        let popup_h = (rows_shown.max(1) as f32 * spec.row_h).max(1.0);
-        // Sync the pitch first: the painted rows and the widget's
-        // hit-test pitch must never drift apart.
+        // Sync the pitch: the painted rows and the widget's hit-test
+        // pitch must never drift apart. The viewport is driver-owned:
+        // the driver grants the actual placed height via set_viewport
+        // before composing, so the painted window always matches what
+        // placement will show. This composer never sizes it.
         spec.picker.set_row_h(spec.row_h);
-        spec.picker.set_viewport(popup_h);
         let window = spec.picker.visible();
         let shift = (spec.picker.scroll() - window.start as f32 * spec.row_h).max(0.0);
         // Floating popup: an overlay child takes no space in the
@@ -926,6 +926,8 @@ mod tests {
         assert_eq!(r.props.get("row").unwrap(), "4");
         let mut p = Picker::new(vec!["A".into(), "B".into()]);
         p.open();
+        // Driver contract: the composer paints the granted viewport.
+        p.set_viewport(8.0 * ROW_H);
         let mut app2 = App::new("win");
         {
             let mut root = Scope::root(&mut app2, "win");
@@ -963,6 +965,8 @@ mod tests {
         for c in "in".chars() {
             p.push_char(c);
         }
+        // Driver contract: the composer paints the granted viewport.
+        p.set_viewport(8.0 * ROW_H);
         let mut app = App::new("win");
         {
             let mut root = Scope::root(&mut app, "win");
@@ -1147,5 +1151,52 @@ mod tests {
         );
         let thumb = out.get("l-thumb").unwrap().rect.clone();
         assert_eq!(thumb.h, MIN_THUMB);
+    }
+
+    #[test]
+    fn placement_shrinks_when_neither_side_fits_at_full_height() {
+        // Twenty matches want 256px; a 120px viewport cannot grant
+        // it. Placement takes the roomier side, shrunk, inside.
+        let mut p = Picker::new((0..20).map(|i| format!("Item {i:02}")).collect());
+        p.open();
+        let mut app = App::new("win");
+        {
+            let mut root = Scope::root(&mut app, "win");
+            crate::row(
+                &mut root,
+                "top",
+                crate::LayoutOpts {
+                    h: Some(40.0),
+                    ..Default::default()
+                },
+                |_| {},
+            );
+            picker(&mut root, "pk", PickerSpec::new(&mut p));
+        }
+        let layout = hamesh_layout::compute(&app, 400.0, 120.0);
+        let field = layout.nodes.get("pk-field").expect("field").rect.clone();
+        let metrics = PopupMetrics {
+            row_h: ROW_H,
+            max_rows: 8,
+            matches: p.filtered_len(),
+            scroll: 0.0,
+        };
+        let (x, y, w, h) =
+            place_popup(&mut app, &layout, "pk", &metrics, 400.0, 120.0).expect("placed");
+        assert!(h < 256.0, "cramped popup shrinks: h={h}");
+        assert!(x >= 0.0 && y >= 0.0 && x + w <= 400.0 && y + h <= 120.0 + 0.5);
+        let below = 120.0 - (field.y + field.h);
+        assert!(
+            (h - below.max(field.y)).abs() < 1.0,
+            "takes the roomier side: h={h} field={field:?}"
+        );
+        // The visible rows are exactly what fits the placed height.
+        let rows = (h / ROW_H).floor() as usize;
+        assert!(rows >= 1, "at least one row stays operable");
+        p.set_viewport(h);
+        assert!(
+            p.visible().len() <= rows + 2,
+            "virtualised to the actual height"
+        );
     }
 }

@@ -268,6 +268,138 @@ fn main() {
             "pointer commits exactly the pointed row"
         );
 
+        // 5c. Outside click dismisses the popup; the row still gets
+        // its click and the committed value is preserved.
+        // (The pointer commit above left the popup closed: reopen.)
+        let note = press(&mut g, &app, &scene, fx, fy);
+        assert!(g.fonts.is_open(), "{note}");
+        rev += 1;
+        (app, layout) = refresh(&mut g, w as f32, h as f32);
+        scene = hamesh_scene::build(&app, &layout, rev);
+        let first_visible = (g.layers.scroll() / ROW_H) as usize;
+        let (lx, ly) = center(&scene, &format!("layers-row-{first_visible}")).expect("row visible");
+        let value_before = g.fonts.value().unwrap_or("").to_string();
+        let note = press(&mut g, &app, &scene, lx, ly);
+        assert!(!g.fonts.is_open(), "{note}");
+        assert!(
+            note.contains("dismissed"),
+            "the note says what happened: {note}"
+        );
+        assert_eq!(g.layers.selected(), Some(first_visible), "{note}");
+        assert_eq!(
+            g.fonts.value().unwrap_or(""),
+            value_before,
+            "dismissal preserves the committed value"
+        );
+
+        // 5d. Tab dismisses the popup and moves focus on.
+        rev += 1;
+        (app, layout) = refresh(&mut g, w as f32, h as f32);
+        scene = hamesh_scene::build(&app, &layout, rev);
+        let (fx2, fy2) = center(&scene, "fonts-field").expect("field");
+        let note = press(&mut g, &app, &scene, fx2, fy2);
+        assert!(g.fonts.is_open(), "{note}");
+        assert_eq!(g.focus, 1);
+        // No refresh needed: key() drives widget state only.
+        key(&mut g, GKey::Tab, &label_names);
+        assert!(!g.fonts.is_open(), "tab dismisses the popup");
+        assert_eq!(g.focus, 0, "tab moves focus on");
+        rev += 1;
+        (app, layout) = refresh(&mut g, w as f32, h as f32);
+        scene = hamesh_scene::build(&app, &layout, rev);
+        assert!(
+            scene.nodes.iter().all(|n| n.id != "fonts-popup"),
+            "dismissed popup leaves the tree"
+        );
+        assert_eq!(
+            g.fonts.value().unwrap_or(""),
+            value_before,
+            "tab dismissal preserves the value"
+        );
+
+        // 5e. Escape cancels without committing.
+        key(&mut g, GKey::Tab, &label_names);
+        assert_eq!(g.focus, 1);
+        rev += 1;
+        (app, layout) = refresh(&mut g, w as f32, h as f32);
+        scene = hamesh_scene::build(&app, &layout, rev);
+        let (fx3, fy3) = center(&scene, "fonts-field").expect("field");
+        let note = press(&mut g, &app, &scene, fx3, fy3);
+        assert!(g.fonts.is_open(), "{note}");
+        // No refresh needed: key() drives widget state only.
+        key(&mut g, GKey::Down, &label_names);
+        assert!(
+            g.fonts.highlight().unwrap_or(999) > 0,
+            "highlight moved off the top"
+        );
+        key(&mut g, GKey::Escape, &label_names);
+        assert!(!g.fonts.is_open(), "escape dismisses the popup");
+        rev += 1;
+        (app, layout) = refresh(&mut g, w as f32, h as f32);
+        scene = hamesh_scene::build(&app, &layout, rev);
+        assert!(
+            scene.nodes.iter().all(|n| n.id != "fonts-popup"),
+            "escaped popup leaves the tree"
+        );
+        assert_eq!(
+            g.fonts.value().unwrap_or(""),
+            value_before,
+            "escape preserves the committed value"
+        );
+
+        // 5f. Short viewport: the same presync path runs at a
+        // non-default height and the popup re-anchors on resize.
+        // (True shrink cannot trigger in this chrome — 5x32px max
+        // under 620px with a top-anchored field — so shrink geometry
+        // is covered by the blocks placement tests instead.)
+        rev += 1;
+        (app, layout) = refresh(&mut g, w as f32, h as f32);
+        scene = hamesh_scene::build(&app, &layout, rev);
+        let (fx4, fy4) = center(&scene, "fonts-field").expect("field");
+        let note = press(&mut g, &app, &scene, fx4, fy4);
+        assert!(g.fonts.is_open(), "{note}");
+        key(&mut g, GKey::End, &label_names);
+        rev += 1;
+        // A real resize at every size, never below a viable chrome:
+        // 1440x560 drops the popup budget 8->5 rows, exercising
+        // the sync across a max-rows transition with the highlight
+        // pinned at the bottom.
+        let h2 = (h.saturating_sub(340)).max(480);
+        let (app_c, layout_c) = refresh(&mut g, w as f32, h2 as f32);
+        let scene_c = hamesh_scene::build(&app_c, &layout_c, rev);
+        let pop_c = scene_c
+            .nodes
+            .iter()
+            .find(|n| n.id == "fonts-popup")
+            .expect("popup");
+        assert!(
+            pop_c.rect.x >= 0.0
+                && pop_c.rect.y >= 0.0
+                && pop_c.rect.x + pop_c.rect.w <= w as f32 + 0.5
+                && pop_c.rect.y + pop_c.rect.h <= h2 as f32 + 0.5,
+            "short popup fits: {:?}",
+            pop_c.rect
+        );
+        let hi = g.fonts.highlight().expect("highlight survives the resize");
+        assert!(
+            g.fonts.visible().contains(&hi),
+            "resized highlight revealed in actual geometry"
+        );
+        key(&mut g, GKey::PageDown, &label_names);
+        assert!(
+            g.fonts.visible().contains(&g.fonts.highlight().unwrap()),
+            "resized paging stays visible"
+        );
+        frame = hamesh_render::render(&scene_c);
+        hamesh_render::save_png(&frame, &format!("{out}/gal-{w}x{h2}-5-short-open.png"))
+            .expect("png");
+        let rep_c = hamesh_inspect::visual_report(&scene_c);
+        assert_only_edge_rows_clip(&rep_c, 2, "short open popup");
+        // Leave the popup closed so the final frame matches the
+        // established closed-state evidence.
+        key(&mut g, GKey::Escape, &label_names);
+        assert!(!g.fonts.is_open(), "short popup dismisses cleanly");
+
         // 6. Final frame: the canvas headline is set in the picked font.
         rev += 1;
         (app, layout) = refresh(&mut g, w as f32, h as f32);

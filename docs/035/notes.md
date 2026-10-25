@@ -88,6 +88,24 @@ The installed-font picker lists real system families through
    6.48/AA. New: `hamesh_text::ellipsize` (grapheme-correct) + the
    list width contract (`viewport_w` → trim to remaining chrome,
    including the 16px text inset the measurer adds).
+4b. **Final interaction corrections (reviewed head + 2).**
+   Outside clicks dismiss the popup through the shared intent path
+   (`press` in `hamesh-gallery`, used by the drill and the native
+   window alike): the underlying control still acts, the committed
+   value is preserved, and the tree drops the overlay. Tab moves
+   focus and dismisses; Escape was already a cancel. Verified with
+   real OS input (`selected layer 0 (popup dismissed)` in the
+   native trace) and drill steps 5c-5e.
+   The popup now navigates by actual placed geometry: `refresh`
+   precomputes the placed height from the pass-1 field rect and
+   grants it via `set_viewport` before composing, so the painted
+   window, reveal, paging and pointer mapping agree by
+   construction; the composer no longer sizes viewports. True
+   placement shrink cannot trigger in this chrome (160px max popup
+   under 620px with a top-anchored field), so shrink/flip geometry
+   is covered by blocks unit tests with directly drivable
+   viewports, while gallery tests and drill step 5f prove the
+   presync wiring end to end (1440x560 drops 8->5 rows).
 4b. **Driver extracted, no behavior change.** The drill driver now
    lives in its own `hamesh-gallery` crate (same intents a native loop
    forwards: pointer, wheel, keys), so a real window can drive the
