@@ -924,6 +924,22 @@ dependencies = [
 ]
 
 [[package]]
+name = "hamesh-035-lab"
+version = "0.2.0"
+dependencies = [
+ "hamesh-blocks",
+ "hamesh-core",
+ "hamesh-inspect",
+ "hamesh-layout",
+ "hamesh-render",
+ "hamesh-scene",
+ "hamesh-text",
+ "hamesh-theme",
+ "hamesh-widgets",
+ "serde_json",
+]
+
+[[package]]
 name = "hamesh-automation"
 version = "0.2.0"
 dependencies = [

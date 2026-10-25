@@ -130,16 +130,17 @@ fn row_icon_token(look: RowLook) -> &'static str {
 /// One option row. Shared by lists and picker popups so the two
 /// controls can never drift apart visually.
 ///
-/// `row_prop` is ("list", index) or ("picker", filtered-index): the
-/// identity the driver reads back after a hit-test.
+/// `list_id` + `row` are the identity the driver reads back after
+/// a hit-test (which control, which row). Picker popups build
+/// their own rows with `picker` + `pick` the same way.
 fn option_row(
     s: &mut Scope,
     id: String,
-    label: &str,
-    icon_name: Option<&str>,
+    row: &ListRow,
     row_h: f32,
     look: RowLook,
-    row_prop: (&str, usize),
+    list_id: &str,
+    row_idx: usize,
 ) {
     let surface = row_surface(look);
     let mut r = hamesh_core::Component::new(&id, Role::ListItem, &id);
@@ -151,11 +152,13 @@ fn option_row(
         .insert("gap".to_string(), hamesh_theme::space::S.to_string());
     r.props.insert("h".to_string(), row_h.to_string());
     r.props.insert("surface".to_string(), surface.to_string());
-    r.props
-        .insert(row_prop.0.to_string(), row_prop.1.to_string());
+    // Identity the driver reads back after a hit-test: which
+    // control, which row. (The Eye reads the same pair.)
+    r.props.insert("list".to_string(), list_id.to_string());
+    r.props.insert("row".to_string(), row_idx.to_string());
     let (size, lh) = hamesh_theme::type_ramp::LABEL;
     s.branch(r, |t| {
-        if let Some(name) = icon_name {
+        if let Some(name) = row.icon.as_deref() {
             icon(
                 t,
                 &format!("{id}-icon"),
@@ -168,7 +171,7 @@ fn option_row(
         t.leaf(super::text_node(
             "ListLabel",
             &format!("{id}-label"),
-            label,
+            &row.label,
             &TextOpts::sized(size, lh, row_text(look)),
         ));
     });
@@ -178,6 +181,10 @@ fn option_row(
 /// window plus a proportional scrollbar — never the whole model.
 pub fn list(s: &mut Scope, id: &str, spec: ListSpec) {
     let row_h = spec.row_h.max(1.0);
+    // The composer owns widget sync: count here, viewport below.
+    // (A struct literal may not have gone through ListSpec::new,
+    // so sync defensively on every compose.)
+    spec.view.set_count(spec.rows.len());
     spec.view.set_viewport(spec.viewport_h);
     let count = spec.rows.len();
     let scroll = spec.view.scroll();
@@ -247,15 +254,7 @@ pub fn list(s: &mut Scope, id: &str, spec: ListSpec) {
                     spec.view.selected() == Some(i),
                     spec.view.hover() == Some(i),
                 );
-                option_row(
-                    v,
-                    format!("{id}-row-{i}"),
-                    &row.label,
-                    row.icon.as_deref(),
-                    row_h,
-                    look,
-                    ("list", i),
-                );
+                option_row(v, format!("{id}-row-{i}"), row, row_h, look, id, i);
             }
         });
         // Scrollbar: a track with a proportional thumb. Omitted when
@@ -335,6 +334,14 @@ impl<'a> PickerSpec<'a> {
 /// list in flow beneath it. The popup flows (never floats) so opening
 /// it needs no second layout pass and no consumer geometry math — the
 /// tradeoff is content below shifts down while it is open.
+/// Popup budget shared by composer and consumer: the popup shows the
+/// smaller of the match count and `max_rows`, at least one row so an
+/// empty result still explains itself. Both sides use this, so the
+/// height the driver budgets is the height the composer paints.
+pub fn popup_height(matches: usize, row_h: f32, max_rows: usize) -> f32 {
+    (matches.min(max_rows.max(1)).max(1) as f32 * row_h.max(1.0)).max(1.0)
+}
+
 pub fn picker(s: &mut Scope, id: &str, spec: PickerSpec) {
     let open = spec.picker.is_open();
     let focused = spec.picker.focused();
@@ -477,6 +484,7 @@ pub fn picker(s: &mut Scope, id: &str, spec: PickerSpec) {
                 r.props.insert("h".to_string(), spec.row_h.to_string());
                 r.props
                     .insert("surface".to_string(), row_surface(look).to_string());
+                r.props.insert("picker".to_string(), id.to_string());
                 r.props.insert("pick".to_string(), j.to_string());
                 let label = spec.picker.items().get(item).cloned().unwrap_or_default();
                 p.branch(r, |w| {
@@ -627,6 +635,37 @@ mod tests {
             "no scrollbar without overflow"
         );
         assert!(app.get("l-thumb").is_none());
+    }
+
+    #[test]
+    fn popup_budget_is_shared_and_honest() {
+        assert_eq!(popup_height(0, 32.0, 8), 32.0);
+        assert_eq!(popup_height(3, 32.0, 8), 96.0);
+        assert_eq!(popup_height(20, 32.0, 8), 256.0);
+        assert_eq!(popup_height(20, 32.0, 5), 160.0);
+    }
+
+    #[test]
+    fn rows_carry_identity_props_for_hit_test_mapping() {
+        let rows = many(10);
+        let mut view = ListView::new(ROW_H);
+        view.set_viewport(320.0);
+        view.select(4);
+        let _ = app_with_list(&rows, &mut view, 320.0);
+        let app = app_with_list(&rows, &mut view, 320.0);
+        let r = app.get("l-row-4").unwrap();
+        assert_eq!(r.props.get("list").unwrap(), "l");
+        assert_eq!(r.props.get("row").unwrap(), "4");
+        let mut p = Picker::new(vec!["A".into(), "B".into()]);
+        p.open();
+        let mut app2 = App::new("win");
+        {
+            let mut root = Scope::root(&mut app2, "win");
+            picker(&mut root, "pk", PickerSpec::new(&mut p));
+        }
+        let o = app2.get("pk-opt-1").unwrap();
+        assert_eq!(o.props.get("picker").unwrap(), "pk");
+        assert_eq!(o.props.get("pick").unwrap(), "1");
     }
 
     #[test]

@@ -1,0 +1,30 @@
+{
+  "elapsed_ms": 1646.0792,
+  "final_report": {
+    "clipped_content": [],
+    "off_viewport": [],
+    "overlaps": [],
+    "viewport_h": 720.0,
+    "viewport_w": 1100.0
+  },
+  "focus": 1,
+  "font": "Courier New",
+  "probes": [
+    {
+      "asked_about": "layers-row-9",
+      "hit": "layers-row-9-label",
+      "topmost_candidate": "layers-row-9-label"
+    },
+    {
+      "asked_about": "fonts-field",
+      "hit": "fonts-value",
+      "topmost_candidate": "fonts-value"
+    }
+  ],
+  "scroll": 288.0,
+  "selected": 15,
+  "size": [
+    1100,
+    720
+  ]
+}
