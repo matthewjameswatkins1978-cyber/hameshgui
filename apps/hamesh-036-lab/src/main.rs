@@ -99,7 +99,6 @@ fn compose(width: f32, height: f32) -> (App, hamesh_layout::LayoutOutput) {
                 button_row(s, "primary", b::ButtonVariant::Primary, "Primary", "Create");
                 button_row(s, "outline", b::ButtonVariant::Outline, "Outline", "Cancel");
                 button_row(s, "ghost", b::ButtonVariant::Ghost, "Ghost", "More");
-                b::caption(s, "sec-sel", "SELECTION");
                 b::row(
                     s,
                     "mid",
@@ -311,4 +310,79 @@ fn main() {
         .expect("write json");
     }
     println!("036 appearance ok");
+    run_tasks(&out);
+}
+
+fn center(scene: &hamesh_scene::Scene, id: &str) -> (f32, f32) {
+    let n = scene.nodes.iter().find(|n| n.id == id).unwrap();
+    (n.rect.x + n.rect.w / 2.0, n.rect.y + n.rect.h / 2.0)
+}
+
+/// The second composition: a functional task queue driven entirely by
+/// shared routing (`Hit::of`) and theme-contract composers. Exercises
+/// select, filter, toggle-done and focus traversal at every size.
+fn run_tasks(out: &str) {
+    for (w, h) in [(1440u32, 900u32), (1100, 720), (820, 560)] {
+        let mut t = hamesh_tasks::Tasks::new();
+        let (app, layout) = hamesh_tasks::refresh(&mut t, w as f32, h as f32);
+        let scene = hamesh_scene::build(&app, &layout, 1);
+        // Select a row, then toggle it done through the action button.
+        let (cx, cy) = center(&scene, "tasks-row-2");
+        let note = hamesh_tasks::press(&mut t, &app, &scene, cx, cy);
+        assert!(note.contains("selected task row 2"), "{note}");
+        let (app2, layout2) = hamesh_tasks::refresh(&mut t, w as f32, h as f32);
+        let scene2 = hamesh_scene::build(&app2, &layout2, 2);
+        let (bx, by) = center(&scene2, "btn-toggle");
+        let note = hamesh_tasks::press(&mut t, &app2, &scene2, bx, by);
+        assert!(note.contains("done"), "{note}");
+        assert_eq!(t.done_count(), 1);
+        // Filter narrows the queue live; the committed count survives.
+        let _ = hamesh_tasks::key(&mut t, hamesh_tasks::TKey::Tab);
+        let _ = hamesh_tasks::key(&mut t, hamesh_tasks::TKey::Tab);
+        assert_eq!(t.focus, 1);
+        let _ = hamesh_tasks::key(&mut t, hamesh_tasks::TKey::Char('o'));
+        assert!(t.filter.is_open());
+        assert!(t.shown().len() < 8 && !t.shown().is_empty());
+        let (app3, layout3) = hamesh_tasks::refresh(&mut t, w as f32, h as f32);
+        let scene3 = hamesh_scene::build(&app3, &layout3, 3);
+        let frame = hamesh_render::render(&scene3);
+        hamesh_render::save_png(&frame, &format!("{out}/task-{w}x{h}.png")).expect("png");
+        let rep = hamesh_inspect::visual_report(&scene3);
+        assert!(
+            rep.clipped_content.is_empty(),
+            "{w}x{h}: {:?}",
+            rep.clipped_content
+        );
+        assert!(
+            rep.off_viewport.is_empty(),
+            "{w}x{h}: {:?}",
+            rep.off_viewport
+        );
+        // The open filter popup floats above the queue by design (same
+        // contract as the 035 gallery): only same-layer overlaps count.
+        let bad: Vec<_> = rep
+            .overlaps
+            .iter()
+            .filter(|o| !(o.over.starts_with("filter-popup") || o.over.starts_with("filter-opt-")))
+            .collect();
+        assert!(bad.is_empty(), "{w}x{h}: {bad:?}");
+        // Done-ness is painted: the selected task's badge follows it.
+        let sel = t.selected_task();
+        let done_here = sel
+            .and_then(|i| t.tasks.get(i))
+            .map(|x| x.done)
+            .unwrap_or(false);
+        let badge = app3.get("sel-status");
+        if w >= 1000 {
+            let badge = badge.expect("detail rail at desktop widths");
+            assert_eq!(
+                badge.props.get("text").map(|s| s.as_str()),
+                Some(if done_here { "Done" } else { "Open" })
+            );
+        } else {
+            assert!(badge.is_none(), "rail drops on narrow windows");
+        }
+        println!("{w}x{h}: tasks Eye clean, queue functional");
+    }
+    println!("036 tasks ok");
 }

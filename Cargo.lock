@@ -950,6 +950,7 @@ dependencies = [
  "hamesh-layout",
  "hamesh-render",
  "hamesh-scene",
+ "hamesh-tasks",
  "hamesh-text",
  "hamesh-theme",
  "hamesh-widgets",
@@ -1134,6 +1135,20 @@ dependencies = [
  "hamesh-text",
  "hamesh-theme",
  "serde",
+]
+
+[[package]]
+name = "hamesh-tasks"
+version = "0.2.0"
+dependencies = [
+ "hamesh-blocks",
+ "hamesh-core",
+ "hamesh-layout",
+ "hamesh-scene",
+ "hamesh-text",
+ "hamesh-theme",
+ "hamesh-widgets",
+ "serde_json",
 ]
 
 [[package]]

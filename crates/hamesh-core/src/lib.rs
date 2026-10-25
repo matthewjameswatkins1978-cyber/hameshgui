@@ -111,6 +111,13 @@ impl App {
     pub fn add(&mut self, parent: &str, mut comp: Component) {
         comp.parent = Some(ComponentId::new(parent));
         let id = comp.id.0.clone();
+        // Overwriting an id silently can parent-cycle the tree (a node
+        // re-added under its own id becomes its own ancestor) and hang
+        // every parent climb. Fail fast in debug; release keeps legacy.
+        debug_assert!(
+            !self.components.contains_key(&id),
+            "duplicate component id `{id}`"
+        );
         if let Some(p) = self.components.get_mut(parent) {
             if !p.children.iter().any(|c| c.0 == id) {
                 p.children.push(ComponentId::new(&id));
