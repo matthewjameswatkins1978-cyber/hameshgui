@@ -923,11 +923,13 @@ mod tests {
     }
 
     #[test]
-    #[test]
     fn installed_families_cover_bundled_fonts_without_duplicates() {
         register_fonts_from_dir(&bundled_fonts_dir());
         let first = installed_family_names();
-        assert!(first.contains(&"Newsreader".to_string()), "bundled voice listed");
+        assert!(
+            first.contains(&"Newsreader".to_string()),
+            "bundled voice listed"
+        );
         // Idempotent: a second call neither duplicates nor loses.
         assert_eq!(first, installed_family_names());
         // The list agrees with lookup: no ghost entries sampled.

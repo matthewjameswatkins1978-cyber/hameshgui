@@ -844,8 +844,14 @@ mod tests {
         // 40px rows and scroll_y=50 shows rows shifted up by 50 — the
         // container keeps its own rect.
         let mut app = App::new("win");
-        app.get_mut("win").unwrap().props.insert("pad".to_string(), "0".to_string());
-        app.get_mut("win").unwrap().props.insert("gap".to_string(), "0".to_string());
+        app.get_mut("win")
+            .unwrap()
+            .props
+            .insert("pad".to_string(), "0".to_string());
+        app.get_mut("win")
+            .unwrap()
+            .props
+            .insert("gap".to_string(), "0".to_string());
         app.add(
             "win",
             Component::new("view", Role::Panel, "view")
@@ -879,8 +885,14 @@ mod tests {
         // Nested scrolled viewports accumulate: outer hides 20px,
         // inner hides 10px, the leaf shifts by 30.
         let mut app = App::new("win");
-        app.get_mut("win").unwrap().props.insert("pad".to_string(), "0".to_string());
-        app.get_mut("win").unwrap().props.insert("gap".to_string(), "0".to_string());
+        app.get_mut("win")
+            .unwrap()
+            .props
+            .insert("pad".to_string(), "0".to_string());
+        app.get_mut("win")
+            .unwrap()
+            .props
+            .insert("gap".to_string(), "0".to_string());
         app.add(
             "win",
             Component::new("outer", Role::Panel, "outer")
@@ -912,8 +924,14 @@ mod tests {
     #[test]
     fn scroll_y_without_a_prop_is_zero_and_negative_clamps() {
         let mut app = App::new("win");
-        app.get_mut("win").unwrap().props.insert("pad".to_string(), "0".to_string());
-        app.get_mut("win").unwrap().props.insert("gap".to_string(), "0".to_string());
+        app.get_mut("win")
+            .unwrap()
+            .props
+            .insert("pad".to_string(), "0".to_string());
+        app.get_mut("win")
+            .unwrap()
+            .props
+            .insert("gap".to_string(), "0".to_string());
         app.add(
             "win",
             Component::new("view", Role::Panel, "view")

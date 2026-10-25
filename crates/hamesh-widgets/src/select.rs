@@ -733,7 +733,11 @@ mod tests {
         assert!(l.typeahead('i', &|i| n[i].clone()));
         assert_eq!(l.selected(), Some(3), "first 'i' match");
         assert!(l.typeahead('n', &|i| n[i].clone()));
-        assert_eq!(l.selected(), Some(4), "'in' moves to the next match after the current row");
+        assert_eq!(
+            l.selected(),
+            Some(4),
+            "'in' moves to the next match after the current row"
+        );
         // 'x' kills the prefix and matches nothing on its own:
         // selection stays where the 'in' search left it.
         assert!(!l.typeahead('x', &|i| n[i].clone()));
@@ -746,10 +750,17 @@ mod tests {
         let n = typeahead_names();
         assert!(l.typeahead('A', &|i| n[i].clone()));
         assert_eq!(l.selected(), Some(0));
-        assert!(!l.typeahead('\u{8}', &|i| n[i].clone()), "backspace is not a typeahead char");
+        assert!(
+            !l.typeahead('\u{8}', &|i| n[i].clone()),
+            "backspace is not a typeahead char"
+        );
         l.clear_typeahead();
         assert!(l.typeahead('a', &|i| n[i].clone()));
-        assert_eq!(l.selected(), Some(1), "fresh buffer finds the next 'a' after Alpha");
+        assert_eq!(
+            l.selected(),
+            Some(1),
+            "fresh buffer finds the next 'a' after Alpha"
+        );
     }
 
     fn picker() -> Picker {
@@ -768,7 +779,11 @@ mod tests {
         p.set_selected(Some(2));
         p.open();
         assert!(p.is_open());
-        assert_eq!(p.filtered()[p.highlight().unwrap()], 2, "highlight follows value");
+        assert_eq!(
+            p.filtered()[p.highlight().unwrap()],
+            2,
+            "highlight follows value"
+        );
     }
 
     #[test]
@@ -850,7 +865,10 @@ mod tests {
         p.nav(Nav::End);
         assert_eq!(p.highlight(), Some(499));
         let v = p.visible();
-        assert!(v.contains(&499), "highlight must be scrolled into view: {v:?}");
+        assert!(
+            v.contains(&499),
+            "highlight must be scrolled into view: {v:?}"
+        );
         assert!(v.len() <= 12, "popup stays virtualised, got {}", v.len());
     }
 
