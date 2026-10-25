@@ -91,7 +91,14 @@ The installed-font picker lists real system families through
 4b. **Driver extracted, no behavior change.** The drill driver now
    lives in its own `hamesh-gallery` crate (same intents a native loop
    forwards: pointer, wheel, keys), so a real window can drive the
-   identical code paths. The lab binary is the drill only. All three
+   identical code paths. The lab binary is the drill only, and the
+   `--gallery` window mode drives them through a real winit loop.
+   Verified with genuine OS input (SendInput, Eye-aimed at map rects):
+   click selected a layer, Tab moved focus, typed text filtered the
+   popup, a scancode Down moved the highlight (VK-only arrows arrive
+   as Unidentified), Enter committed the second match, F12 dumped the
+   Eye map. `gal-native-800x600.png` shows the payoff in a real window.
+   All three
    sizes still report zero Eye exceptions.
 4. **Narrow-row collision fixed with evidence.** The 820px rail showed
    option text painting into the scrollbar (Eye: overlap). Rows now
