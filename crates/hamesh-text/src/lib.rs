@@ -142,6 +142,69 @@ pub fn font_family_available(family: &str) -> bool {
     FONT_CX.with(|fcx| fcx.borrow_mut().collection.family_id(family).is_some())
 }
 
+/// All known family names, sorted and de-duplicated: bundled
+/// faces, profile faces and installed system fonts. Loads system
+/// fonts on first call for the calling thread (idempotent; each
+/// thread keeps its own shaping collection) and bumps the font
+/// generation when the set grows, like `register_fonts_from_dir`.
+/// Powers the installed-font picker: prefer this over hand-rolled
+/// directory scans or a "next available font" fallback.
+pub fn installed_family_names() -> Vec<String> {
+    FONT_CX.with(|fcx| {
+        let mut fcx = fcx.borrow_mut();
+        let before = fcx.collection.family_names().count();
+        fcx.collection.load_system_fonts();
+        if fcx.collection.family_names().count() != before {
+            FONT_GEN.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        }
+        let mut names: Vec<String> = fcx
+            .collection
+            .family_names()
+            .map(|s| s.to_string())
+            .collect();
+        names.sort();
+        names.dedup();
+        names
+    })
+}
+
+/// Fit a single line into `max_advance` px, appending "…" when trimmed.
+///
+/// Grapheme-correct: the cut never splits a ZWJ sequence, skin tone or
+/// flag (decision 017 travels with text wherever it goes).
+/// Binary-searches the longest fitting prefix; returns the original
+/// when it already fits, bare "…" when nothing else does, and empty
+/// when not even the ellipsis fits. Trailing spaces are trimmed
+/// before the ellipsis so rows do not end on a gap.
+pub fn ellipsize(text: &str, max_advance: f32, font_size: f32, spec: &FontSpec) -> String {
+    use unicode_segmentation::UnicodeSegmentation;
+    if max_advance <= 0.0 {
+        return String::new();
+    }
+    if TextLayout::new_varied(text, f32::INFINITY, font_size, None, spec).width() <= max_advance {
+        return text.to_string();
+    }
+    let ell = "…";
+    let ell_w = TextLayout::new_varied(ell, f32::INFINITY, font_size, None, spec).width();
+    if ell_w > max_advance {
+        return String::new();
+    }
+    let gs: Vec<&str> = text.graphemes(true).collect();
+    let (mut lo, mut hi) = (0usize, gs.len());
+    while lo < hi {
+        let mid = (lo + hi).div_ceil(2);
+        let cand: String = gs[..mid].concat();
+        let w = TextLayout::new_varied(&cand, f32::INFINITY, font_size, None, spec).width();
+        if w + ell_w <= max_advance {
+            lo = mid;
+        } else {
+            hi = mid - 1;
+        }
+    }
+    let prefix: String = gs[..lo].concat();
+    format!("{}{}", prefix.trim_end_matches(' '), ell)
+}
+
 /// Owned parley layout: safe to hand to CPU (swash) and GPU (vello)
 /// consumers. The `Layout` owns its font data (Arc-backed), so no
 /// `FontContext` needs to outlive it — verified by the compiler.
@@ -894,6 +957,50 @@ mod tests {
         assert!(empty.style.is_none() && empty.tracking == 0.0);
         // Fingerprint distinguishes shaping configurations.
         assert_ne!(s.fingerprint(), empty.fingerprint());
+    }
+
+    #[test]
+    fn ellipsis_trims_grapheme_correctly() {
+        let spec = FontSpec::parse(None, None, None, None);
+        // Fits: untouched.
+        assert_eq!(ellipsize("Hi", 1000.0, 16.0, &spec), "Hi");
+        // Trimmed: shorter, ends with the ellipsis.
+        let long = "Outdated logo";
+        let cut = ellipsize(long, 40.0, 16.0, &spec);
+        assert!(cut.ends_with("…") && cut.len() < long.len(), "{cut}");
+        // Nothing fits, not even the ellipsis.
+        assert_eq!(ellipsize(long, 0.0, 16.0, &spec), "");
+        // ZWJ family: never split in half.
+        let fam = "\u{1F468}\u{200D}\u{1F469}\u{200D}\u{1F467}tail-of-text-here";
+        let cut = ellipsize(fam, 60.0, 16.0, &spec);
+        use unicode_segmentation::UnicodeSegmentation;
+        assert!(cut.ends_with("…"));
+        let body = cut.trim_end_matches("…");
+        assert!(
+            body.is_empty() || fam.starts_with(body) && body.graphemes(true).count() >= 1,
+            "no half-grapheme: {cut}"
+        );
+        assert!(
+            !body.contains('\u{200D}')
+                || body.contains("\u{1F468}\u{200D}\u{1F469}\u{200D}\u{1F467}"),
+            "joiner only inside a whole family"
+        );
+    }
+
+    #[test]
+    fn installed_families_cover_bundled_fonts_without_duplicates() {
+        register_fonts_from_dir(&bundled_fonts_dir());
+        let first = installed_family_names();
+        assert!(
+            first.contains(&"Newsreader".to_string()),
+            "bundled voice listed"
+        );
+        // Idempotent: a second call neither duplicates nor loses.
+        assert_eq!(first, installed_family_names());
+        // The list agrees with lookup: no ghost entries sampled.
+        for f in first.iter().take(50) {
+            assert!(font_family_available(f), "listed family must resolve: {f}");
+        }
     }
 
     #[test]

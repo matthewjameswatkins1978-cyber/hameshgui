@@ -1,0 +1,994 @@
+{
+  "app_revision": 58,
+  "scene_revision": 21,
+  "viewport_w": 800.0,
+  "viewport_h": 600.0,
+  "nodes": [
+    {
+      "id": "gallery",
+      "role": "Window",
+      "name": "root",
+      "parent": null,
+      "rect": {
+        "x": 0.0,
+        "y": 0.0,
+        "w": 800.0,
+        "h": 600.0
+      },
+      "visible": true,
+      "clipped": false,
+      "overflow": false,
+      "enabled": true,
+      "z": 0
+    },
+    {
+      "id": "header",
+      "role": "Panel",
+      "name": "header",
+      "parent": "gallery",
+      "rect": {
+        "x": 12.0,
+        "y": 12.0,
+        "w": 776.0,
+        "h": 60.0
+      },
+      "visible": true,
+      "clipped": false,
+      "overflow": false,
+      "enabled": true,
+      "z": 1
+    },
+    {
+      "id": "body",
+      "role": "Panel",
+      "name": "body",
+      "parent": "gallery",
+      "rect": {
+        "x": 12.0,
+        "y": 80.0,
+        "w": 776.0,
+        "h": 472.0
+      },
+      "visible": true,
+      "clipped": false,
+      "overflow": false,
+      "enabled": true,
+      "z": 1
+    },
+    {
+      "id": "footer",
+      "role": "Panel",
+      "name": "footer",
+      "parent": "gallery",
+      "rect": {
+        "x": 12.0,
+        "y": 560.0,
+        "w": 776.0,
+        "h": 28.0
+      },
+      "visible": true,
+      "clipped": false,
+      "overflow": false,
+      "enabled": true,
+      "z": 1
+    },
+    {
+      "id": "app-title",
+      "role": "Text",
+      "name": "app-title",
+      "parent": "header",
+      "rect": {
+        "x": 24.0,
+        "y": 24.0,
+        "w": 105.0,
+        "h": 36.0
+      },
+      "visible": true,
+      "clipped": false,
+      "overflow": false,
+      "enabled": true,
+      "z": 2
+    },
+    {
+      "id": "header-space",
+      "role": "Panel",
+      "name": "spacer",
+      "parent": "header",
+      "rect": {
+        "x": 137.0,
+        "y": 24.0,
+        "w": 391.0,
+        "h": 36.0
+      },
+      "visible": true,
+      "clipped": false,
+      "overflow": false,
+      "enabled": true,
+      "z": 2
+    },
+    {
+      "id": "picker-col",
+      "role": "Panel",
+      "name": "picker-col",
+      "parent": "header",
+      "rect": {
+        "x": 536.0,
+        "y": 24.0,
+        "w": 240.0,
+        "h": 36.0
+      },
+      "visible": true,
+      "clipped": false,
+      "overflow": false,
+      "enabled": true,
+      "z": 2
+    },
+    {
+      "id": "rail",
+      "role": "Panel",
+      "name": "rail",
+      "parent": "body",
+      "rect": {
+        "x": 24.0,
+        "y": 92.0,
+        "w": 168.0,
+        "h": 448.0
+      },
+      "visible": true,
+      "clipped": false,
+      "overflow": false,
+      "enabled": true,
+      "z": 2
+    },
+    {
+      "id": "canvas",
+      "role": "Panel",
+      "name": "canvas",
+      "parent": "body",
+      "rect": {
+        "x": 204.0,
+        "y": 92.0,
+        "w": 572.0,
+        "h": 448.0
+      },
+      "visible": true,
+      "clipped": false,
+      "overflow": false,
+      "enabled": true,
+      "z": 2
+    },
+    {
+      "id": "foot-status",
+      "role": "Text",
+      "name": "foot-status",
+      "parent": "footer",
+      "rect": {
+        "x": 20.0,
+        "y": 568.0,
+        "w": 140.0,
+        "h": 12.0
+      },
+      "visible": true,
+      "clipped": false,
+      "overflow": false,
+      "enabled": true,
+      "z": 2
+    },
+    {
+      "id": "foot-space",
+      "role": "Panel",
+      "name": "spacer",
+      "parent": "footer",
+      "rect": {
+        "x": 168.0,
+        "y": 568.0,
+        "w": 540.0,
+        "h": 24.0
+      },
+      "visible": true,
+      "clipped": true,
+      "overflow": true,
+      "enabled": true,
+      "z": 2
+    },
+    {
+      "id": "foot-size",
+      "role": "Text",
+      "name": "foot-size",
+      "parent": "footer",
+      "rect": {
+        "x": 716.0,
+        "y": 568.0,
+        "w": 64.0,
+        "h": 12.0
+      },
+      "visible": true,
+      "clipped": false,
+      "overflow": false,
+      "enabled": true,
+      "z": 2
+    },
+    {
+      "id": "fonts",
+      "role": "List",
+      "name": "fonts",
+      "parent": "picker-col",
+      "rect": {
+        "x": 536.0,
+        "y": 24.0,
+        "w": 240.0,
+        "h": 36.0
+      },
+      "visible": true,
+      "clipped": false,
+      "overflow": false,
+      "enabled": true,
+      "z": 3
+    },
+    {
+      "id": "rail-title",
+      "role": "Text",
+      "name": "rail-title",
+      "parent": "rail",
+      "rect": {
+        "x": 36.0,
+        "y": 104.0,
+        "w": 144.0,
+        "h": 16.0
+      },
+      "visible": true,
+      "clipped": false,
+      "overflow": false,
+      "enabled": true,
+      "z": 3
+    },
+    {
+      "id": "layers",
+      "role": "List",
+      "name": "layers",
+      "parent": "rail",
+      "rect": {
+        "x": 36.0,
+        "y": 126.0,
+        "w": 144.0,
+        "h": 380.0
+      },
+      "visible": true,
+      "clipped": false,
+      "overflow": false,
+      "enabled": true,
+      "z": 3
+    },
+    {
+      "id": "rail-foot",
+      "role": "Text",
+      "name": "rail-foot",
+      "parent": "rail",
+      "rect": {
+        "x": 36.0,
+        "y": 512.0,
+        "w": 144.0,
+        "h": 16.0
+      },
+      "visible": true,
+      "clipped": false,
+      "overflow": false,
+      "enabled": true,
+      "z": 3
+    },
+    {
+      "id": "poster-kicker",
+      "role": "Text",
+      "name": "poster-kicker",
+      "parent": "canvas",
+      "rect": {
+        "x": 220.0,
+        "y": 108.0,
+        "w": 540.0,
+        "h": 24.0
+      },
+      "visible": true,
+      "clipped": false,
+      "overflow": false,
+      "enabled": true,
+      "z": 3
+    },
+    {
+      "id": "poster-headline",
+      "role": "Text",
+      "name": "headline",
+      "parent": "canvas",
+      "rect": {
+        "x": 220.0,
+        "y": 140.0,
+        "w": 540.0,
+        "h": 47.0
+      },
+      "visible": true,
+      "clipped": false,
+      "overflow": false,
+      "enabled": true,
+      "z": 3
+    },
+    {
+      "id": "poster-sub",
+      "role": "Text",
+      "name": "poster-sub",
+      "parent": "canvas",
+      "rect": {
+        "x": 220.0,
+        "y": 195.0,
+        "w": 540.0,
+        "h": 21.0
+      },
+      "visible": true,
+      "clipped": false,
+      "overflow": false,
+      "enabled": true,
+      "z": 3
+    },
+    {
+      "id": "fonts-field",
+      "role": "Panel",
+      "name": "field",
+      "parent": "fonts",
+      "rect": {
+        "x": 536.0,
+        "y": 24.0,
+        "w": 240.0,
+        "h": 36.0
+      },
+      "visible": true,
+      "clipped": false,
+      "overflow": false,
+      "enabled": true,
+      "z": 4
+    },
+    {
+      "id": "layers-view",
+      "role": "Panel",
+      "name": "viewport",
+      "parent": "layers",
+      "rect": {
+        "x": 40.0,
+        "y": 130.0,
+        "w": 118.0,
+        "h": 352.0
+      },
+      "visible": true,
+      "clipped": false,
+      "overflow": false,
+      "enabled": true,
+      "z": 4
+    },
+    {
+      "id": "layers-scroll",
+      "role": "Panel",
+      "name": "scrollbar",
+      "parent": "layers",
+      "rect": {
+        "x": 166.0,
+        "y": 130.0,
+        "w": 10.0,
+        "h": 352.0
+      },
+      "visible": true,
+      "clipped": false,
+      "overflow": false,
+      "enabled": true,
+      "z": 4
+    },
+    {
+      "id": "fonts-value",
+      "role": "Text",
+      "name": "fonts-value",
+      "parent": "fonts-field",
+      "rect": {
+        "x": 544.0,
+        "y": 32.0,
+        "w": 108.0,
+        "h": 20.0
+      },
+      "visible": true,
+      "clipped": false,
+      "overflow": false,
+      "enabled": true,
+      "z": 5
+    },
+    {
+      "id": "fonts-field-space",
+      "role": "Panel",
+      "name": "spacer",
+      "parent": "fonts-field",
+      "rect": {
+        "x": 660.0,
+        "y": 32.0,
+        "w": 82.0,
+        "h": 24.0
+      },
+      "visible": true,
+      "clipped": false,
+      "overflow": false,
+      "enabled": true,
+      "z": 5
+    },
+    {
+      "id": "fonts-chevron",
+      "role": "Panel",
+      "name": "fonts-chevron",
+      "parent": "fonts-field",
+      "rect": {
+        "x": 750.0,
+        "y": 32.0,
+        "w": 18.0,
+        "h": 18.0
+      },
+      "visible": true,
+      "clipped": false,
+      "overflow": false,
+      "enabled": true,
+      "z": 5
+    },
+    {
+      "id": "layers-row-0",
+      "role": "ListItem",
+      "name": "layers-row-0",
+      "parent": "layers-view",
+      "rect": {
+        "x": 40.0,
+        "y": 130.0,
+        "w": 118.0,
+        "h": 32.0
+      },
+      "visible": true,
+      "clipped": false,
+      "overflow": false,
+      "enabled": true,
+      "z": 5
+    },
+    {
+      "id": "layers-row-1",
+      "role": "ListItem",
+      "name": "layers-row-1",
+      "parent": "layers-view",
+      "rect": {
+        "x": 40.0,
+        "y": 162.0,
+        "w": 118.0,
+        "h": 32.0
+      },
+      "visible": true,
+      "clipped": false,
+      "overflow": false,
+      "enabled": true,
+      "z": 5
+    },
+    {
+      "id": "layers-row-2",
+      "role": "ListItem",
+      "name": "layers-row-2",
+      "parent": "layers-view",
+      "rect": {
+        "x": 40.0,
+        "y": 194.0,
+        "w": 118.0,
+        "h": 32.0
+      },
+      "visible": true,
+      "clipped": false,
+      "overflow": false,
+      "enabled": true,
+      "z": 5
+    },
+    {
+      "id": "layers-row-3",
+      "role": "ListItem",
+      "name": "layers-row-3",
+      "parent": "layers-view",
+      "rect": {
+        "x": 40.0,
+        "y": 226.0,
+        "w": 118.0,
+        "h": 32.0
+      },
+      "visible": true,
+      "clipped": false,
+      "overflow": false,
+      "enabled": true,
+      "z": 5
+    },
+    {
+      "id": "layers-row-4",
+      "role": "ListItem",
+      "name": "layers-row-4",
+      "parent": "layers-view",
+      "rect": {
+        "x": 40.0,
+        "y": 258.0,
+        "w": 118.0,
+        "h": 32.0
+      },
+      "visible": true,
+      "clipped": false,
+      "overflow": false,
+      "enabled": true,
+      "z": 5
+    },
+    {
+      "id": "layers-row-5",
+      "role": "ListItem",
+      "name": "layers-row-5",
+      "parent": "layers-view",
+      "rect": {
+        "x": 40.0,
+        "y": 290.0,
+        "w": 118.0,
+        "h": 32.0
+      },
+      "visible": true,
+      "clipped": false,
+      "overflow": false,
+      "enabled": true,
+      "z": 5
+    },
+    {
+      "id": "layers-row-6",
+      "role": "ListItem",
+      "name": "layers-row-6",
+      "parent": "layers-view",
+      "rect": {
+        "x": 40.0,
+        "y": 322.0,
+        "w": 118.0,
+        "h": 32.0
+      },
+      "visible": true,
+      "clipped": false,
+      "overflow": false,
+      "enabled": true,
+      "z": 5
+    },
+    {
+      "id": "layers-row-7",
+      "role": "ListItem",
+      "name": "layers-row-7",
+      "parent": "layers-view",
+      "rect": {
+        "x": 40.0,
+        "y": 354.0,
+        "w": 118.0,
+        "h": 32.0
+      },
+      "visible": true,
+      "clipped": false,
+      "overflow": false,
+      "enabled": true,
+      "z": 5
+    },
+    {
+      "id": "layers-row-8",
+      "role": "ListItem",
+      "name": "layers-row-8",
+      "parent": "layers-view",
+      "rect": {
+        "x": 40.0,
+        "y": 386.0,
+        "w": 118.0,
+        "h": 32.0
+      },
+      "visible": true,
+      "clipped": false,
+      "overflow": false,
+      "enabled": true,
+      "z": 5
+    },
+    {
+      "id": "layers-row-9",
+      "role": "ListItem",
+      "name": "layers-row-9",
+      "parent": "layers-view",
+      "rect": {
+        "x": 40.0,
+        "y": 418.0,
+        "w": 118.0,
+        "h": 32.0
+      },
+      "visible": true,
+      "clipped": false,
+      "overflow": false,
+      "enabled": true,
+      "z": 5
+    },
+    {
+      "id": "layers-row-10",
+      "role": "ListItem",
+      "name": "layers-row-10",
+      "parent": "layers-view",
+      "rect": {
+        "x": 40.0,
+        "y": 450.0,
+        "w": 118.0,
+        "h": 32.0
+      },
+      "visible": true,
+      "clipped": false,
+      "overflow": false,
+      "enabled": true,
+      "z": 5
+    },
+    {
+      "id": "layers-thumb",
+      "role": "Panel",
+      "name": "thumb",
+      "parent": "layers-scroll",
+      "rect": {
+        "x": 166.0,
+        "y": 130.0,
+        "w": 10.0,
+        "h": 24.0
+      },
+      "visible": true,
+      "clipped": false,
+      "overflow": false,
+      "enabled": true,
+      "z": 5
+    },
+    {
+      "id": "layers-row-0-label",
+      "role": "Text",
+      "name": "layers-row-0-label",
+      "parent": "layers-row-0",
+      "rect": {
+        "x": 48.0,
+        "y": 138.0,
+        "w": 86.0,
+        "h": 16.0
+      },
+      "visible": true,
+      "clipped": false,
+      "overflow": false,
+      "enabled": true,
+      "z": 6
+    },
+    {
+      "id": "layers-row-1-icon",
+      "role": "Panel",
+      "name": "layers-row-1-icon",
+      "parent": "layers-row-1",
+      "rect": {
+        "x": 48.0,
+        "y": 170.0,
+        "w": 18.0,
+        "h": 18.0
+      },
+      "visible": true,
+      "clipped": false,
+      "overflow": false,
+      "enabled": true,
+      "z": 6
+    },
+    {
+      "id": "layers-row-1-label",
+      "role": "Text",
+      "name": "layers-row-1-label",
+      "parent": "layers-row-1",
+      "rect": {
+        "x": 74.0,
+        "y": 170.0,
+        "w": 68.0,
+        "h": 16.0
+      },
+      "visible": true,
+      "clipped": false,
+      "overflow": false,
+      "enabled": true,
+      "z": 6
+    },
+    {
+      "id": "layers-row-2-icon",
+      "role": "Panel",
+      "name": "layers-row-2-icon",
+      "parent": "layers-row-2",
+      "rect": {
+        "x": 48.0,
+        "y": 202.0,
+        "w": 18.0,
+        "h": 18.0
+      },
+      "visible": true,
+      "clipped": false,
+      "overflow": false,
+      "enabled": true,
+      "z": 6
+    },
+    {
+      "id": "layers-row-2-label",
+      "role": "Text",
+      "name": "layers-row-2-label",
+      "parent": "layers-row-2",
+      "rect": {
+        "x": 74.0,
+        "y": 202.0,
+        "w": 69.0,
+        "h": 16.0
+      },
+      "visible": true,
+      "clipped": false,
+      "overflow": false,
+      "enabled": true,
+      "z": 6
+    },
+    {
+      "id": "layers-row-3-icon",
+      "role": "Panel",
+      "name": "layers-row-3-icon",
+      "parent": "layers-row-3",
+      "rect": {
+        "x": 48.0,
+        "y": 234.0,
+        "w": 18.0,
+        "h": 18.0
+      },
+      "visible": true,
+      "clipped": false,
+      "overflow": false,
+      "enabled": true,
+      "z": 6
+    },
+    {
+      "id": "layers-row-3-label",
+      "role": "Text",
+      "name": "layers-row-3-label",
+      "parent": "layers-row-3",
+      "rect": {
+        "x": 74.0,
+        "y": 234.0,
+        "w": 64.0,
+        "h": 16.0
+      },
+      "visible": true,
+      "clipped": false,
+      "overflow": false,
+      "enabled": true,
+      "z": 6
+    },
+    {
+      "id": "layers-row-4-icon",
+      "role": "Panel",
+      "name": "layers-row-4-icon",
+      "parent": "layers-row-4",
+      "rect": {
+        "x": 48.0,
+        "y": 266.0,
+        "w": 18.0,
+        "h": 18.0
+      },
+      "visible": true,
+      "clipped": false,
+      "overflow": false,
+      "enabled": true,
+      "z": 6
+    },
+    {
+      "id": "layers-row-4-label",
+      "role": "Text",
+      "name": "layers-row-4-label",
+      "parent": "layers-row-4",
+      "rect": {
+        "x": 74.0,
+        "y": 266.0,
+        "w": 61.0,
+        "h": 16.0
+      },
+      "visible": true,
+      "clipped": false,
+      "overflow": false,
+      "enabled": true,
+      "z": 6
+    },
+    {
+      "id": "layers-row-5-icon",
+      "role": "Panel",
+      "name": "layers-row-5-icon",
+      "parent": "layers-row-5",
+      "rect": {
+        "x": 48.0,
+        "y": 298.0,
+        "w": 18.0,
+        "h": 18.0
+      },
+      "visible": true,
+      "clipped": false,
+      "overflow": false,
+      "enabled": true,
+      "z": 6
+    },
+    {
+      "id": "layers-row-5-label",
+      "role": "Text",
+      "name": "layers-row-5-label",
+      "parent": "layers-row-5",
+      "rect": {
+        "x": 74.0,
+        "y": 298.0,
+        "w": 69.0,
+        "h": 16.0
+      },
+      "visible": true,
+      "clipped": false,
+      "overflow": false,
+      "enabled": true,
+      "z": 6
+    },
+    {
+      "id": "layers-row-6-icon",
+      "role": "Panel",
+      "name": "layers-row-6-icon",
+      "parent": "layers-row-6",
+      "rect": {
+        "x": 48.0,
+        "y": 330.0,
+        "w": 18.0,
+        "h": 18.0
+      },
+      "visible": true,
+      "clipped": false,
+      "overflow": false,
+      "enabled": true,
+      "z": 6
+    },
+    {
+      "id": "layers-row-6-label",
+      "role": "Text",
+      "name": "layers-row-6-label",
+      "parent": "layers-row-6",
+      "rect": {
+        "x": 74.0,
+        "y": 330.0,
+        "w": 67.0,
+        "h": 16.0
+      },
+      "visible": true,
+      "clipped": false,
+      "overflow": false,
+      "enabled": true,
+      "z": 6
+    },
+    {
+      "id": "layers-row-7-icon",
+      "role": "Panel",
+      "name": "layers-row-7-icon",
+      "parent": "layers-row-7",
+      "rect": {
+        "x": 48.0,
+        "y": 362.0,
+        "w": 18.0,
+        "h": 18.0
+      },
+      "visible": true,
+      "clipped": false,
+      "overflow": false,
+      "enabled": true,
+      "z": 6
+    },
+    {
+      "id": "layers-row-7-label",
+      "role": "Text",
+      "name": "layers-row-7-label",
+      "parent": "layers-row-7",
+      "rect": {
+        "x": 74.0,
+        "y": 362.0,
+        "w": 67.0,
+        "h": 16.0
+      },
+      "visible": true,
+      "clipped": false,
+      "overflow": false,
+      "enabled": true,
+      "z": 6
+    },
+    {
+      "id": "layers-row-8-icon",
+      "role": "Panel",
+      "name": "layers-row-8-icon",
+      "parent": "layers-row-8",
+      "rect": {
+        "x": 48.0,
+        "y": 394.0,
+        "w": 18.0,
+        "h": 18.0
+      },
+      "visible": true,
+      "clipped": false,
+      "overflow": false,
+      "enabled": true,
+      "z": 6
+    },
+    {
+      "id": "layers-row-8-label",
+      "role": "Text",
+      "name": "layers-row-8-label",
+      "parent": "layers-row-8",
+      "rect": {
+        "x": 74.0,
+        "y": 394.0,
+        "w": 67.0,
+        "h": 16.0
+      },
+      "visible": true,
+      "clipped": false,
+      "overflow": false,
+      "enabled": true,
+      "z": 6
+    },
+    {
+      "id": "layers-row-9-icon",
+      "role": "Panel",
+      "name": "layers-row-9-icon",
+      "parent": "layers-row-9",
+      "rect": {
+        "x": 48.0,
+        "y": 426.0,
+        "w": 18.0,
+        "h": 18.0
+      },
+      "visible": true,
+      "clipped": false,
+      "overflow": false,
+      "enabled": true,
+      "z": 6
+    },
+    {
+      "id": "layers-row-9-label",
+      "role": "Text",
+      "name": "layers-row-9-label",
+      "parent": "layers-row-9",
+      "rect": {
+        "x": 74.0,
+        "y": 426.0,
+        "w": 67.0,
+        "h": 16.0
+      },
+      "visible": true,
+      "clipped": false,
+      "overflow": false,
+      "enabled": true,
+      "z": 6
+    },
+    {
+      "id": "layers-row-10-icon",
+      "role": "Panel",
+      "name": "layers-row-10-icon",
+      "parent": "layers-row-10",
+      "rect": {
+        "x": 48.0,
+        "y": 458.0,
+        "w": 18.0,
+        "h": 18.0
+      },
+      "visible": true,
+      "clipped": false,
+      "overflow": false,
+      "enabled": true,
+      "z": 6
+    },
+    {
+      "id": "layers-row-10-label",
+      "role": "Text",
+      "name": "layers-row-10-label",
+      "parent": "layers-row-10",
+      "rect": {
+        "x": 74.0,
+        "y": 458.0,
+        "w": 67.0,
+        "h": 16.0
+      },
+      "visible": true,
+      "clipped": false,
+      "overflow": false,
+      "enabled": true,
+      "z": 6
+    }
+  ]
+}

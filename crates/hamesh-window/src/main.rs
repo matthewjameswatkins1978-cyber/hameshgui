@@ -163,6 +163,10 @@ struct HameshWindowApp {
     /// Blocks Pi panel (`--blocks-pi`): same builders, worker status
     /// composition. Implies `use_blocks` paths (refresh, Space).
     use_blocks_pi: bool,
+    /// Gallery mode (`--gallery`): the 035 ListView + Picker workspace
+    /// from hamesh-gallery. Same intents as the headless drill.
+    use_gallery: bool,
+    gallery: Option<hamesh_gallery::Gallery>,
     shift_held: bool,
     m3_smoke_done: bool,
     /// M4 live loop: background Pi worker link. `None` unless `--pi`.
@@ -202,6 +206,8 @@ impl HameshWindowApp {
             use_m3: false,
             use_blocks: false,
             use_blocks_pi: false,
+            use_gallery: false,
+            gallery: None,
             shift_held: false,
             m3_smoke_done: false,
             pi: None,
@@ -429,6 +435,96 @@ impl HameshWindowApp {
             None,
         );
         println!("M3 click: hit={hit:?} acted={acted} focus={focus:?}");
+    }
+
+    /// Swap the M1 demo tree for the 035 gallery tree (called once, on open).
+    fn enter_gallery(&mut self) {
+        self.gallery = Some(hamesh_gallery::Gallery::new());
+        self.refresh_gallery();
+        self.trace.record(
+            "gallery.enter",
+            "ListView + Picker workspace live; same intents as the headless drill",
+            self.app.revision,
+            None,
+        );
+    }
+
+    /// Recompose the gallery tree from widget state after any intent.
+    /// The driver owns layout budgets and popup anchoring, so paint
+    /// stays pure: it renders whatever tree is current.
+    fn refresh_gallery(&mut self) {
+        if let Some(g) = self.gallery.as_mut() {
+            let (app, _) = hamesh_gallery::refresh(g, self.size.0 as f32, self.size.1 as f32);
+            self.app = app;
+            self.scene_rev += 1;
+        }
+    }
+
+    /// Gallery mouse: the shared press path, then trace.
+    fn gallery_click(&mut self) {
+        let (_, scene) = self.layout_and_scene();
+        let note = match self.gallery.as_mut() {
+            Some(g) => hamesh_gallery::press(g, &self.app, &scene, self.cursor.0, self.cursor.1),
+            None => "gallery not entered".to_string(),
+        };
+        self.refresh_gallery();
+        self.trace
+            .record("gallery.click", &note, self.app.revision, None);
+        println!("GALLERY click: {note}");
+    }
+
+    /// Gallery keyboard: map the winit event onto the shared intent core.
+    fn gallery_key(&mut self, event: &winit::event::KeyEvent, event_loop: &ActiveEventLoop) {
+        use hamesh_gallery::GKey;
+        let Some(g) = self.gallery.as_mut() else {
+            return;
+        };
+        if event.physical_key == PhysicalKey::Code(KeyCode::F12) {
+            self.dump_inspection();
+            return;
+        }
+        let mut keys: Vec<GKey> = Vec::new();
+        if let Some(text) = event.text.as_ref() {
+            for c in text.chars() {
+                // Tab arrives as text too; the physical key wins below.
+                if c != '\r' && c != '\n' && c != '\t' {
+                    keys.push(GKey::Char(c));
+                }
+            }
+        }
+        match event.physical_key {
+            PhysicalKey::Code(KeyCode::ArrowUp) => keys.push(GKey::Up),
+            PhysicalKey::Code(KeyCode::ArrowDown) => keys.push(GKey::Down),
+            PhysicalKey::Code(KeyCode::PageUp) => keys.push(GKey::PageUp),
+            PhysicalKey::Code(KeyCode::PageDown) => keys.push(GKey::PageDown),
+            PhysicalKey::Code(KeyCode::Home) => keys.push(GKey::Home),
+            PhysicalKey::Code(KeyCode::End) => keys.push(GKey::End),
+            PhysicalKey::Code(KeyCode::Enter) | PhysicalKey::Code(KeyCode::NumpadEnter) => {
+                keys.push(GKey::Enter)
+            }
+            PhysicalKey::Code(KeyCode::Backspace) => keys.push(GKey::Backspace),
+            PhysicalKey::Code(KeyCode::Tab) => keys.push(GKey::Tab),
+            PhysicalKey::Code(KeyCode::Escape) => keys.push(GKey::Escape),
+            _ => {}
+        }
+        if keys.is_empty() {
+            return;
+        }
+        // Escape with a closed popup quits; otherwise the popup owns it.
+        let escape_quits = keys.len() == 1 && matches!(keys[0], GKey::Escape) && !g.fonts.is_open();
+        let names: Vec<String> = g.layer_rows.iter().map(|r| r.label.clone()).collect();
+        let mut notes = Vec::new();
+        for k in keys {
+            notes.push(hamesh_gallery::key(g, k, &names));
+        }
+        let note = notes.join(" | ");
+        self.refresh_gallery();
+        self.trace
+            .record("gallery.key", &note, self.app.revision, None);
+        println!("GALLERY key: {note}");
+        if escape_quits {
+            event_loop.exit();
+        }
     }
 
     /// M3 keyboard: map the winit event onto the shared `handle_key` core.
@@ -1188,6 +1284,10 @@ impl ApplicationHandler<UserEvent> for HameshWindowApp {
         }
         let size = window.inner_size();
         self.size = (size.width.max(1), size.height.max(1));
+        if self.use_gallery {
+            self.enter_gallery();
+            println!("GALLERY open: ListView + Picker workspace — click, wheel, type, Tab, F12 dumps Eye evidence, Esc quits");
+        }
         if self.use_m3 {
             self.enter_m3();
             self.refresh_feed();
@@ -1303,6 +1403,9 @@ impl ApplicationHandler<UserEvent> for HameshWindowApp {
             WindowEvent::Resized(size) => {
                 self.size = (size.width.max(1), size.height.max(1));
                 self.scene_rev += 1;
+                if self.use_gallery {
+                    self.refresh_gallery();
+                }
                 if let Some(gpu) = self.gpu.as_mut() {
                     gpu.resize(self.size.0, self.size.1);
                 }
@@ -1315,10 +1418,28 @@ impl ApplicationHandler<UserEvent> for HameshWindowApp {
             }
             WindowEvent::CursorMoved { position, .. } => {
                 self.cursor = (position.x as f32, position.y as f32);
+                if self.use_gallery {
+                    let (_, scene) = self.layout_and_scene();
+                    let changed = match self.gallery.as_mut() {
+                        Some(g) => hamesh_gallery::hover(
+                            g,
+                            &scene,
+                            self.cursor.0,
+                            self.cursor.1,
+                            &self.app,
+                        ),
+                        None => false,
+                    };
+                    if changed {
+                        self.refresh_gallery();
+                    }
+                }
             }
             WindowEvent::MouseInput { state, button, .. } => {
                 if state == ElementState::Pressed && button == MouseButton::Left {
-                    if self.use_m3 {
+                    if self.use_gallery {
+                        self.gallery_click();
+                    } else if self.use_m3 {
                         self.m3_click();
                     } else {
                         let (hit, acted, focus) = self.apply_press(self.cursor.0, self.cursor.1);
@@ -1344,6 +1465,10 @@ impl ApplicationHandler<UserEvent> for HameshWindowApp {
             }
             WindowEvent::KeyboardInput { event, .. } => {
                 if event.state != ElementState::Pressed {
+                    return;
+                }
+                if self.use_gallery {
+                    self.gallery_key(&event, event_loop);
                     return;
                 }
                 if self.use_m3 && event.physical_key != PhysicalKey::Code(KeyCode::Escape) {
@@ -1415,7 +1540,29 @@ impl ApplicationHandler<UserEvent> for HameshWindowApp {
                 self.shift_held = mods.state().shift_key();
             }
             WindowEvent::MouseWheel { delta, .. } => {
-                if self.use_m3 {
+                if self.use_gallery {
+                    // Positive delta scrolls up, for both winit delta kinds.
+                    let dy = match delta {
+                        winit::event::MouseScrollDelta::LineDelta(_, y) => y * 60.0,
+                        winit::event::MouseScrollDelta::PixelDelta(p) => p.y as f32,
+                    };
+                    let (layout, _) = self.layout_and_scene();
+                    let scrolled = match self.gallery.as_mut() {
+                        Some(g) => {
+                            hamesh_gallery::wheel(g, &layout, self.cursor.0, self.cursor.1, dy)
+                        }
+                        None => false,
+                    };
+                    if scrolled {
+                        self.refresh_gallery();
+                        self.trace.record(
+                            "gallery.wheel",
+                            &format!("dy={dy}"),
+                            self.app.revision,
+                            None,
+                        );
+                    }
+                } else if self.use_m3 {
                     let amount = match delta {
                         winit::event::MouseScrollDelta::LineDelta(_, y) => y * 60.0,
                         winit::event::MouseScrollDelta::PixelDelta(p) => -(p.y as f32),
@@ -1534,6 +1681,10 @@ fn main() {
     // Pi panel shares every path with the dashboard (refresh, Space,
     // Eye, Hand); only the composition differs.
     app.use_blocks_pi = std::env::args().any(|a| a == "--blocks-pi");
+    app.use_gallery = std::env::args().any(|a| a == "--gallery");
+    if app.use_gallery {
+        println!("GALLERY mode: ListView + Picker workspace from hamesh-gallery");
+    }
     if app.use_blocks_pi {
         app.use_blocks = true;
         app.app = pi_panel::build_pi_panel();

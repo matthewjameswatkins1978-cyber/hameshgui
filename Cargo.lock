@@ -924,12 +924,30 @@ dependencies = [
 ]
 
 [[package]]
+name = "hamesh-035-lab"
+version = "0.2.0"
+dependencies = [
+ "hamesh-blocks",
+ "hamesh-core",
+ "hamesh-gallery",
+ "hamesh-inspect",
+ "hamesh-layout",
+ "hamesh-render",
+ "hamesh-scene",
+ "hamesh-text",
+ "hamesh-theme",
+ "hamesh-widgets",
+ "serde_json",
+]
+
+[[package]]
 name = "hamesh-automation"
 version = "0.2.0"
 dependencies = [
  "hamesh-core",
  "hamesh-diag",
  "hamesh-layout",
+ "hamesh-scene",
  "hamesh-widgets",
  "serde",
 ]
@@ -939,7 +957,12 @@ name = "hamesh-blocks"
 version = "0.2.0"
 dependencies = [
  "hamesh-core",
+ "hamesh-inspect",
+ "hamesh-layout",
+ "hamesh-scene",
+ "hamesh-text",
  "hamesh-theme",
+ "hamesh-widgets",
  "serde",
  "serde_json",
 ]
@@ -1006,6 +1029,20 @@ dependencies = [
  "hamesh-layout",
  "hamesh-render",
  "hamesh-scene",
+ "hamesh-widgets",
+ "serde_json",
+]
+
+[[package]]
+name = "hamesh-gallery"
+version = "0.2.0"
+dependencies = [
+ "hamesh-blocks",
+ "hamesh-core",
+ "hamesh-layout",
+ "hamesh-scene",
+ "hamesh-text",
+ "hamesh-theme",
  "hamesh-widgets",
  "serde_json",
 ]
@@ -1092,6 +1129,7 @@ dependencies = [
  "peniko 0.3.2",
  "swash",
  "tiny-skia",
+ "unicode-segmentation",
 ]
 
 [[package]]
@@ -1117,6 +1155,7 @@ dependencies = [
  "hamesh-blocks",
  "hamesh-core",
  "hamesh-diag",
+ "hamesh-gallery",
  "hamesh-inspect",
  "hamesh-layout",
  "hamesh-pi",

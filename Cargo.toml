@@ -10,6 +10,7 @@ members = [
   "crates/hamesh-text",
   "crates/hamesh-theme",
   "crates/hamesh-blocks",
+  "crates/hamesh-gallery",
   "crates/hamesh-pi",
   "crates/hamesh-widgets",
   "crates/hamesh-window",
@@ -19,6 +20,7 @@ members = [
   "apps/hamesh-drill",
   "apps/hamesh-blocks-drill",
   "apps/hamesh-033-lab",
+  "apps/hamesh-035-lab",
   "apps/hamesh-mcp",
   "apps/hamesh-mcp-drill",
 ]

@@ -16,6 +16,7 @@ const USERS: &str = include_str!("../../../assets/icons/users.svg");
 const LIST_CHECKS: &str = include_str!("../../../assets/icons/list-checks.svg");
 const TRIANGLE_ALERT: &str = include_str!("../../../assets/icons/triangle-alert.svg");
 const ACTIVITY: &str = include_str!("../../../assets/icons/activity.svg");
+const CHEVRON_DOWN: &str = include_str!("../../../assets/icons/chevron-down.svg");
 
 /// Registry: stable icon names agents can put in the `icon` prop.
 pub fn icon_svg(name: &str) -> Option<&'static str> {
@@ -24,6 +25,7 @@ pub fn icon_svg(name: &str) -> Option<&'static str> {
         "list-checks" => Some(LIST_CHECKS),
         "triangle-alert" => Some(TRIANGLE_ALERT),
         "activity" => Some(ACTIVITY),
+        "chevron-down" => Some(CHEVRON_DOWN),
         _ => None,
     }
 }
@@ -173,7 +175,13 @@ mod tests {
 
     #[test]
     fn registry_parses_all_vendored_icons() {
-        for name in ["users", "list-checks", "triangle-alert", "activity"] {
+        for name in [
+            "users",
+            "list-checks",
+            "triangle-alert",
+            "activity",
+            "chevron-down",
+        ] {
             let bez = icon_bez(name).expect(name);
             assert!(!bez.is_empty(), "{name} converted empty");
         }

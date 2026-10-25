@@ -208,7 +208,11 @@ pub fn set_composer_text_direct(
 pub fn click_human(app: &mut App, layout: &LayoutOutput, x: f32, y: f32) -> AutomationResult {
     let before = app.revision;
     let mut notes = Vec::new();
-    let hit = hamesh_layout::hit_test(app, layout, x, y);
+    // Paint truth, not layout rects: clipped-away content cannot
+    // intercept the Hand. The scene rebuilds from the live tree, so
+    // a press always targets what is actually on screen.
+    let scene = hamesh_scene::build(app, layout, app.revision);
+    let hit = hamesh_scene::hit_test(app, &scene, x, y);
     match hit {
         None => AutomationResult {
             mechanism: Mechanism::HumanEquivalent,
@@ -438,6 +442,58 @@ mod tests {
         let r = click_component_human(&mut app, &layout, "btn");
         assert!(!r.success, "overlay should intercept: {r:?}");
         assert_ne!(r.hit_component.as_deref(), Some("btn"));
+    }
+
+    fn scrolled_list() -> (App, LayoutOutput) {
+        // filler 500 + viewport h80 scrolled 40 + two rows h40.
+        // r0 sits at 440..480 (fully clipped); r1 spans 480..520.
+        use hamesh_core::{Component, Role};
+        let mut app = App::new("win");
+        app.get_mut("win")
+            .unwrap()
+            .props
+            .insert("pad".to_string(), "0".to_string());
+        app.get_mut("win")
+            .unwrap()
+            .props
+            .insert("gap".to_string(), "0".to_string());
+        app.add(
+            "win",
+            Component::new("filler", Role::Panel, "filler").with_prop("h", "500"),
+        );
+        app.add(
+            "win",
+            Component::new("view", Role::Panel, "view")
+                .with_prop("layout", "column")
+                .with_prop("h", "80")
+                .with_prop("pad", "0")
+                .with_prop("gap", "0")
+                .with_prop("scroll_y", "40"),
+        );
+        app.add(
+            "view",
+            Component::new("r0", Role::Panel, "row").with_prop("h", "40"),
+        );
+        app.add(
+            "view",
+            Component::new("r1", Role::Panel, "row").with_prop("h", "40"),
+        );
+        let layout = hamesh_layout::compute(&app, 400.0, 600.0);
+        (app, layout)
+    }
+
+    #[test]
+    fn clipped_away_rows_cannot_be_clicked_but_partial_ones_can() {
+        let (mut app, layout) = scrolled_list();
+        // (10,470) is inside r0's rect but outside its paint clip:
+        // the filler underneath wins, and owns no command.
+        let r = click_human(&mut app, &layout, 10.0, 470.0);
+        assert_eq!(r.hit_component.as_deref(), Some("filler"));
+        assert!(!r.success);
+        // (10,510) is r1's visible half: hit, but rows own no
+        // commands (drivers interpret row identity instead).
+        let r = click_human(&mut app, &layout, 10.0, 510.0);
+        assert_eq!(r.hit_component.as_deref(), Some("r1"));
     }
 
     fn app_with_composer() -> (App, hamesh_widgets::Widgets, LayoutOutput) {

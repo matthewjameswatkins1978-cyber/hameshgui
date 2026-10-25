@@ -1,0 +1,30 @@
+{
+  "elapsed_ms": 6308.4275,
+  "final_report": {
+    "clipped_content": [],
+    "off_viewport": [],
+    "overlaps": [],
+    "viewport_h": 900.0,
+    "viewport_w": 1440.0
+  },
+  "focus": 1,
+  "font": "Clarendon BT",
+  "probes": [
+    {
+      "asked_about": "layers-row-2",
+      "hit": "layers-row-2-label",
+      "topmost_candidate": "layers-row-2-label"
+    },
+    {
+      "asked_about": "fonts-field",
+      "hit": "fonts-field",
+      "topmost_candidate": "fonts-field"
+    }
+  ],
+  "scroll": 64.0,
+  "selected": 2,
+  "size": [
+    1440,
+    900
+  ]
+}

@@ -20,6 +20,7 @@ hamesh-inspect = { path = "../hamesh-inspect" }
 hamesh-diag = { path = "../hamesh-diag" }
 hamesh-automation = { path = "../hamesh-automation" }
 hamesh-blocks = { path = "../hamesh-blocks" }
+hamesh-gallery = { path = "../hamesh-gallery" }
 serde_json = "1"
 winit = "0.30"
 softbuffer = "0.4"
