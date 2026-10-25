@@ -1,5 +1,5 @@
 {
-  "elapsed_ms": 3401.7985,
+  "elapsed_ms": 4622.746,
   "final_report": {
     "clipped_content": [],
     "off_viewport": [],
@@ -8,20 +8,20 @@
     "viewport_w": 1440.0
   },
   "focus": 1,
-  "font": "Courier New",
+  "font": "Clarendon BT",
   "probes": [
     {
-      "asked_about": "layers-row-9",
-      "hit": "layers-row-9-label",
-      "topmost_candidate": "layers-row-9-label"
+      "asked_about": "layers-row-2",
+      "hit": "layers-row-2-label",
+      "topmost_candidate": "layers-row-2-label"
     },
     {
       "asked_about": "fonts-field",
-      "hit": "fonts-value",
-      "topmost_candidate": "fonts-value"
+      "hit": "fonts-field",
+      "topmost_candidate": "fonts-field"
     }
   ],
-  "scroll": 288.0,
+  "scroll": 64.0,
   "selected": 21,
   "size": [
     1440,

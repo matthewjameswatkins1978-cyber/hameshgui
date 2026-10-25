@@ -956,7 +956,10 @@ name = "hamesh-blocks"
 version = "0.2.0"
 dependencies = [
  "hamesh-core",
+ "hamesh-inspect",
  "hamesh-layout",
+ "hamesh-scene",
+ "hamesh-text",
  "hamesh-theme",
  "hamesh-widgets",
  "serde",
@@ -1111,6 +1114,7 @@ dependencies = [
  "peniko 0.3.2",
  "swash",
  "tiny-skia",
+ "unicode-segmentation",
 ]
 
 [[package]]

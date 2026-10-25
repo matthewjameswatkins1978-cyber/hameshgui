@@ -67,6 +67,18 @@ impl ListView {
         self.row_h
     }
 
+    /// Change the row pitch without losing place: selection and
+    /// scroll survive (clamped to the new geometry). The picker
+    /// composer calls this so the painted pitch and the
+    /// hit-test pitch can never drift apart.
+    pub fn set_row_h(&mut self, row_h: f32) {
+        self.row_h = row_h.max(1.0);
+        self.clamp_scroll();
+        if let Some(sel) = self.selected {
+            self.reveal(sel);
+        }
+    }
+
     pub fn count(&self) -> usize {
         self.count
     }
@@ -278,16 +290,27 @@ impl ListView {
         self.jump_to_prefix(&prefix, name_at)
     }
 
-    fn jump_to_prefix(&mut self, prefix: &str, name_at: &dyn Fn(usize) -> String) -> bool {
+    /// First row at/after the selection whose name starts with
+    /// `prefix` (wrapping). `None` means no match anywhere — the
+    /// only case that restarts the buffer.
+    fn find_prefix(&self, prefix: &str, name_at: &dyn Fn(usize) -> String) -> Option<usize> {
         let prefix = prefix.to_lowercase();
         let start = self.selected.map(|s| s + 1).unwrap_or(0);
-        for off in 0..self.count {
-            let i = (start + off) % self.count;
-            if name_at(i).to_lowercase().starts_with(&prefix) {
-                return self.select(i);
-            }
+        (0..self.count)
+            .map(|off| (start + off) % self.count)
+            .find(|&i| name_at(i).to_lowercase().starts_with(&prefix))
+    }
+
+    fn jump_to_prefix(&mut self, prefix: &str, name_at: &dyn Fn(usize) -> String) -> bool {
+        // A match on the current row is a match: staying put is
+        // not failure (returning select()'s changed-flag here
+        // restarted the buffer and jumped elsewhere).
+        if let Some(i) = self.find_prefix(prefix, name_at) {
+            self.select(i);
+            true
+        } else {
+            false
         }
-        false
     }
 
     /// Drop the accumulated type-ahead prefix. The host calls
@@ -581,9 +604,15 @@ impl Picker {
         self.list.set_viewport(viewport_h);
     }
 
+    /// Sync the option pitch to what the composer paints. Preserves
+    /// highlight, selection and scroll (clamped); recreating the
+    /// list here used to drop all three on every recompose.
     pub fn set_row_h(&mut self, row_h: f32) {
-        self.list = ListView::new(row_h);
+        self.list.set_row_h(row_h);
         self.list.set_count(self.filtered().len());
+        if let Some(h) = self.highlight {
+            self.list.select(h);
+        }
     }
 
     /// Rows of the filtered list that the popup should paint.
@@ -721,8 +750,9 @@ mod tests {
         assert!(l.typeahead('b', &|i| n[i].clone()));
         assert_eq!(l.selected(), Some(2));
         // A second 'b' makes "bb": no match, so the prefix
-        // restarts at 'b' and Beta is already selected.
-        assert!(!l.typeahead('b', &|i| n[i].clone()));
+        // restarts at 'b', finds Beta again — and staying put
+        // counts as a match, not a failure.
+        assert!(l.typeahead('b', &|i| n[i].clone()));
         assert_eq!(l.selected(), Some(2));
     }
 
@@ -870,6 +900,31 @@ mod tests {
             "highlight must be scrolled into view: {v:?}"
         );
         assert!(v.len() <= 12, "popup stays virtualised, got {}", v.len());
+    }
+
+    #[test]
+    fn set_row_h_keeps_place() {
+        let mut l = list(50, 200.0);
+        l.select(25);
+        l.set_row_h(16.0);
+        assert_eq!(l.row_h(), 16.0);
+        assert_eq!(l.selected(), Some(25));
+        assert!(l.scroll() <= l.max_scroll());
+        assert!(l.visible().contains(&25));
+    }
+
+    #[test]
+    fn picker_row_sync_preserves_highlight_and_scroll() {
+        let items: Vec<String> = (0..100).map(|i| format!("Item {i:03}")).collect();
+        let mut p = Picker::new(items);
+        p.set_viewport(300.0);
+        p.open();
+        p.nav(Nav::End);
+        let h = p.highlight();
+        assert_eq!(h, Some(99));
+        p.set_row_h(32.0);
+        assert_eq!(p.highlight(), h, "highlight survives a recompose sync");
+        assert!(p.visible().contains(&h.unwrap()));
     }
 
     #[test]

@@ -61,3 +61,34 @@ windowing, reveal math, filtering, commit semantics, popup measuring,
 scroll clamping or type-ahead state anywhere outside the framework.
 The installed-font picker lists real system families through
 `installed_family_names` — no directory scans, no fallback button.
+
+## Final review repairs (PR #5 follow-up)
+
+1. **Anchored popup.** The first gallery composed the popup in flow,
+   pushing content down. The popup is now an overlay (zero parent
+   footprint, z=100 paint layer) positioned by `place_popup` +
+   `popup_geom`: prefer below, flip above, shrink to the roomier
+   side, clamp into the viewport, size to the widest match. The
+   driver calls it after layout; the Eye asserts chrome rects are
+   identical between closed and open frames (no reflow, verified).
+2. **Hit-test agrees with paint.** `hamesh_scene::hit_test` is the
+   single targeting truth: topmost visible node whose own paint
+   clip contains the point. Scrolled-out rows, hidden nodes and
+   ghosts cannot intercept; partially visible rows stay clickable;
+   overlays keep intercepting. `click_human` builds the scene
+   internally, so Specimen and the window inherit the fix with no
+   API change. The Eye's probe `hit` is its own clip-aware
+   topmost candidate.
+3. **Second-opinion findings (Xiaomi MiMo 2.6 Flash, bounded).**
+   Fixed: thumb-clamp panic on viewports < 24px; typeahead
+   match-on-current now stays instead of restarting the buffer;
+   picker row-pitch sync (`set_row_h` preserves selection/scroll)
+   after finding a live 30-vs-32px pointer drift; list root pad for
+   focus-ring clearance; placeholder and hover-icon tokens raised to
+   6.48/AA. New: `hamesh_text::ellipsize` (grapheme-correct) + the
+   list width contract (`viewport_w` → trim to remaining chrome,
+   including the 16px text inset the measurer adds).
+4. **Narrow-row collision fixed with evidence.** The 820px rail showed
+   option text painting into the scrollbar (Eye: overlap). Rows now
+   ellipsize to their measured budget; the 820 frame is clean with
+   zero exceptions (`clipped=[] off_viewport=[] overlaps=0`).

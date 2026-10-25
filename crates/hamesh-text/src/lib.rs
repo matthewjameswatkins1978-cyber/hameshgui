@@ -168,6 +168,43 @@ pub fn installed_family_names() -> Vec<String> {
     })
 }
 
+/// Fit a single line into `max_advance` px, appending "…" when trimmed.
+///
+/// Grapheme-correct: the cut never splits a ZWJ sequence, skin tone or
+/// flag (decision 017 travels with text wherever it goes).
+/// Binary-searches the longest fitting prefix; returns the original
+/// when it already fits, bare "…" when nothing else does, and empty
+/// when not even the ellipsis fits. Trailing spaces are trimmed
+/// before the ellipsis so rows do not end on a gap.
+pub fn ellipsize(text: &str, max_advance: f32, font_size: f32, spec: &FontSpec) -> String {
+    use unicode_segmentation::UnicodeSegmentation;
+    if max_advance <= 0.0 {
+        return String::new();
+    }
+    if TextLayout::new_varied(text, f32::INFINITY, font_size, None, spec).width() <= max_advance {
+        return text.to_string();
+    }
+    let ell = "…";
+    let ell_w = TextLayout::new_varied(ell, f32::INFINITY, font_size, None, spec).width();
+    if ell_w > max_advance {
+        return String::new();
+    }
+    let gs: Vec<&str> = text.graphemes(true).collect();
+    let (mut lo, mut hi) = (0usize, gs.len());
+    while lo < hi {
+        let mid = (lo + hi).div_ceil(2);
+        let cand: String = gs[..mid].concat();
+        let w = TextLayout::new_varied(&cand, f32::INFINITY, font_size, None, spec).width();
+        if w + ell_w <= max_advance {
+            lo = mid;
+        } else {
+            hi = mid - 1;
+        }
+    }
+    let prefix: String = gs[..lo].concat();
+    format!("{}{}", prefix.trim_end_matches(' '), ell)
+}
+
 /// Owned parley layout: safe to hand to CPU (swash) and GPU (vello)
 /// consumers. The `Layout` owns its font data (Arc-backed), so no
 /// `FontContext` needs to outlive it — verified by the compiler.
@@ -920,6 +957,34 @@ mod tests {
         assert!(empty.style.is_none() && empty.tracking == 0.0);
         // Fingerprint distinguishes shaping configurations.
         assert_ne!(s.fingerprint(), empty.fingerprint());
+    }
+
+    #[test]
+    fn ellipsis_trims_grapheme_correctly() {
+        let spec = FontSpec::parse(None, None, None, None);
+        // Fits: untouched.
+        assert_eq!(ellipsize("Hi", 1000.0, 16.0, &spec), "Hi");
+        // Trimmed: shorter, ends with the ellipsis.
+        let long = "Outdated logo";
+        let cut = ellipsize(long, 40.0, 16.0, &spec);
+        assert!(cut.ends_with("…") && cut.len() < long.len(), "{cut}");
+        // Nothing fits, not even the ellipsis.
+        assert_eq!(ellipsize(long, 0.0, 16.0, &spec), "");
+        // ZWJ family: never split in half.
+        let fam = "\u{1F468}\u{200D}\u{1F469}\u{200D}\u{1F467}tail-of-text-here";
+        let cut = ellipsize(fam, 60.0, 16.0, &spec);
+        use unicode_segmentation::UnicodeSegmentation;
+        assert!(cut.ends_with("…"));
+        let body = cut.trim_end_matches("…");
+        assert!(
+            body.is_empty() || fam.starts_with(body) && body.graphemes(true).count() >= 1,
+            "no half-grapheme: {cut}"
+        );
+        assert!(
+            !body.contains('\u{200D}')
+                || body.contains("\u{1F468}\u{200D}\u{1F469}\u{200D}\u{1F467}"),
+            "joiner only inside a whole family"
+        );
     }
 
     #[test]

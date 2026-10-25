@@ -29,6 +29,10 @@ pub struct TextMeasure {
 /// Width includes the renderer's text origin inset on both sides
 /// (blit_text draws at rect.x + 8): measuring raw glyph width left
 /// tight pills 8px too narrow and text crossed the border.
+///
+/// Public because trimmers (e.g. ellipsis) must budget the same
+/// inset the measurer adds, or the node outgrows its allowance.
+pub const TEXT_INSET_X: f32 = 8.0;
 fn measure_text(
     ctx: Option<&TextMeasure>,
     known: Size<Option<f32>>,

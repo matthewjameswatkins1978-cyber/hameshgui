@@ -45,6 +45,7 @@ struct Gallery {
     layers: ListView,
     fonts: Picker,
     focus: usize, // 0 = layers, 1 = picker
+    last_typed: Option<std::time::Instant>,
 }
 
 impl Gallery {
@@ -82,6 +83,7 @@ impl Gallery {
             layers,
             fonts,
             focus: 0,
+            last_typed: None,
         }
     }
 
@@ -163,7 +165,12 @@ fn compose_with(g: &mut Gallery, width: f32, height: f32, layers_h: f32) -> App 
                 b::col(
                     s,
                     "picker-col",
+                    // Fixed width: a hugging field would jitter as its
+                    // text changes, and the popup anchors to a moving
+                    // target. Widths are application layout (like the
+                    // rail and inspector widths below).
                     b::LayoutOpts {
+                        w: Some(240.0),
                         pad: 0.0,
                         gap: 4.0,
                         ..Default::default()
@@ -207,6 +214,7 @@ fn compose_with(g: &mut Gallery, width: f32, height: f32, layers_h: f32) -> App 
                     },
                     |t| {
                         b::caption(t, "rail-title", "LAYERS");
+                        let rail_content_w = g.rail_w(width) - 24.0;
                         b::select::list(
                             t,
                             "layers",
@@ -217,6 +225,9 @@ fn compose_with(g: &mut Gallery, width: f32, height: f32, layers_h: f32) -> App 
                                 row_h: ROW_H,
                                 empty_label: "No layers".to_string(),
                                 grow: None,
+                                // Rail content width: the composer trims
+                                // labels to what remains after chrome.
+                                viewport_w: Some(rail_content_w),
                             },
                         );
                         b::caption(t, "rail-foot", &format!("{} layers", g.layer_rows.len()));
@@ -334,7 +345,19 @@ fn refresh(g: &mut Gallery, w: f32, h: f32) -> (App, hamesh_layout::LayoutOutput
     // transient and clipped honestly; resting states stay exact.
     let layers = ((body - ROOT_PAD * 2.0 - Gallery::rail_chrome()) / ROW_H).floor() * ROW_H;
     let layers = layers.max(96.0);
-    let app = compose_with(g, w, h, layers);
+    let mut app = compose_with(g, w, h, layers);
+    let layout = layout_of(&app, w, h);
+    // Anchor an open popup to its field: overlay geometry that
+    // never reflows the header, body or footer.
+    if g.fonts.is_open() {
+        let metrics = b::select::PopupMetrics {
+            row_h: ROW_H,
+            max_rows: g.max_popup_rows(h),
+            matches: g.fonts.filtered_len(),
+            scroll: g.fonts.scroll(),
+        };
+        b::select::place_popup(&mut app, &layout, "fonts", &metrics, w, h);
+    }
     let layout = layout_of(&app, w, h);
     (app, layout)
 }
@@ -469,6 +492,14 @@ fn key(g: &mut Gallery, k: GKey, label_names: &[String]) -> String {
             GKey::Home => format!("layers nav: {}", g.layers.nav(Nav::Home)),
             GKey::End => format!("layers nav: {}", g.layers.nav(Nav::End)),
             GKey::Char(c) => {
+                // Idle timeout: a stale prefix never steers a new search.
+                let now = std::time::Instant::now();
+                if g.last_typed
+                    .is_some_and(|t| now.duration_since(t).as_millis() > 500)
+                {
+                    g.layers.clear_typeahead();
+                }
+                g.last_typed = Some(now);
                 let names = label_names.to_vec();
                 format!(
                     "layers typeahead: {}",
@@ -505,6 +536,28 @@ fn key(g: &mut Gallery, k: GKey, label_names: &[String]) -> String {
             GKey::Tab => unreachable!("handled above"),
         }
     }
+}
+
+/// Chrome rects that must not move when the popup opens or closes.
+fn snapshot_chrome(layout: &hamesh_layout::LayoutOutput) -> Vec<(String, (f32, f32, f32, f32))> {
+    [
+        "canvas",
+        "layers",
+        "layers-view",
+        "rail",
+        "side",
+        "header",
+        "footer",
+        "fonts-field",
+    ]
+    .iter()
+    .filter_map(|id| {
+        layout
+            .nodes
+            .get(*id)
+            .map(|n| (id.to_string(), (n.rect.x, n.rect.y, n.rect.w, n.rect.h)))
+    })
+    .collect()
 }
 
 fn center(scene: &hamesh_scene::Scene, id: &str) -> Option<(f32, f32)> {
@@ -546,11 +599,15 @@ fn assert_only_edge_rows_clip(report: &hamesh_inspect::VisualReport, max: usize,
         report.off_viewport.is_empty(),
         "{step}: nothing may leave the viewport"
     );
-    assert!(
-        report.overlaps.is_empty(),
-        "{step}: overlaps: {:?}",
-        report.overlaps
-    );
+    // A floating popup legitimately covers content beneath it (it
+    // paints on the z=100 overlay layer, above everything). Only
+    // same-layer overlaps are defects.
+    let bad: Vec<_> = report
+        .overlaps
+        .iter()
+        .filter(|o| !(o.over.starts_with("fonts-popup") || o.over.starts_with("fonts-opt-")))
+        .collect();
+    assert!(bad.is_empty(), "{step}: overlaps: {bad:?}");
 }
 
 fn main() {
@@ -573,6 +630,7 @@ fn main() {
         hamesh_render::save_png(&frame, &format!("{out}/gal-{w}x{h}-1-initial.png")).expect("png");
         let rep1 = hamesh_inspect::visual_report(&scene);
         assert_only_edge_rows_clip(&rep1, 1, "initial");
+        let closed_chrome = snapshot_chrome(&layout);
 
         // 2. Pointer: select a row visible at every size, hover its
         // neighbour. Selection stays put while hover previews.
@@ -639,6 +697,55 @@ fn main() {
         frame = hamesh_render::render(&scene);
         hamesh_render::save_png(&frame, &format!("{out}/gal-{w}x{h}-3-picker-open.png"))
             .expect("png");
+        // The popup floats: every chrome rect must be identical to
+        // the closed frame. The Eye audits the open state too.
+        assert_eq!(
+            snapshot_chrome(&layout),
+            closed_chrome,
+            "opening the popup must not reflow"
+        );
+        let rep_open = hamesh_inspect::visual_report(&scene);
+        assert_only_edge_rows_clip(&rep_open, 2, "open popup");
+        // A floating popup legitimately covers content beneath it
+        // (it paints on the z=100 overlay layer, above everything).
+        let pop = scene
+            .nodes
+            .iter()
+            .find(|n| n.id == "fonts-popup")
+            .expect("popup");
+        assert!(
+            pop.rect.x >= 0.0 && pop.rect.y >= 0.0,
+            "popup on-screen: {:?}",
+            pop.rect
+        );
+        assert!(
+            pop.rect.x + pop.rect.w <= w as f32 + 0.5 && pop.rect.y + pop.rect.h <= h as f32 + 0.5,
+            "popup inside viewport: {:?}",
+            pop.rect
+        );
+        // 5b. Resize with the popup open: it re-anchors inside the
+        // smaller viewport instead of stranding content off-screen.
+        let (app2, layout2) = refresh(&mut g, w as f32, h as f32 - 40.0);
+        let scene2 = hamesh_scene::build(&app2, &layout2, rev);
+        let pop2 = scene2
+            .nodes
+            .iter()
+            .find(|n| n.id == "fonts-popup")
+            .expect("popup");
+        assert!(
+            pop2.rect.x >= 0.0 && pop2.rect.y >= 0.0,
+            "resized popup on-screen: {:?}",
+            pop2.rect
+        );
+        assert!(
+            pop2.rect.x + pop2.rect.w <= w as f32 + 0.5
+                && pop2.rect.y + pop2.rect.h <= h as f32 - 40.0 + 0.5,
+            "resized popup fits: {:?}",
+            pop2.rect
+        );
+        let rep5b = hamesh_inspect::visual_report(&scene2);
+        assert_only_edge_rows_clip(&rep5b, 2, "resized open popup");
+
         let matches = g.fonts.filtered();
         assert!(!matches.is_empty(), "query 'ne' must match installed fonts");
         assert!(
@@ -657,6 +764,31 @@ fn main() {
         assert!(
             dismissed.ends_with("false"),
             "nothing to dismiss: {dismissed}"
+        );
+        // Pointer path: reopen and click the second option outright.
+        // (This exercises the painted-row <-> widget-row agreement
+        // that keyboard-only drills cannot see.)
+        let note = press(&mut g, &app, &scene, fx, fy);
+        assert!(g.fonts.is_open(), "{note}");
+        rev += 1;
+        (app, layout) = refresh(&mut g, w as f32, h as f32);
+        scene = hamesh_scene::build(&app, &layout, rev);
+        // Click the first visible option, wherever the highlight
+        // rests after the reopen reveal.
+        let s = g.fonts.visible().start;
+        let expect = g
+            .fonts
+            .items()
+            .get(g.fonts.filtered()[s])
+            .cloned()
+            .unwrap_or_default();
+        let (ox, oy) = center(&scene, &format!("fonts-opt-{s}")).expect("visible option painted");
+        let note = press(&mut g, &app, &scene, ox, oy);
+        assert!(!g.fonts.is_open(), "{note}");
+        assert_eq!(
+            g.fonts.value().unwrap_or(""),
+            expect,
+            "pointer commits exactly the pointed row"
         );
 
         // 6. Final frame: the canvas headline is set in the picked font.
