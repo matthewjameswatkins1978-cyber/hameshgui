@@ -378,7 +378,10 @@ pub fn press(t: &mut Tasks, app: &App, scene: &hamesh_scene::Scene, x: f32, y: f
             }
             Hit::Action { command } => {
                 t.focus = 2;
-                match command.as_str() {
+                // An open popup never survives a press elsewhere: the
+                // command runs first (clear needs the open query),
+                // then the popup cancels without touching the value.
+                let note = match command.as_str() {
                     "toggle-done" => toggle_selected(t),
                     "clear-filter" => {
                         if t.filter.clear_query() {
@@ -388,6 +391,11 @@ pub fn press(t: &mut Tasks, app: &App, scene: &hamesh_scene::Scene, x: f32, y: f
                         }
                     }
                     other => format!("unknown command {other}"),
+                };
+                if t.filter.close() {
+                    format!("{note} (popup dismissed)")
+                } else {
+                    note
                 }
             }
             Hit::Chrome(hit) => {
@@ -589,5 +597,12 @@ mod tests {
         assert!(note.contains("done"), "{note}");
         assert!(t.tasks[0].done, "row 0 was selected: {note}");
         assert_eq!(t.focus, 2);
+        // An action press dismisses an open popup after running.
+        t.filter.open();
+        let (app2, _layout2, scene2) = frame(&mut t, 1440.0, 900.0);
+        let (dx, dy) = center_of(&scene2, "btn-clear");
+        let note = press(&mut t, &app2, &scene2, dx, dy);
+        assert!(!t.filter.is_open(), "{note}");
+        assert!(note.contains("dismissed"), "{note}");
     }
 }

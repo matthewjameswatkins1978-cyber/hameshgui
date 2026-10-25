@@ -1192,6 +1192,7 @@ dependencies = [
  "hamesh-pi",
  "hamesh-render",
  "hamesh-scene",
+ "hamesh-tasks",
  "hamesh-text",
  "hamesh-widgets",
  "pollster",
