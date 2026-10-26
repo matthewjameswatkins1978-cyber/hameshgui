@@ -68,7 +68,15 @@ fn fake_pi_server(listener: TcpListener) {
                 event(&mut writer, "{\"type\":\"future_event_kind\",\"x\":1}");
                 event(
                     &mut writer,
+                    "{\"type\":\"message_update\",\"assistantMessageEvent\":{\"type\":\"toolcall_start\",\"id\":\"c1\",\"toolName\":\"read\"}}",
+                );
+                event(
+                    &mut writer,
                     "{\"type\":\"message_update\",\"assistantMessageEvent\":{\"type\":\"text_delta\",\"delta\":\"Hello \"}}",
+                );
+                event(
+                    &mut writer,
+                    "{\"type\":\"tool_execution_end\",\"toolCallId\":\"c1\",\"toolName\":\"read\",\"isError\":false,\"durationMs\":12}",
                 );
                 event(
                     &mut writer,
@@ -122,12 +130,22 @@ fn full_session_against_fake() {
     assert_eq!(models[0].id, "m");
 
     let mut streamed = String::new();
+    let mut tools = Vec::new();
     let (text, aborted) = client
-        .prompt_and_wait("say hi", &mut |d: &str| streamed.push_str(d), TIMEOUT)
+        .prompt_and_wait(
+            "say hi",
+            &mut |p| match p {
+                hamesh_pi::PiProgress::Delta(d) => streamed.push_str(&d),
+                hamesh_pi::PiProgress::ToolNote(n) => tools.push(n),
+            },
+            TIMEOUT,
+        )
         .expect("prompt_and_wait");
     assert_eq!(text, "Hello world");
     assert_eq!(streamed, "Hello world");
     assert!(!aborted);
+    // Tool activity arrives in wire order between the deltas.
+    assert_eq!(tools, vec!["tool read …", "tool read done (12ms)"]);
 
     // The fake's malformed line + unknown event were tolerated.
     assert!(client.malformed_lines() >= 1, "malformed line not counted");

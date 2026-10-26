@@ -1246,6 +1246,7 @@ enum PiEvt {
     Failed(String),
     State(hamesh_pi::EngineState),
     History(Vec<hamesh_pi::HistoryMessage>),
+    ToolNote(String),
 }
 
 /// Persistent-session launch config, all from CLI flags. `None` means
@@ -1328,8 +1329,11 @@ fn pi_worker(
                 let _ = events.send(PiEvt::Started);
                 let r = client.prompt_and_wait(
                     &text,
-                    &mut |d: &str| {
-                        let _ = events.send(PiEvt::Delta(d.to_string()));
+                    &mut |p| {
+                        let _ = events.send(match p {
+                            hamesh_pi::PiProgress::Delta(d) => PiEvt::Delta(d),
+                            hamesh_pi::PiProgress::ToolNote(n) => PiEvt::ToolNote(n),
+                        });
                     },
                     std::time::Duration::from_secs(180),
                 );
@@ -1363,6 +1367,7 @@ impl HameshWindowApp {
             Failed(String),
             State(hamesh_pi::EngineState),
             History(Vec<hamesh_pi::HistoryMessage>),
+            ToolNote(String),
         }
         let mut acts = Vec::new();
         if let Some(link) = self.pi.as_mut() {
@@ -1374,6 +1379,7 @@ impl HameshWindowApp {
                     PiEvt::Failed(e) => acts.push(Act::Failed(e)),
                     PiEvt::State(st) => acts.push(Act::State(st)),
                     PiEvt::History(h) => acts.push(Act::History(h)),
+                    PiEvt::ToolNote(n) => acts.push(Act::ToolNote(n)),
                 }
             }
         }
@@ -1483,6 +1489,16 @@ impl HameshWindowApp {
                             messages,
                             streaming,
                         );
+                        changed = true;
+                    }
+                }
+                Act::ToolNote(n) => {
+                    if let Some(c) = self.console.as_mut() {
+                        c.widgets.feed.push("tool", &n);
+                        let vp = c.widgets.feed_viewport.max(200.0);
+                        c.widgets.feed.scroll_to_bottom(vp);
+                        self.trace
+                            .record("console.tool", &n, self.app.revision, None);
                         changed = true;
                     }
                 }

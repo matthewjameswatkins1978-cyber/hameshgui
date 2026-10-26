@@ -35,8 +35,19 @@ pub enum PiEvent {
     Settled { aborted: bool },
     /// Transport died; no more records will arrive.
     TransportClosed,
+    /// Tool activity worth showing while a run is live.
+    ToolNote(String),
     /// Anything else, preserved verbatim for forward compatibility.
     Raw(serde_json::Value),
+}
+
+/// Live run progress for `prompt_and_wait` consumers: streamed text
+/// and tool-activity notes share one callback so the UI thread sees a
+/// single ordered stream, exactly as the wire delivered it.
+#[derive(Clone, Debug)]
+pub enum PiProgress {
+    Delta(String),
+    ToolNote(String),
 }
 
 /// Failure modes. Timeouts and transport death are explicit — a hung Pi
@@ -615,12 +626,13 @@ impl PiClient {
     }
 
     /// Send a prompt, collect streamed text, resolve at `agent_settled`.
-    /// `progress` receives each delta live (feed the conversation view).
-    /// `idle_timeout` bounds the whole wait, not each delta.
+    /// `progress` receives deltas and tool notes live in wire order
+    /// (feed the conversation view). `idle_timeout` bounds the whole
+    /// wait, not each delta.
     pub fn prompt_and_wait(
         &mut self,
         message: &str,
-        progress: &mut dyn FnMut(&str),
+        progress: &mut dyn FnMut(PiProgress),
         idle_timeout: Duration,
     ) -> Result<(String, bool), PiError> {
         let deadline = Instant::now() + idle_timeout;
@@ -637,7 +649,10 @@ impl PiClient {
             match self.next_event(left)? {
                 PiEvent::TextDelta(d) => {
                     text.push_str(&d);
-                    progress(&d);
+                    progress(PiProgress::Delta(d));
+                }
+                PiEvent::ToolNote(n) => {
+                    progress(PiProgress::ToolNote(n));
                 }
                 PiEvent::Settled { aborted } => return Ok((text, aborted)),
                 PiEvent::TransportClosed => return Err(PiError::Closed),
@@ -756,6 +771,9 @@ fn reader_loop(
             }
             Record::Settled { aborted } => {
                 let _ = events.send(PiEvent::Settled { aborted });
+            }
+            Record::ToolNote(n) => {
+                let _ = events.send(PiEvent::ToolNote(n));
             }
             Record::Event { value, .. } => {
                 let _ = events.send(PiEvent::Raw(value));
