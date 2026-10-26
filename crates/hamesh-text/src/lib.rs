@@ -487,28 +487,10 @@ fn ink_uncached(
     }
     let layout = TextLayout::new_varied(text, max_width, font_size, line_height, spec);
     let baseline = layout.first_baseline()?;
-    let glyphs = glue::rasterize_layout(&layout);
-    let mut x0 = f32::INFINITY;
-    let mut y0 = f32::INFINITY;
-    let mut x1 = f32::NEG_INFINITY;
-    let mut y1 = f32::NEG_INFINITY;
-    for g in &glyphs {
-        let (gx, gy) = glue::glyph_origin(g, 0.0, 0.0);
-        for (i, a) in g.alpha.iter().enumerate() {
-            if *a < 8 {
-                continue;
-            }
-            let px = gx + (i as u32 % g.w) as i32;
-            let py = gy + (i as u32 / g.w) as i32;
-            x0 = x0.min(px as f32);
-            y0 = y0.min(py as f32);
-            x1 = x1.max(px as f32 + 1.0);
-            y1 = y1.max(py as f32 + 1.0);
-        }
-    }
-    if x0 == f32::INFINITY {
-        return None;
-    }
+    // Outline union, not rasterization: identical placement mapping,
+    // no alpha walk. Raster ink stays the CPU paint path; ink bounds
+    // are a diagnostic and must never cost a raster per query.
+    let (x0, y0, x1, y1) = glue::outline_bounds_union(&layout)?;
     Some(InkBox {
         x0,
         y0,
@@ -783,6 +765,69 @@ mod tests {
         // Descenders extend ink below the baseline.
         let desc = ink_box("Inspected", 400.0, 13.0, None, &FontSpec::default()).expect("ink");
         assert!(desc.y1 > desc.baseline, "p tail should pass the baseline");
+    }
+
+    #[test]
+    fn ink_outline_agrees_with_raster_within_a_pixel() {
+        // The outline-union fast path must stay honest against the
+        // raster ground truth it replaced: same text, same placement
+        // mapping, within antialiasing tolerance.
+        register_fonts_from_dir(&bundled_fonts_dir());
+        for text in ["Connected", "Inspected", "Hamburg — pig"] {
+            let layout = TextLayout::new_varied(text, 400.0, 13.0, None, &FontSpec::default());
+            let glyphs = glue::rasterize_layout(&layout);
+            let mut x0 = f32::INFINITY;
+            let mut y0 = f32::INFINITY;
+            let mut x1 = f32::NEG_INFINITY;
+            let mut y1 = f32::NEG_INFINITY;
+            for g in &glyphs {
+                let (gx, gy) = glue::glyph_origin(g, 0.0, 0.0);
+                for (i, a) in g.alpha.iter().enumerate() {
+                    if *a < 8 {
+                        continue;
+                    }
+                    let px = gx + (i as u32 % g.w) as i32;
+                    let py = gy + (i as u32 / g.w) as i32;
+                    x0 = x0.min(px as f32);
+                    y0 = y0.min(py as f32);
+                    x1 = x1.max(px as f32 + 1.0);
+                    y1 = y1.max(py as f32 + 1.0);
+                }
+            }
+            let ink = ink_box(text, 400.0, 13.0, None, &FontSpec::default()).expect("ink");
+            for (got, want, axis) in [
+                (ink.x0, x0, "x0"),
+                (ink.y0, y0, "y0"),
+                (ink.x1, x1, "x1"),
+                (ink.y1, y1, "y1"),
+            ] {
+                assert!(
+                    (got - want).abs() <= 1.0,
+                    "{text} {axis}: outline {got} vs raster {want}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn ink_stays_affordable_on_cache_misses() {
+        // Regression for the streaming stall: every streaming delta is
+        // an ink-cache miss, so miss cost must be bounded. The raster
+        // + pixel-walk path this replaced took ~19s on 16KB; the
+        // outline-union path must stay three orders of magnitude under
+        // that (generous bound: debug builds, loaded machines).
+        register_fonts_from_dir(&bundled_fonts_dir());
+        let unit = "Bridges are among humanity's oldest and most eloquent structures. ";
+        let text: String = unit.repeat(300);
+        assert!(text.len() > 16000);
+        let t0 = std::time::Instant::now();
+        let ink = ink_box(&text, 700.0, 16.0, None, &FontSpec::default());
+        let dt = t0.elapsed();
+        assert!(ink.is_some());
+        assert!(
+            dt < std::time::Duration::from_secs(5),
+            "16KB ink miss took {dt:?}"
+        );
     }
 
     #[test]

@@ -88,6 +88,124 @@ pub fn rasterize_cached(
     v
 }
 
+/// Union of per-glyph outline bounds in layout space, WITHOUT
+/// rasterizing. Same scaler setup as the raster path (hinted, run
+/// variation coords), same integer placement mapping the rasterizer
+/// Memoized glyph outline bounds in glyph space: the pure function of
+/// (font, size, variations, glyph) that `outline_bounds_union` unions
+/// per pen position. Hinting is OFF here (measured ~1ms/glyph with the
+/// bytecode hinter vs ~15µs without; grid-fitting shifts edges ≤1px and
+/// ink is a diagnostic bound, never paint). Cache key carries the font
+/// blob id + index so two faces never share entries; wholesale eviction
+/// matches the sibling caches. Values computed identically with or
+/// without the cache — Eye truth never depends on cache state.
+type GlyphInkCache = std::sync::Mutex<
+    std::collections::HashMap<(u64, u64, u32, u32, u64, u32), (f32, f32, f32, f32)>,
+>;
+static GLYPH_INK_CACHE: std::sync::OnceLock<GlyphInkCache> = std::sync::OnceLock::new();
+
+fn vars_fingerprint(vars: &[([u8; 4], f32)]) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    for (tag, v) in vars {
+        tag.hash(&mut h);
+        v.to_bits().hash(&mut h);
+    }
+    h.finish()
+}
+
+fn glyph_outline_bounds(
+    scaler: &mut swash::scale::Scaler<'_>,
+    font: &parley::FontData,
+    run_size: f32,
+    vars_fp: u64,
+    id: u32,
+) -> Option<(f32, f32, f32, f32)> {
+    let key = (
+        crate::font_generation(),
+        font.data.id(),
+        font.index,
+        run_size.to_bits(),
+        vars_fp,
+        id,
+    );
+    let cache =
+        GLYPH_INK_CACHE.get_or_init(|| std::sync::Mutex::new(std::collections::HashMap::new()));
+    if let Some(hit) = cache.lock().expect("glyph ink cache").get(&key) {
+        return Some(*hit);
+    }
+    let outline = scaler.scale_outline(id as u16)?;
+    let b = outline.bounds();
+    let v = (b.min.x, b.min.y, b.max.x, b.max.y);
+    let mut c = cache.lock().expect("glyph ink cache");
+    if c.len() >= 8192 {
+        c.clear();
+    }
+    c.insert(key, v);
+    Some(v)
+}
+
+/// uses — only the alpha-pixel walk is skipped. This is what makes ink
+/// bounds affordable on cache misses (e.g. every streaming delta):
+/// O(new glyphs) outline work instead of O(pixels) raster + walk. The
+/// union can exceed raster ink by a pixel on antialiased edges; every
+/// consumer treats ink as a diagnostic bound, never a paint contract.
+pub fn outline_bounds_union(layout: &TextLayout) -> Option<(f32, f32, f32, f32)> {
+    let mut ctx = ScaleContext::new();
+    let mut x0 = f32::INFINITY;
+    let mut y0 = f32::INFINITY;
+    let mut x1 = f32::NEG_INFINITY;
+    let mut y1 = f32::NEG_INFINITY;
+    for run in layout.runs() {
+        let Some(font_ref) = FontRef::from_index(run.font.data.data(), run.font.index as usize)
+        else {
+            continue;
+        };
+        let coords: Vec<swash::Setting<f32>> = run
+            .vars
+            .iter()
+            .map(|(tag, v)| swash::Setting {
+                tag: swash::tag_from_bytes(tag),
+                value: *v,
+            })
+            .collect();
+        let vars_fp = vars_fingerprint(&run.vars);
+        let mut scaler = ctx
+            .builder(font_ref)
+            .size(run.size)
+            .hint(false)
+            .variations(coords.iter().copied())
+            .build();
+        for (id, gx, gy) in run.glyphs.iter().copied() {
+            let Some((min_x, min_y, max_x, max_y)) =
+                glyph_outline_bounds(&mut scaler, &run.font, run.size, vars_fp, id)
+            else {
+                continue;
+            };
+            let w = (max_x - min_x).ceil();
+            let h = (max_y - min_y).ceil();
+            if w <= 0.0 || h <= 0.0 {
+                continue;
+            }
+            // Same placement mapping the rasterizer uses (see the
+            // placement derivation in swash's render_into): fractional
+            // pen offsets shift the outline before integer placement.
+            let left = (min_x + gx.fract()).floor();
+            let top = h + (min_y + gy.fract()).ceil();
+            let px0 = (gx + left).floor();
+            let py0 = (gy - top).floor();
+            x0 = x0.min(px0);
+            y0 = y0.min(py0);
+            x1 = x1.max(px0 + w);
+            y1 = y1.max(py0 + h);
+        }
+    }
+    if x0 == f32::INFINITY {
+        return None;
+    }
+    Some((x0, y0, x1, y1))
+}
+
 /// Rasterize owned positioned runs (CPU path). The swash `FontRef`
 /// borrows the Arc-backed font data owned by each `TextRun`, so this
 /// is lifetime-clean for both CPU and GPU consumers.
@@ -98,6 +216,29 @@ pub fn rasterize_layout(layout: &TextLayout) -> Vec<RasterGlyph> {
         rasterize_run(&mut ctx, &run, &mut out);
     }
     out
+}
+
+/// Per-glyph bitmap memoization for the paint path. Paint needs
+/// hinting (unlike ink bounds), and the hinter costs ~1ms/glyph — so a
+/// full-text rasterize on every streaming delta blocks the UI thread
+/// for seconds. Glyph bitmaps are a pure function of
+/// (font, size, variations, glyph, fractional pen offset): same inputs,
+/// same pixels, so cached bitmaps are bit-identical to fresh renders.
+/// Positions recur frame-to-frame for unchanged text, which is exactly
+/// the streaming case (only the delta's glyphs miss). 65536-entry cap:
+/// large enough to hold whole documents (a 20KB message is ~20k glyphs;
+/// the 512-entry wholesale-clear pattern of the sibling caches would
+/// evict mid-population and never help). Worst-case memory is bounded
+/// (~65k small alpha bitmaps); typical sessions hold hundreds.
+type GlyphBitmapCache = std::sync::Mutex<
+    std::collections::HashMap<(u64, u64, u32, u32, u64, u32, u32, u32), RasterGlyph>,
+>;
+static GLYPH_BITMAP_CACHE: std::sync::OnceLock<GlyphBitmapCache> = std::sync::OnceLock::new();
+
+fn fonts_fingerprint(font: &parley::FontData) -> (u64, u32) {
+    // Blob id is stable per loaded font; index disambiguates faces in
+    // a collection. Together they identify the outlines exactly.
+    (font.data.id(), font.index)
 }
 
 fn rasterize_run(ctx: &mut ScaleContext, run: &TextRun, out: &mut Vec<RasterGlyph>) {
@@ -124,8 +265,40 @@ fn rasterize_run(ctx: &mut ScaleContext, run: &TextRun, out: &mut Vec<RasterGlyp
         .build();
     let mut render = Render::new(&[Source::Outline]);
     render.format(Format::Alpha);
+    let (blob_id, font_idx) = fonts_fingerprint(&run.font);
+    let vars_fp = vars_fingerprint(&run.vars);
     for (id, gx, gy) in run.glyphs.iter().copied() {
+        // Exact fractional offsets are part of the key: same glyph at
+        // the same subpixel position rasterizes identically, and text
+        // that did not move hits every frame.
+        let key = (
+            crate::font_generation(),
+            blob_id,
+            font_idx,
+            run.size.to_bits(),
+            vars_fp,
+            id,
+            gx.fract().to_bits(),
+            gy.fract().to_bits(),
+        );
+        let cache = GLYPH_BITMAP_CACHE
+            .get_or_init(|| std::sync::Mutex::new(std::collections::HashMap::new()));
+        if let Some(hit) = cache.lock().expect("glyph bitmap cache").get(&key) {
+            let mut g = hit.clone();
+            g.pen_x = gx;
+            g.pen_y = gy;
+            out.push(g);
+            continue;
+        }
+        let before = out.len();
         rasterize_one(&mut scaler, &mut render, id, gx, gy, out);
+        if out.len() > before {
+            let mut c = cache.lock().expect("glyph bitmap cache");
+            if c.len() >= 65536 {
+                c.clear();
+            }
+            c.insert(key, out[before].clone());
+        }
     }
 }
 
