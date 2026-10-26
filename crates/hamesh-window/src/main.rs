@@ -192,6 +192,9 @@ struct HameshWindowApp {
     /// M4 live loop: background Pi worker link. `None` unless `--pi`.
     /// Never blocks the UI thread; drains between frames.
     pi: Option<PiLink>,
+    /// Last session config used for a worker spawn (flags or attach):
+    /// attach requests with empty dir/cwd fall back to these.
+    pi_session: Option<SessionCfg>,
     use_pi: bool,
     cursor: (f32, f32),
     size: (u32, u32),
@@ -241,6 +244,7 @@ impl HameshWindowApp {
             console_smoke_done: false,
             editor_smoke_done: false,
             pi: None,
+            pi_session: None,
             use_pi: false,
             cursor: (0.0, 0.0),
             size: (800, 600),
@@ -655,6 +659,46 @@ impl HameshWindowApp {
         }
     }
 
+    /// Spawn (or respawn) the background Pi worker. Records the session
+    /// for later attach defaults; dropping the old link retires its
+    /// worker (channel close ends its loop, client drop kills the child).
+    fn spawn_pi_link(&mut self, session: Option<SessionCfg>) {
+        let (job_tx, job_rx) = std::sync::mpsc::channel::<PiJob>();
+        let (evt_tx, evt_rx) = std::sync::mpsc::channel::<PiEvt>();
+        let for_worker = session.clone();
+        std::thread::spawn(move || pi_worker(job_rx, evt_tx, for_worker));
+        self.pi = Some(PiLink {
+            job_tx,
+            evt_rx,
+            live_index: None,
+            follow: false,
+        });
+        self.pi_session = session.clone();
+        self.trace.record(
+            "pi.worker",
+            "background pi worker spawned (--pi)",
+            self.app.revision,
+            None,
+        );
+        match session {
+            Some(s) => {
+                self.trace.record(
+                    "pi.session",
+                    &format!("attach sid={} dir={} cwd={}", s.id, s.dir, s.cwd),
+                    self.app.revision,
+                    None,
+                );
+                println!(
+                    "PI session mode: attach sid={} (persistent, history restores)",
+                    s.id
+                );
+            }
+            None => {
+                println!("PI live mode: composer submits to a background pi worker");
+            }
+        }
+    }
+
     /// Translate the driver's abort intent into a worker cancel — but
     /// only while a run is actually live. Pointer click, keyboard Enter
     /// and inspector key all share this gate.
@@ -680,6 +724,8 @@ impl HameshWindowApp {
         };
         let note = if note == "abort requested" {
             self.console_abort()
+        } else if note == "attach requested" {
+            self.console_attach()
         } else {
             note
         };
@@ -687,6 +733,53 @@ impl HameshWindowApp {
         self.trace
             .record("console.click", &note, self.app.revision, None);
         println!("CONSOLE click: {note}");
+    }
+
+    /// Translate the driver's attach intent into a worker respawn on a
+    /// (possibly different) persistent session. Refused while a run is
+    /// live — abort first. The feed clears and history restores through
+    /// the same History event as launch attach.
+    fn console_attach(&mut self) -> String {
+        if self.pi.as_ref().is_some_and(|l| l.live_index.is_some()) {
+            return "attach refused: run live, abort first".to_string();
+        }
+        let req = match self.console.as_mut().and_then(|c| c.pending_attach.take()) {
+            Some(r) => r,
+            None => return "attach refused: no request".to_string(),
+        };
+        let fallback = self.pi_session.clone().unwrap_or(SessionCfg {
+            id: String::new(),
+            dir: String::new(),
+            cwd: String::new(),
+        });
+        let dir = if req.dir.is_empty() {
+            fallback.dir
+        } else {
+            req.dir
+        };
+        let cwd = if req.cwd.is_empty() {
+            fallback.cwd
+        } else {
+            req.cwd
+        };
+        if req.id.is_empty() || dir.is_empty() || cwd.is_empty() {
+            return "usage: /attach <id> [dir] [cwd] (dir/cwd fall back to the current session)"
+                .to_string();
+        }
+        // Retire the old worker first: dropping its link ends its loop
+        // and kills its child, so two workers never share a session.
+        self.pi = None;
+        if let Some(c) = self.console.as_mut() {
+            c.widgets.feed.messages.clear();
+            c.widgets.feed.scroll_px = 0.0;
+        }
+        self.spawn_pi_link(Some(SessionCfg {
+            id: req.id.clone(),
+            dir,
+            cwd,
+        }));
+        self.refresh_console();
+        format!("attached sid={} (history restoring)", req.id)
     }
 
     /// Console keyboard: map the winit event onto the shared key core,
@@ -773,6 +866,12 @@ impl HameshWindowApp {
         // pointer press; translate it through the shared abort gate.
         if last == "abort requested" {
             last = self.console_abort();
+            self.refresh_console();
+        }
+        // Same for Attach: the slash-command submit and the Attach
+        // button converge here with pointer and inspector key paths.
+        if last == "attach requested" {
+            last = self.console_attach();
             self.refresh_console();
         }
         let submitted: Option<String> = match (had_enter, before) {
@@ -2397,39 +2496,7 @@ impl ApplicationHandler<UserEvent> for HameshWindowApp {
             println!("EDITOR open: file editor — click, type, Tab, F12 dumps Eye evidence, Esc cancels/quits");
         }
         if self.use_pi && self.pi.is_none() {
-            let (job_tx, job_rx) = std::sync::mpsc::channel::<PiJob>();
-            let (evt_tx, evt_rx) = std::sync::mpsc::channel::<PiEvt>();
-            let session = session_cfg();
-            std::thread::spawn(move || pi_worker(job_rx, evt_tx, session));
-            self.pi = Some(PiLink {
-                job_tx,
-                evt_rx,
-                live_index: None,
-                follow: false,
-            });
-            self.trace.record(
-                "pi.worker",
-                "background pi worker spawned (--pi)",
-                self.app.revision,
-                None,
-            );
-            match session_cfg() {
-                Some(s) => {
-                    self.trace.record(
-                        "pi.session",
-                        &format!("attach sid={} dir={} cwd={}", s.id, s.dir, s.cwd),
-                        self.app.revision,
-                        None,
-                    );
-                    println!(
-                        "PI session mode: attach sid={} (persistent, history restores)",
-                        s.id
-                    );
-                }
-                None => {
-                    println!("PI live mode: composer submits to a background pi worker");
-                }
-            }
+            self.spawn_pi_link(session_cfg());
         }
         if self.use_inspect && !self.inspect_serving {
             if let Some(proxy) = self.proxy.clone() {
