@@ -24,6 +24,7 @@ members = [
   "apps/hamesh-035-lab",
   "apps/hamesh-036-lab",
   "crates/hamesh-tasks",
+  "crates/hamesh-console",
   "apps/hamesh-mcp",
   "apps/hamesh-mcp-drill",
 ]
