@@ -1,0 +1,15 @@
+GALLERY mode: ListView + Picker workspace from hamesh-gallery
+GALLERY open: ListView + Picker workspace — click, wheel, type, Tab, F12 dumps Eye evidence, Esc quits
+HAMESH window open: 800x600 — click, Space, R, I, Esc
+EYE app_rev=58 scene_rev=8 frames=3 nodes=58
+GALLERY click: selected layer 2
+GALLERY key: focus -> picker
+GALLERY key: picker type: true
+GALLERY key: picker type: true
+GALLERY key: picker nav: true
+GALLERY key: picker committed: DeVinne Txt BT
+EYE app_rev=58 scene_rev=15 frames=38 nodes=58
+GALLERY click: picker opened
+GALLERY click: selected layer 0 (popup dismissed)
+EYE app_rev=58 scene_rev=18 frames=64 nodes=58
+trace -> target/hamesh-window-trace.json

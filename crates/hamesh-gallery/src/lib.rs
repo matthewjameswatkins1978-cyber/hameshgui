@@ -8,7 +8,7 @@
 
 use hamesh_blocks as b;
 use hamesh_core::App;
-use hamesh_widgets::{ListView, Nav, Picker};
+use hamesh_widgets::{list_nav, picker_nav, Hit, Key, ListView, Picker};
 
 pub const ROW_H: f32 = 32.0;
 const FIELD_H: f32 = 36.0;
@@ -16,21 +16,8 @@ const ROOT_PAD: f32 = 12.0;
 const HEADER_PAD: f32 = 12.0;
 const FOOTER_H: f32 = 28.0;
 
-/// Keyboard intents a native loop forwards. Paging included: long
-/// lists are unusable without it.
-pub enum GKey {
-    Up,
-    Down,
-    PageUp,
-    PageDown,
-    Home,
-    End,
-    Char(char),
-    Enter,
-    Escape,
-    Backspace,
-    Tab,
-}
+/// Keyboard intents are the shared `hamesh_widgets::Key` vocabulary:
+/// no per-app key enum, no second mapping table.
 
 #[derive(Clone)]
 pub struct Gallery {
@@ -385,37 +372,9 @@ pub fn refresh(g: &mut Gallery, w: f32, h: f32) -> (App, hamesh_layout::LayoutOu
     (app, layout)
 }
 
-/// Where a hit belongs. Labels, icons and rows all resolve to the
-/// row: the driver never parses ids, it reads props up the tree.
-enum Route {
-    LayerRow(usize),
-    PickOpt(usize),
-    PickerField,
-    Chrome(String),
-}
-
-fn route(app: &App, id: &str) -> Route {
-    let mut cur = Some(id.to_string());
-    while let Some(cid) = cur {
-        let Some(c) = app.get(&cid) else { break };
-        if let Some(r) = c.props.get("row").and_then(|v| v.parse::<usize>().ok()) {
-            if c.props.contains_key("list") {
-                return Route::LayerRow(r);
-            }
-        }
-        if let Some(p) = c.props.get("pick").and_then(|v| v.parse::<usize>().ok()) {
-            return Route::PickOpt(p);
-        }
-        if c.props.contains_key("picker") {
-            return Route::PickerField;
-        }
-        cur = c.parent.as_ref().map(|p| p.0.clone());
-    }
-    Route::Chrome(id.to_string())
-}
-
-/// Pointer press through the consumer's whole routing: hit-test, read
-/// the row/option identity props, drive the widget. Returns a note.
+/// Pointer press through the shared `hamesh_widgets::Hit` router:
+/// hit-test, match the identity props, drive the widget. This gallery
+/// only owns one list and one picker. Returns a note.
 pub fn press(g: &mut Gallery, app: &App, scene: &hamesh_scene::Scene, x: f32, y: f32) -> String {
     match hamesh_scene::hit_test(app, scene, x, y) {
         None => {
@@ -426,8 +385,8 @@ pub fn press(g: &mut Gallery, app: &App, scene: &hamesh_scene::Scene, x: f32, y:
                 "press hit nothing".to_string()
             }
         }
-        Some(id) => match route(app, &id) {
-            Route::LayerRow(row) => {
+        Some(id) => match Hit::of(app, &id) {
+            Hit::ListRow { row, .. } => {
                 g.focus = 0;
                 let note = if g.layers.select(row) {
                     format!("selected layer {row}")
@@ -444,7 +403,7 @@ pub fn press(g: &mut Gallery, app: &App, scene: &hamesh_scene::Scene, x: f32, y:
                     note
                 }
             }
-            Route::PickOpt(pick) => {
+            Hit::PickOption { option: pick, .. } => {
                 g.focus = 1;
                 // Human two-step: highlight under the pointer, then commit.
                 let popup = scene
@@ -460,7 +419,7 @@ pub fn press(g: &mut Gallery, app: &App, scene: &hamesh_scene::Scene, x: f32, y:
                     None => "commit found nothing (unchanged)".to_string(),
                 }
             }
-            Route::PickerField => {
+            Hit::PickerField { .. } => {
                 g.focus = 1;
                 if g.fonts.toggle() {
                     "picker opened".to_string()
@@ -468,7 +427,7 @@ pub fn press(g: &mut Gallery, app: &App, scene: &hamesh_scene::Scene, x: f32, y:
                     "picker closed".to_string()
                 }
             }
-            Route::Chrome(hit) => {
+            Hit::Chrome(hit) | Hit::Action { command: hit } => {
                 if g.fonts.is_open() {
                     g.fonts.close();
                     format!("hit {hit} (chrome, popup dismissed)")
@@ -494,11 +453,11 @@ pub fn hover(g: &mut Gallery, scene: &hamesh_scene::Scene, x: f32, y: f32, app: 
         .iter()
         .find(|n| n.id == "fonts-popup")
         .map(|n| n.rect.clone());
-    match route(app, &id) {
-        Route::LayerRow(_) => view
+    match Hit::of(app, &id) {
+        Hit::ListRow { .. } => view
             .map(|r| g.layers.hover_at_viewport(y - r.y))
             .unwrap_or(false),
-        Route::PickOpt(_) => popup
+        Hit::PickOption { .. } => popup
             .map(|r| {
                 g.fonts.highlight_at_viewport(y - r.y);
                 true
@@ -525,8 +484,8 @@ pub fn wheel(
     }
 }
 
-pub fn key(g: &mut Gallery, k: GKey, label_names: &[String]) -> String {
-    if matches!(k, GKey::Tab) {
+pub fn key(g: &mut Gallery, k: Key, label_names: &[String]) -> String {
+    if matches!(k, Key::Tab | Key::ShiftTab) {
         // Moving focus dismisses the popup (cancel: the committed
         // value is preserved). A fresh focus never inherits an open
         // popup from the other control.
@@ -539,14 +498,11 @@ pub fn key(g: &mut Gallery, k: GKey, label_names: &[String]) -> String {
         );
     }
     if g.focus == 0 {
+        if let Some(moved) = list_nav(&mut g.layers, &k) {
+            return format!("layers nav: {moved}");
+        }
         match k {
-            GKey::Up => format!("layers nav: {}", g.layers.nav(Nav::Up)),
-            GKey::Down => format!("layers nav: {}", g.layers.nav(Nav::Down)),
-            GKey::PageUp => format!("layers nav: {}", g.layers.nav(Nav::PageUp)),
-            GKey::PageDown => format!("layers nav: {}", g.layers.nav(Nav::PageDown)),
-            GKey::Home => format!("layers nav: {}", g.layers.nav(Nav::Home)),
-            GKey::End => format!("layers nav: {}", g.layers.nav(Nav::End)),
-            GKey::Char(c) => {
+            Key::Char(c) => {
                 // Idle timeout: a stale prefix never steers a new search.
                 let now = std::time::Instant::now();
                 if g.last_typed
@@ -561,34 +517,31 @@ pub fn key(g: &mut Gallery, k: GKey, label_names: &[String]) -> String {
                     g.layers.typeahead(c, &|i| names[i].clone())
                 )
             }
-            GKey::Backspace => {
+            Key::Backspace => {
                 g.layers.clear_typeahead();
                 "typeahead cleared".to_string()
             }
-            GKey::Enter | GKey::Escape => "layers: no popup to confirm or dismiss".to_string(),
-            GKey::Tab => unreachable!("handled above"),
+            Key::Enter | Key::Escape => "layers: no popup to confirm or dismiss".to_string(),
+            _ => unreachable!("navigation and Tab handled above"),
         }
     } else {
+        if let Some(moved) = picker_nav(&mut g.fonts, &k) {
+            return format!("picker nav: {moved}");
+        }
         match k {
-            GKey::Up => format!("picker nav: {}", g.fonts.nav(Nav::Up)),
-            GKey::Down => format!("picker nav: {}", g.fonts.nav(Nav::Down)),
-            GKey::PageUp => format!("picker nav: {}", g.fonts.nav(Nav::PageUp)),
-            GKey::PageDown => format!("picker nav: {}", g.fonts.nav(Nav::PageDown)),
-            GKey::Home => format!("picker nav: {}", g.fonts.nav(Nav::Home)),
-            GKey::End => format!("picker nav: {}", g.fonts.nav(Nav::End)),
-            GKey::Char(c) => {
+            Key::Char(c) => {
                 if !g.fonts.is_open() {
                     g.fonts.open();
                 }
                 format!("picker type: {}", g.fonts.push_char(c))
             }
-            GKey::Backspace => format!("picker erase: {}", g.fonts.backspace()),
-            GKey::Enter => match g.fonts.commit() {
+            Key::Backspace => format!("picker erase: {}", g.fonts.backspace()),
+            Key::Enter => match g.fonts.commit() {
                 Some(i) => format!("picker committed: {}", g.fonts.items()[i].clone()),
                 None => "picker commit found nothing".to_string(),
             },
-            GKey::Escape => format!("picker dismissed: {}", g.fonts.close()),
-            GKey::Tab => unreachable!("handled above"),
+            Key::Escape => format!("picker dismissed: {}", g.fonts.close()),
+            _ => unreachable!("navigation and Tab handled above"),
         }
     }
 }
@@ -647,10 +600,10 @@ mod tests {
         g.focus = 1;
         g.fonts.open();
         let names = names_of(&g);
-        let _ = key(&mut g, GKey::Tab, &names);
+        let _ = key(&mut g, Key::Tab, &names);
         assert!(!g.fonts.is_open());
         assert_eq!(g.focus, 0);
-        let _ = key(&mut g, GKey::Tab, &names);
+        let _ = key(&mut g, Key::Tab, &names);
         assert_eq!(g.focus, 1);
         assert!(!g.fonts.is_open());
     }
@@ -662,8 +615,8 @@ mod tests {
         g.focus = 1;
         g.fonts.open();
         let names = names_of(&g);
-        let _ = key(&mut g, GKey::Down, &names);
-        let _ = key(&mut g, GKey::Escape, &names);
+        let _ = key(&mut g, Key::Down, &names);
+        let _ = key(&mut g, Key::Escape, &names);
         assert!(!g.fonts.is_open());
         assert_eq!(g.fonts.value().unwrap_or(""), before);
     }
@@ -683,7 +636,7 @@ mod tests {
         g.fonts.open();
         // Drive the highlight to the bottom, then shorten the viewport.
         let names = names_of(&g);
-        let _ = key(&mut g, GKey::End, &names);
+        let _ = key(&mut g, Key::End, &names);
         let (app, _layout, scene) = frame(&mut g, 820.0, 300.0);
         let pop = scene
             .nodes
@@ -707,10 +660,10 @@ mod tests {
             "highlight revealed in actual geometry"
         );
         // Paging steps by actual rows and the pointer maps through scroll.
-        let _ = key(&mut g, GKey::PageDown, &names);
+        let _ = key(&mut g, Key::PageDown, &names);
         let hi2 = g.fonts.highlight().unwrap();
         assert!(g.fonts.visible().contains(&hi2));
-        let _ = key(&mut g, GKey::Home, &names);
+        let _ = key(&mut g, Key::Home, &names);
         assert!(g.fonts.visible().contains(&g.fonts.highlight().unwrap()));
         let _ = app;
     }

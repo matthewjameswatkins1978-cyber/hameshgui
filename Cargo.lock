@@ -941,6 +941,24 @@ dependencies = [
 ]
 
 [[package]]
+name = "hamesh-036-lab"
+version = "0.2.0"
+dependencies = [
+ "hamesh-blocks",
+ "hamesh-core",
+ "hamesh-inspect",
+ "hamesh-layout",
+ "hamesh-render",
+ "hamesh-scene",
+ "hamesh-sheet",
+ "hamesh-tasks",
+ "hamesh-text",
+ "hamesh-theme",
+ "hamesh-widgets",
+ "serde_json",
+]
+
+[[package]]
 name = "hamesh-automation"
 version = "0.2.0"
 dependencies = [
@@ -1121,6 +1139,34 @@ dependencies = [
 ]
 
 [[package]]
+name = "hamesh-sheet"
+version = "0.2.0"
+dependencies = [
+ "hamesh-blocks",
+ "hamesh-core",
+ "hamesh-layout",
+ "hamesh-scene",
+ "hamesh-text",
+ "hamesh-theme",
+ "hamesh-widgets",
+ "serde_json",
+]
+
+[[package]]
+name = "hamesh-tasks"
+version = "0.2.0"
+dependencies = [
+ "hamesh-blocks",
+ "hamesh-core",
+ "hamesh-layout",
+ "hamesh-scene",
+ "hamesh-text",
+ "hamesh-theme",
+ "hamesh-widgets",
+ "serde_json",
+]
+
+[[package]]
 name = "hamesh-text"
 version = "0.2.0"
 dependencies = [
@@ -1161,6 +1207,8 @@ dependencies = [
  "hamesh-pi",
  "hamesh-render",
  "hamesh-scene",
+ "hamesh-sheet",
+ "hamesh-tasks",
  "hamesh-text",
  "hamesh-widgets",
  "pollster",

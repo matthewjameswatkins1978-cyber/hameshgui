@@ -111,6 +111,13 @@ impl App {
     pub fn add(&mut self, parent: &str, mut comp: Component) {
         comp.parent = Some(ComponentId::new(parent));
         let id = comp.id.0.clone();
+        // Overwriting an id silently can parent-cycle the tree (a node
+        // re-added under its own id becomes its own ancestor) and hang
+        // every parent climb. Reject loudly in ALL profiles: release
+        // builds must never silently corrupt the tree.
+        if self.components.contains_key(&id) {
+            panic!("duplicate component id `{id}`");
+        }
         if let Some(p) = self.components.get_mut(parent) {
             if !p.children.iter().any(|c| c.0 == id) {
                 p.children.push(ComponentId::new(&id));
@@ -166,5 +173,18 @@ mod tests {
         app.set_state("counter", "1");
         assert!(app.revision > r1);
         assert_eq!(app.get("btn").unwrap().role, Role::Button);
+    }
+
+    #[test]
+    fn duplicate_id_is_rejected_loudly() {
+        // Release builds must reject exactly like debug ones: catch the
+        // panic instead of observing a profile, so this test holds in
+        // every build configuration (`cargo test --release` too).
+        let mut app = App::new("win");
+        app.add("win", Component::new("btn", Role::Button, "Increment"));
+        let crashed = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            app.add("win", Component::new("btn", Role::Button, "Decrement"));
+        }));
+        assert!(crashed.is_err(), "duplicate id must panic, not overwrite");
     }
 }
