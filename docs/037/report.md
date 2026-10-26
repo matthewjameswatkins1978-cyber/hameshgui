@@ -161,11 +161,23 @@ framework changes, maximal reuse of the tasks/console patterns.
   screenshot `console-enter-abort.png`). Tasks/sheet need no such
   change (their zone actions already run on Enter); editor needs none
   (zone-gated Save already works).
-- **Incidents, honestly recorded.** (i) A ~100-paragraph streaming
-  run made the inspector stop answering (`TIMEOUT ui busy`, UI thread
-  silent for 60s+ while the process stayed alive); cause not yet
-  isolated — needs a bounded follow-up, not a conclusion. A moderate
-  run immediately afterwards behaved perfectly. (ii) One `detail`
+- **Incidents, honestly recorded and narrowed.** (i) A ~100-paragraph
+  streaming run made the inspector stop answering (`TIMEOUT ui busy`,
+  UI thread silent for 60s+ while the process stayed alive). Follow-up
+  with temporary per-op timing probes (since reverted, tree clean):
+  the UI thread *does* receive and finish every request — individual
+  `hamesh_scene::build` calls measured 8–17s inside `apply_op`
+  (layout steady at ~12ms, 15 nodes), while the same content builds
+  in ~1ms headless and ~0.14s post-settle. Direct-binary calls rule
+  out CLI-spawn latency (0.5s during the same run). An idle window
+  answers 20/20 fast. So: transient scene-build spikes correlated
+  with active streaming, self-recovering, mechanism still open —
+  first-touch shaping/rasterization for novel glyph runs is the
+  leading hypothesis; content size itself is ruled out (flat ~1ms
+  to 18KB, 30ms cold on 63KB). Bounded follow-up: per-op timing in
+  dev builds + a long-run stress with CPU/temp logging. Not a
+  release verdict — no data loss, no crash, recovery automatic.
+  (ii) One `detail`
   read returned an empty envelope during a Done→GetState transition;
   retry succeeded. Both are open unknowns, not verdicts.
 
