@@ -174,6 +174,11 @@ impl Sheet {
         }
     }
 
+    /// Focused zone name for the Eye: selection list or buttons grid.
+    pub fn focused_zone(&self) -> &str {
+        ["selection", "buttons"][self.focus]
+    }
+
     fn button_state(&self, b: &DemoButton) -> b::ButtonState {
         if matches!(b.demo, b::ButtonState::Disabled) {
             return b::ButtonState::Disabled;
@@ -732,6 +737,15 @@ mod tests {
         assert_eq!(t.list.selected(), Some(2));
         let note = key(&mut t, Key::Enter);
         assert!(note.contains("demo row 2 confirmed"), "{note}");
+    }
+
+    #[test]
+    fn focused_zone_names_the_zone() {
+        let t = Sheet::new();
+        assert_eq!(t.focused_zone(), "selection");
+        let mut t2 = Sheet::new();
+        t2.focus = 1;
+        assert_eq!(t2.focused_zone(), "buttons");
     }
 
     #[test]
