@@ -1,0 +1,14 @@
+SHEET open: design-system sheet — click, wheel, type, Tab, F12 dumps Eye evidence, Esc quits
+HAMESH window open: 800x600 — click, Space, R, I, Esc
+EYE app_rev=71 scene_rev=8 frames=0 nodes=56
+EYE app_rev=71 scene_rev=9 frames=28 nodes=56
+EYE app_rev=71 scene_rev=9 frames=51 nodes=56
+SHEET click: activated ghost-rest
+EYE app_rev=71 scene_rev=10 frames=95 nodes=56
+SHEET key: focus -> list
+SHEET key: focus -> buttons
+SHEET key: button cursor: btn-primary-rest
+SHEET key: button cursor: btn-primary-hover
+SHEET key: activated primary-hover
+EYE app_rev=71 scene_rev=15 frames=160 nodes=56
+trace -> target/hamesh-window-trace.json

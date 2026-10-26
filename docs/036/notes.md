@@ -1,8 +1,33 @@
 # 036 native proof
 
 Real OS input (SendInput, Eye-aimed at map rects) into `hamesh-window`
-`--gallery` and `--tasks`. Both drivers run the same shared code as
-the headless drills (`Hit::of` routing, `Key` vocabulary, nav helpers).
+`--sheet`, `--gallery` and `--tasks`. Every driver runs the same
+shared code as its headless drill (`Hit::of` routing, `Key`
+vocabulary, nav helpers).
+
+## Design-system sheet (`--sheet`, 800x600)
+
+The sheet is a real driver (`hamesh-sheet`), not a static render:
+real hover, click, Tab walk, arrow move and Enter activation were
+driven through a winit window and inspected frame by frame.
+
+- hover ghost-rest with a real pointer move (`sheet-native-800x600-hover.png`)
+- click activated it and latched the pressed look (`...-pressed.png`;
+  trace: `SHEET click: activated ghost-rest`)
+- Tab walked list -> buttons, Home/Right moved the button cursor,
+  Enter activated primary-hover (`...-focused.png`; trace: `focus ->
+  buttons`, `button cursor: btn-primary-hover`, `activated
+  primary-hover`)
+- Full stdout trace in `sheet-native-800x600-stdout.txt`.
+
+Two honest calibration notes from the runs. First, the ghost
+variant's pressed state differs from rest only in label brightness
+(surface stays `raised`); the matrix shows it, but it is subtle by
+design — primary carries the strong pressed ramp. Second, the OS
+SendInput path proved flaky run to run (identical inputs sometimes
+landing nowhere while the app stayed alive and responsive); the
+drive re-foregrounds and verifies every input with a retry loop, and
+every accepted frame above comes from a fully green verified run.
 
 ## Gallery (`--gallery`, 800×600)
 

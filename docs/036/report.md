@@ -100,6 +100,30 @@ contract. The convergence point is the shared pieces above.
   stdout traces. Headless frames under `target/036/` (gitignored,
   reproducible via `cargo run -p hamesh-036-lab`).
 
+## REVIEW CORRECTIONS (final review, same branch)
+
+- **Selection identity.** Selection now names an item, not a row
+  (`filtered_row` + stored item id, re-derived per frame). Full
+  filter/dismiss regression: select task 2, narrow past it, dismiss,
+  same task still selected, toggle acts on it.
+- **Keyboard actions.** Focus zones walk list, filter, then each
+  button (Tab/ShiftTab both directions); focused button carries the
+  ring; Enter runs the focused action through one shared gate that
+  refuses disabled actions with a note — pointer and keyboard alike.
+  Clear stays enabled only with an open popup and refines instead of
+  dismissing; Toggle dismisses after acting.
+- **Duplicate ids.** `App::add` panics unconditionally (debug AND
+  release, proven by `cargo test --release -p hamesh-core`); the
+  guard caught two real collisions during 036, including an
+  app-root/list-root id clash that hung every tree climb.
+- **Contrast.** `ACCENT_ACTIVE` lifted to hold 4.81:1 with dark text;
+  the whole primary ramp is now asserted at 4.5:1 for normal text.
+- **Visual proof.** `ds-1440x900/1100x720/820x560.png` committed
+  under `docs/036/` (inspected, Eye-clean); the design-system sheet
+  is a real driver (`hamesh-sheet`) behind a `--sheet` native route
+  with hover/click/Tab/arrows/Enter proven through real window input
+  (`sheet-native-*-hover/pressed/focused.png` + trace).
+
 ## ATTENTION
 
 - Open question carried forward, not a blocker: whether zone focus

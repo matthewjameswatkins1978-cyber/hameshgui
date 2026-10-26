@@ -63,6 +63,15 @@ pub fn picker_nav(picker: &mut Picker, key: &Key) -> Option<bool> {
     Some(picker.nav(nav))
 }
 
+/// Row position of an item identity inside a filtered view.
+/// The reusable selection principle: selection names an ITEM, never
+/// a row. Rows shift under filtering; items do not. A driver keeps the
+/// selected item across query changes and derives the row per frame —
+/// `None` means the item is filtered out (keep the item, show no row).
+pub fn filtered_row(filtered: &[usize], item: usize) -> Option<usize> {
+    filtered.iter().position(|&i| i == item)
+}
+
 /// A scrollable, selectable list of rows of uniform height.
 ///
 /// Scrolling is expressed as a pixel offset from the top of the content.
@@ -671,6 +680,16 @@ mod tests {
         l.set_count(n);
         l.set_viewport(viewport);
         l
+    }
+
+    #[test]
+    fn filtered_row_tracks_items_not_rows() {
+        // Selection names the item; the row is derived per filter.
+        let shown = vec![0, 2, 5];
+        assert_eq!(filtered_row(&shown, 2), Some(1));
+        assert_eq!(filtered_row(&shown, 5), Some(2));
+        assert_eq!(filtered_row(&shown, 1), None, "filtered out keeps no row");
+        assert_eq!(filtered_row(&[], 0), None);
     }
 
     #[test]

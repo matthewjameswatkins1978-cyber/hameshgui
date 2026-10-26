@@ -11,6 +11,7 @@ members = [
   "crates/hamesh-theme",
   "crates/hamesh-blocks",
   "crates/hamesh-gallery",
+  "crates/hamesh-sheet",
   "crates/hamesh-pi",
   "crates/hamesh-widgets",
   "crates/hamesh-window",

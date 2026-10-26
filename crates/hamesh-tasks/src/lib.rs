@@ -27,6 +27,10 @@ pub struct Task {
 
 /// Keyboard intents are the shared `hamesh_widgets::Key` vocabulary:
 /// no per-app key enum, no second mapping table.
+///
+/// Action commands in focus order. Tab walks them; Enter runs the
+/// focused one if it is enabled.
+pub const ACTIONS: [&str; 2] = ["toggle-done", "clear-filter"];
 
 #[derive(Clone)]
 pub struct Tasks {
@@ -35,6 +39,12 @@ pub struct Tasks {
     pub filter: Picker,
     /// 0 = list, 1 = filter, 2 = actions.
     pub focus: usize,
+    /// Focused action inside zone 2 (index into `ACTIONS`).
+    pub action_idx: usize,
+    /// Selected TASK (item identity, never a row). Rows shift under
+    /// filtering; this does not. The list cursor is re-derived from
+    /// it after every query change via `filtered_row`.
+    pub sel: Option<usize>,
     hover_action: Option<String>,
 }
 
@@ -67,6 +77,8 @@ impl Tasks {
             list,
             filter: Picker::new(items),
             focus: 0,
+            action_idx: 0,
+            sel: Some(0),
             hover_action: None,
         }
     }
@@ -77,16 +89,46 @@ impl Tasks {
         self.filter.filtered()
     }
 
-    /// Selected task under the current filter mapping. Public: views
-    /// read the same selection the driver acts on.
+    /// Selected task: the stored item identity. Public: views read the
+    /// same selection the driver acts on, through every filter change.
     pub fn selected_task(&self) -> Option<usize> {
-        self.list
-            .selected()
-            .and_then(|r| self.shown().get(r).copied())
+        self.sel
+    }
+
+    /// Re-derive the list cursor from the stored item after the query
+    /// changes. A filtered-out item keeps its identity with no row.
+    fn resync_selection(&mut self) {
+        let shown = self.shown();
+        // The model follows the same filter: a stale count would clamp
+        // the cursor before the item mapping runs.
+        self.list.set_count(shown.len());
+        match self
+            .sel
+            .and_then(|i| hamesh_widgets::filtered_row(&shown, i))
+        {
+            Some(row) => {
+                self.list.select(row);
+            }
+            None => {
+                self.list.clear_selection();
+            }
+        }
     }
 
     pub fn done_count(&self) -> usize {
         self.tasks.iter().filter(|t| t.done).count()
+    }
+
+    /// Whether an action can run right now. Toggle needs a selected
+    /// task; Clear only means something while the filter is open.
+    /// Disabled actions paint muted and refuse to run — through every
+    /// input path, pointer and keyboard alike.
+    pub fn action_enabled(&self, command: &str) -> bool {
+        match command {
+            "toggle-done" => self.selected_task().is_some(),
+            "clear-filter" => self.filter.is_open(),
+            _ => false,
+        }
     }
 
     fn rows(&self) -> Vec<b::select::ListRow> {
@@ -118,7 +160,6 @@ fn layout_of(app: &App, w: f32, h: f32) -> hamesh_layout::LayoutOutput {
 fn compose_with(t: &mut Tasks, width: f32, height: f32, list_h: f32) -> App {
     t.list.set_focused(t.focus == 0);
     t.filter.set_focused(t.focus == 1);
-    let actions_focused = t.focus == 2;
     let rows = t.rows();
     t.list.set_count(rows.len());
     let selected_label = t
@@ -135,6 +176,24 @@ fn compose_with(t: &mut Tasks, width: f32, height: f32, list_h: f32) -> App {
     let total = t.tasks.len();
     let hover_toggle = t.hover_action.as_deref() == Some("toggle-done");
     let hover_clear = t.hover_action.as_deref() == Some("clear-filter");
+    // Per-button paint: disabled wins over hover, and only the focused
+    // button in the focused zone carries the ring.
+    let toggle_state = if !t.action_enabled("toggle-done") {
+        b::ButtonState::Disabled
+    } else if hover_toggle {
+        b::ButtonState::Hover
+    } else {
+        b::ButtonState::Rest
+    };
+    let clear_state = if !t.action_enabled("clear-filter") {
+        b::ButtonState::Disabled
+    } else if hover_clear {
+        b::ButtonState::Hover
+    } else {
+        b::ButtonState::Rest
+    };
+    let toggle_focused = t.focus == 2 && t.action_idx == 0;
+    let clear_focused = t.focus == 2 && t.action_idx == 1;
     let mut app = App::new("taskapp");
     {
         let mut root = b::Scope::root(&mut app, "taskapp");
@@ -176,24 +235,16 @@ fn compose_with(t: &mut Tasks, width: f32, height: f32, list_h: f32) -> App {
                     "btn-toggle",
                     "Toggle done",
                     b::ButtonOpts::new(b::ButtonVariant::Primary, "toggle-done")
-                        .with_state(if hover_toggle {
-                            b::ButtonState::Hover
-                        } else {
-                            b::ButtonState::Rest
-                        })
-                        .focused(actions_focused),
+                        .with_state(toggle_state)
+                        .focused(toggle_focused),
                 );
                 b::button(
                     s,
                     "btn-clear",
                     "Clear",
                     b::ButtonOpts::new(b::ButtonVariant::Ghost, "clear-filter")
-                        .with_state(if hover_clear {
-                            b::ButtonState::Hover
-                        } else {
-                            b::ButtonState::Rest
-                        })
-                        .focused(false),
+                        .with_state(clear_state)
+                        .focused(clear_focused),
                 );
             },
         );
@@ -277,6 +328,9 @@ fn compose_with(t: &mut Tasks, width: f32, height: f32, list_h: f32) -> App {
 /// a throwaway clone measures the real body; pass 2 grants the list
 /// exactly what remains. The header never depends on the list height.
 pub fn refresh(t: &mut Tasks, w: f32, h: f32) -> (App, hamesh_layout::LayoutOutput) {
+    // Selection names an item, rows are derived: reconcile the cursor
+    // with the current filter on every frame, whatever changed it.
+    t.resync_selection();
     let mut probe = t.clone();
     let app1 = compose_with(&mut probe, w, h, 96.0);
     let lay1 = layout_of(&app1, w, h);
@@ -322,6 +376,36 @@ fn toggle_selected(t: &mut Tasks) -> String {
     }
 }
 
+/// Run an action command. Toggle acts on the selection and dismisses
+/// an open popup (the decision is taken); Clear erases the query but
+/// keeps the popup open for refinement (distinct from Escape, which
+/// cancels). Disabled actions refuse with a note instead of running.
+/// Pointer and keyboard share this path.
+fn act(t: &mut Tasks, command: &str) -> String {
+    if !t.action_enabled(command) {
+        return format!("{command} disabled: no action");
+    }
+    match command {
+        "toggle-done" => {
+            let note = toggle_selected(t);
+            if t.filter.is_open() {
+                t.filter.close();
+                format!("{note} (popup dismissed)")
+            } else {
+                note
+            }
+        }
+        "clear-filter" => {
+            if t.filter.clear_query() {
+                "filter cleared".to_string()
+            } else {
+                "filter already empty".to_string()
+            }
+        }
+        other => format!("unknown command {other}"),
+    }
+}
+
 /// Pointer press through the SHARED router: hit-test, resolve with
 /// `Hit::of`, drive the widget. No per-app climbing or id parsing.
 pub fn press(t: &mut Tasks, app: &App, scene: &hamesh_scene::Scene, x: f32, y: f32) -> String {
@@ -337,6 +421,8 @@ pub fn press(t: &mut Tasks, app: &App, scene: &hamesh_scene::Scene, x: f32, y: f
         Some(id) => match Hit::of(app, &id) {
             Hit::ListRow { row, .. } => {
                 t.focus = 0;
+                // The row names an item; the item is what we keep.
+                t.sel = t.shown().get(row).copied();
                 let note = if t.list.select(row) {
                     format!("selected task row {row}")
                 } else {
@@ -378,25 +464,7 @@ pub fn press(t: &mut Tasks, app: &App, scene: &hamesh_scene::Scene, x: f32, y: f
             }
             Hit::Action { command } => {
                 t.focus = 2;
-                // An open popup never survives a press elsewhere: the
-                // command runs first (clear needs the open query),
-                // then the popup cancels without touching the value.
-                let note = match command.as_str() {
-                    "toggle-done" => toggle_selected(t),
-                    "clear-filter" => {
-                        if t.filter.clear_query() {
-                            "filter cleared".to_string()
-                        } else {
-                            "filter already empty".to_string()
-                        }
-                    }
-                    other => format!("unknown command {other}"),
-                };
-                if t.filter.close() {
-                    format!("{note} (popup dismissed)")
-                } else {
-                    note
-                }
+                act(t, &command)
             }
             Hit::Chrome(hit) => {
                 if t.filter.is_open() {
@@ -459,16 +527,22 @@ pub fn wheel(t: &mut Tasks, layout: &hamesh_layout::LayoutOutput, x: f32, y: f32
 pub fn key(t: &mut Tasks, k: Key) -> String {
     if matches!(k, Key::Tab | Key::ShiftTab) {
         // Moving focus dismisses the popup; ShiftTab walks back.
+        // Inside the actions zone Tab walks the buttons themselves.
         t.filter.close();
-        t.focus = if matches!(k, Key::Tab) {
-            (t.focus + 1) % 3
-        } else {
-            (t.focus + 2) % 3
+        let fwd = matches!(k, Key::Tab);
+        (t.focus, t.action_idx) = match (t.focus, fwd) {
+            (2, true) if t.action_idx + 1 < ACTIONS.len() => (2, t.action_idx + 1),
+            (0, false) => (2, ACTIONS.len() - 1),
+            (2, false) if t.action_idx > 0 => (2, t.action_idx - 1),
+            (f, true) => ((f + 1) % 3, 0),
+            (f, false) => ((f + 2) % 3, 0),
         };
         return format!("focus -> {}", ["list", "filter", "actions"][t.focus]);
     }
     if t.focus == 0 {
         if let Some(moved) = list_nav(&mut t.list, &k) {
+            // The cursor moved rows: re-anchor the item identity.
+            t.sel = t.list.selected().and_then(|r| t.shown().get(r).copied());
             return format!("tasks nav: {moved}");
         }
         match k {
@@ -485,16 +559,24 @@ pub fn key(t: &mut Tasks, k: Key) -> String {
                 if !t.filter.is_open() {
                     t.filter.open();
                 }
-                format!("filter type: {}", t.filter.push_char(c))
+                let typed = t.filter.push_char(c);
+                t.resync_selection();
+                format!("filter type: {typed}")
             }
-            Key::Backspace => format!("filter erase: {}", t.filter.backspace()),
+            Key::Backspace => {
+                let erased = t.filter.backspace();
+                t.resync_selection();
+                format!("filter erase: {erased}")
+            }
             Key::Enter => "filter: list follows the query".to_string(),
             Key::Escape => format!("filter dismissed: {}", t.filter.close()),
             _ => unreachable!("navigation and Tab handled above"),
         }
     } else {
         match k {
-            Key::Enter => toggle_selected(t),
+            // Enter runs the focused button through the same gate as a
+            // pointer press: disabled means disabled, everywhere.
+            Key::Enter => act(t, ACTIONS[t.action_idx]),
             Key::Escape => "actions: nothing to dismiss".to_string(),
             _ => "actions: pointer or Enter".to_string(),
         }
@@ -541,7 +623,9 @@ mod tests {
     fn toggle_done_flips_badge_and_progress() {
         let mut t = Tasks::new();
         assert_eq!(t.done_count(), 0);
-        t.list.select(1);
+        // Selection moves through intents, never direct widget pokes.
+        let _ = key(&mut t, Key::Down);
+        assert_eq!(t.sel, Some(1));
         assert_eq!(toggle_selected(&mut t), "task 1 done");
         assert!(t.tasks[1].done);
         assert_eq!(t.done_count(), 1);
@@ -589,6 +673,115 @@ mod tests {
     }
 
     #[test]
+    fn selection_names_the_item_not_the_row() {
+        // Identity survives the complete filter cycle: select, narrow
+        // past the item, dismiss, and the same task is still selected.
+        let mut t = Tasks::new();
+        let (app, _layout, scene) = frame(&mut t, 1440.0, 900.0);
+        let (cx, cy) = center_of(&scene, "tasks-row-2");
+        let _ = press(&mut t, &app, &scene, cx, cy);
+        assert_eq!(t.sel, Some(2));
+        // Narrow to a query that excludes task 2: the row clears,
+        // the stored item does not move.
+        t.focus = 1;
+        for c in "wire".chars() {
+            let _ = key(&mut t, Key::Char(c));
+        }
+        let (app2, _layout2, _scene2) = frame(&mut t, 1440.0, 900.0);
+        assert_eq!(t.shown(), vec![0]);
+        assert_eq!(t.sel, Some(2));
+        assert_eq!(t.list.selected(), None, "no row for a hidden item");
+        assert!(app2.get("tasks-row-2").is_none());
+        // Dismissing restores the full queue with the same task row.
+        let _ = key(&mut t, Key::Escape);
+        let (app3, _layout3, _scene3) = frame(&mut t, 1440.0, 900.0);
+        assert!(!t.filter.is_open());
+        assert_eq!(t.selected_task(), Some(2));
+        assert_eq!(t.list.selected(), Some(2));
+        assert!(app3.get("tasks-row-2").is_some());
+        // Actions follow the item, not the row it happened to be on.
+        t.focus = 0;
+        let note = key(&mut t, Key::Enter);
+        assert!(note.contains("task 2 done"), "{note}");
+        assert!(t.tasks[2].done);
+    }
+
+    #[test]
+    fn tab_walks_zones_then_buttons_then_wraps() {
+        let mut t = Tasks::new();
+        assert_eq!((t.focus, t.action_idx), (0, 0));
+        let _ = key(&mut t, Key::Tab);
+        assert_eq!((t.focus, t.action_idx), (1, 0));
+        let _ = key(&mut t, Key::Tab);
+        assert_eq!((t.focus, t.action_idx), (2, 0));
+        let _ = key(&mut t, Key::Tab);
+        assert_eq!((t.focus, t.action_idx), (2, 1), "second button");
+        let _ = key(&mut t, Key::Tab);
+        assert_eq!((t.focus, t.action_idx), (0, 0), "wraps to the list");
+        // Shift+Tab walks the same path backward.
+        let _ = key(&mut t, Key::ShiftTab);
+        assert_eq!((t.focus, t.action_idx), (2, 1));
+        let _ = key(&mut t, Key::ShiftTab);
+        assert_eq!((t.focus, t.action_idx), (2, 0));
+        let _ = key(&mut t, Key::ShiftTab);
+        assert_eq!((t.focus, t.action_idx), (1, 0));
+    }
+
+    #[test]
+    fn focused_button_carries_the_ring() {
+        let mut t = Tasks::new();
+        t.focus = 2;
+        t.action_idx = 1;
+        let (app, _layout, _scene) = frame(&mut t, 1440.0, 900.0);
+        let clear = app.get("btn-clear").unwrap();
+        assert_eq!(
+            clear.props.get("border_token").map(|s| s.as_str()),
+            Some("focus")
+        );
+        assert_eq!(clear.props.get("border").map(|s| s.as_str()), Some("2"));
+        let toggle = app.get("btn-toggle").unwrap();
+        assert_eq!(
+            toggle.props.get("border_token").map(|s| s.as_str()),
+            Some("border")
+        );
+    }
+
+    #[test]
+    fn enter_runs_the_focused_action_and_disabled_refuses() {
+        let mut t = Tasks::new();
+        // Clear is disabled with a closed filter: Enter reports, runs nothing.
+        t.focus = 2;
+        t.action_idx = 1;
+        assert!(!t.action_enabled("clear-filter"));
+        let note = key(&mut t, Key::Enter);
+        assert!(note.contains("disabled"), "{note}");
+        // Open the filter: clear enables. (Tab would dismiss first —
+        // cancel discards the query — so the keyboard test takes focus
+        // here directly; traversal itself is proved above.)
+        t.filter.open();
+        t.focus = 1;
+        let _ = key(&mut t, Key::Char('o'));
+        assert!(t.action_enabled("clear-filter"));
+        t.focus = 2;
+        t.action_idx = 1;
+        let note = key(&mut t, Key::Enter);
+        assert!(note.contains("filter cleared"), "{note}");
+        // Clear refines: the query is gone but the popup stays open.
+        assert!(t.filter.is_open());
+        assert!(t.filter.query().is_empty());
+        assert_eq!(t.shown().len(), 8);
+        // Escape still cancels out of it.
+        t.focus = 1;
+        let _ = key(&mut t, Key::Escape);
+        assert!(!t.filter.is_open());
+        // Pointer on a disabled button is equally refused.
+        let (app, _layout, scene) = frame(&mut t, 1440.0, 900.0);
+        let (cx, cy) = center_of(&scene, "btn-clear");
+        let note = press(&mut t, &app, &scene, cx, cy);
+        assert!(note.contains("disabled"), "{note}");
+    }
+
+    #[test]
     fn action_buttons_drive_real_commands() {
         let mut t = Tasks::new();
         let (app, _layout, scene) = frame(&mut t, 1440.0, 900.0);
@@ -597,12 +790,15 @@ mod tests {
         assert!(note.contains("done"), "{note}");
         assert!(t.tasks[0].done, "row 0 was selected: {note}");
         assert_eq!(t.focus, 2);
-        // An action press dismisses an open popup after running.
+        // An action press runs first: clear refines without dismissing.
         t.filter.open();
+        t.focus = 1;
+        let _ = key(&mut t, Key::Char('o'));
         let (app2, _layout2, scene2) = frame(&mut t, 1440.0, 900.0);
         let (dx, dy) = center_of(&scene2, "btn-clear");
         let note = press(&mut t, &app2, &scene2, dx, dy);
-        assert!(!t.filter.is_open(), "{note}");
-        assert!(note.contains("dismissed"), "{note}");
+        assert!(note.contains("filter cleared"), "{note}");
+        assert!(t.filter.is_open(), "clear refines, Escape cancels");
+        assert!(t.filter.query().is_empty());
     }
 }

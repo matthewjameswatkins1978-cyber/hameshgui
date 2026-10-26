@@ -78,11 +78,11 @@ pub const ACCENT_HOVER: Token = Token {
     rgba: [66, 174, 156, 255],
 };
 
-/// Primary-action pressed: accent deepened ~12%. Dark `bg` text stays
-/// above 3:1 here (state-system contract below).
+/// Primary-action pressed: accent deepened while keeping dark `bg`
+/// text at WCAG AA for normal text (measured 4.81:1, floor 4.5).
 pub const ACCENT_ACTIVE: Token = Token {
     name: "accent_active",
-    rgba: [32, 132, 116, 255],
+    rgba: [38, 142, 124, 255],
 };
 pub const SUCCESS: Token = Token {
     name: "success",
@@ -209,6 +209,8 @@ mod tests {
     fn text_pairs_meet_wcag_aa() {
         // Guardrails, not a compliance claim: body text pairs must
         // reach WCAG AA (4.5:1); large/secondary text 3:1 where noted.
+        // Primary buttons set dark `bg` text at LABEL size (normal
+        // text), so the whole accent ramp holds 4.5:1, not just 3:1.
         for (fg, bg, min) in [
             (TEXT.rgba, SURFACE.rgba, 4.5),
             (TEXT.rgba, RAISED.rgba, 4.5),
@@ -216,8 +218,9 @@ mod tests {
             (MUTED.rgba, RAISED.rgba, 3.0),
             (SUCCESS.rgba, RAISED.rgba, 3.0),
             (TEXT.rgba, ACCENT.rgba, 3.0),
-            (BG.rgba, ACCENT_HOVER.rgba, 3.0),
-            (BG.rgba, ACCENT_ACTIVE.rgba, 3.0),
+            (BG.rgba, ACCENT.rgba, 4.5),
+            (BG.rgba, ACCENT_HOVER.rgba, 4.5),
+            (BG.rgba, ACCENT_ACTIVE.rgba, 4.5),
             (MUTED.rgba, SURFACE.rgba, 3.0),
         ] {
             let c = contrast(fg, bg);
