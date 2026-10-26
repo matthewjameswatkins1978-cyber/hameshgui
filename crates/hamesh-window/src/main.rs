@@ -181,9 +181,14 @@ struct HameshWindowApp {
     /// router and key core; driver-owned state like tasks.
     use_console: bool,
     console: Option<hamesh_console::Console>,
+    /// Editor mode (`--editor`): the 037 file editor from hamesh-editor
+    /// (line list + composer + Save). Same shared router and key core.
+    use_editor: bool,
+    editor: Option<hamesh_editor::Editor>,
     shift_held: bool,
     m3_smoke_done: bool,
     console_smoke_done: bool,
+    editor_smoke_done: bool,
     /// M4 live loop: background Pi worker link. `None` unless `--pi`.
     /// Never blocks the UI thread; drains between frames.
     pi: Option<PiLink>,
@@ -229,9 +234,12 @@ impl HameshWindowApp {
             sheet: None,
             use_console: false,
             console: None,
+            use_editor: false,
+            editor: None,
             shift_held: false,
             m3_smoke_done: false,
             console_smoke_done: false,
+            editor_smoke_done: false,
             pi: None,
             use_pi: false,
             cursor: (0.0, 0.0),
@@ -601,6 +609,36 @@ impl HameshWindowApp {
         }
     }
 
+    /// Swap the demo tree for the 037 editor tree (called once, on open).
+    /// An optional `--file=` path opens immediately; otherwise the
+    /// buffer starts empty and fileless.
+    fn enter_editor(&mut self, file: Option<String>) {
+        let mut e = hamesh_editor::Editor::new();
+        let note = match file {
+            Some(p) => match e.open(std::path::Path::new(&p)) {
+                Ok(n) | Err(n) => n,
+            },
+            None => "editor open (no file)".to_string(),
+        };
+        self.editor = Some(e);
+        self.refresh_editor();
+        self.trace.record(
+            "editor.enter",
+            &format!("file editor live ({note}); same intents as tasks"),
+            self.app.revision,
+            None,
+        );
+    }
+
+    /// Recompose the editor tree from driver state after any intent.
+    fn refresh_editor(&mut self) {
+        if let Some(e) = self.editor.as_mut() {
+            let (app, _) = hamesh_editor::refresh(e, self.size.0 as f32, self.size.1 as f32);
+            self.app = app;
+            self.scene_rev += 1;
+        }
+    }
+
     /// Console mouse: the driver press path (shared Hit router), then
     /// trace. Abort resolves to a worker cancel only while a run is
     /// actually live; anything else is driver state, not a job.
@@ -742,6 +780,83 @@ impl HameshWindowApp {
             self.app.revision,
             None,
         );
+        last
+    }
+
+    /// Editor mouse: the driver press path (shared Hit router), then
+    /// trace. Save runs through the driver's disabled gate, so pointer
+    /// and keyboard refuse identically when clean or fileless.
+    fn editor_press(&mut self, x: f32, y: f32) {
+        let (_, scene) = self.layout_and_scene();
+        let note = match self.editor.as_mut() {
+            Some(e) => hamesh_editor::press(e, &self.app, &scene, x, y),
+            None => "editor not entered".to_string(),
+        };
+        self.refresh_editor();
+        self.trace
+            .record("editor.click", &note, self.app.revision, None);
+        println!("EDITOR click: {note}");
+    }
+
+    /// Editor keyboard: map the winit event onto the shared key core.
+    /// F12 dumps Eye evidence anywhere.
+    fn editor_key(&mut self, event: &winit::event::KeyEvent) {
+        if event.physical_key == PhysicalKey::Code(KeyCode::F12) {
+            self.dump_inspection();
+            return;
+        }
+        if self.editor.is_none() {
+            return;
+        }
+        let mut keys: Vec<WKey> = Vec::new();
+        if let Some(text) = event.text.as_ref() {
+            for c in text.chars() {
+                // Enter arrives as text too; the physical key wins below.
+                if c != '\r' && c != '\n' {
+                    keys.push(WKey::Char(c));
+                }
+            }
+        }
+        match event.physical_key {
+            PhysicalKey::Code(KeyCode::Enter) | PhysicalKey::Code(KeyCode::NumpadEnter) => {
+                keys.push(WKey::Enter)
+            }
+            PhysicalKey::Code(KeyCode::Backspace) => keys.push(WKey::Backspace),
+            PhysicalKey::Code(KeyCode::Delete) => keys.push(WKey::Delete),
+            PhysicalKey::Code(KeyCode::ArrowLeft) => keys.push(WKey::Left),
+            PhysicalKey::Code(KeyCode::ArrowRight) => keys.push(WKey::Right),
+            PhysicalKey::Code(KeyCode::ArrowUp) => keys.push(WKey::Up),
+            PhysicalKey::Code(KeyCode::ArrowDown) => keys.push(WKey::Down),
+            PhysicalKey::Code(KeyCode::Home) => keys.push(WKey::Home),
+            PhysicalKey::Code(KeyCode::End) => keys.push(WKey::End),
+            PhysicalKey::Code(KeyCode::PageUp) => keys.push(WKey::PageUp),
+            PhysicalKey::Code(KeyCode::PageDown) => keys.push(WKey::PageDown),
+            PhysicalKey::Code(KeyCode::Tab) => keys.push(if self.shift_held {
+                WKey::ShiftTab
+            } else {
+                WKey::Tab
+            }),
+            _ => {}
+        }
+        if keys.is_empty() {
+            return;
+        }
+        let _ = self.editor_keys_apply(keys);
+    }
+
+    /// Shared key-application core for the editor: the winit path, the
+    /// inspector path and the smoke script all land here — one rule for
+    /// hand, eye and keyboard, mirroring the console core.
+    fn editor_keys_apply(&mut self, keys: Vec<WKey>) -> String {
+        let mut last = String::new();
+        for k in &keys {
+            if let Some(e) = self.editor.as_mut() {
+                last = hamesh_editor::key(e, k.clone());
+            }
+        }
+        self.refresh_editor();
+        self.trace
+            .record("editor.key", &format!("-> {last}"), self.app.revision, None);
         last
     }
 
@@ -1524,6 +1639,71 @@ impl HameshWindowApp {
         code
     }
 
+    /// Editor smoke script: run once after open — write a fixture file,
+    /// open it, move, type, and save through the keyboard gate. Proves
+    /// the file round trip end-to-end without a human at the keyboard.
+    fn editor_smoke_script(&mut self) {
+        let path = std::env::temp_dir().join("hamesh-editor-smoke.txt");
+        let fixture = "smoke one\nsmoke two\n";
+        let (mut opened, mut saved_note) = (false, String::new());
+        if std::fs::write(&path, fixture).is_ok() {
+            if let Some(e) = self.editor.as_mut() {
+                opened = e.open(&path).is_ok();
+            }
+        }
+        self.trace.record(
+            "editor.smoke_open",
+            &format!("opened={opened}"),
+            self.app.revision,
+            None,
+        );
+        if !opened {
+            return;
+        }
+        // Down to line 2, Enter to edit, type, Tab to Save, Enter.
+        let _ = self.editor_keys_apply(vec![WKey::Down, WKey::Enter]);
+        let type_keys: Vec<WKey> = " edited".chars().map(WKey::Char).collect();
+        let _ = self.editor_keys_apply(type_keys);
+        let _ = self.editor_keys_apply(vec![WKey::Tab, WKey::Enter]);
+        if let Some(e) = self.editor.as_mut() {
+            saved_note = format!("dirty={}", e.save_enabled());
+        }
+        self.trace.record(
+            "editor.smoke_script",
+            &format!("edited + saved through the gate; after save {saved_note}"),
+            self.app.revision,
+            None,
+        );
+    }
+
+    /// End-of-smoke verdict for the editor: the driver lines and the
+    /// file bytes must both show the edited line.
+    fn editor_smoke_assert(&mut self) -> i32 {
+        const EXPECTED: &str = "smoke one\nsmoke two edited\n";
+        let (asked, answered) = match self.editor.as_ref() {
+            Some(e) => {
+                let driver_ok = e.lines.join("\n") + "\n" == EXPECTED && !e.save_enabled();
+                let path = std::env::temp_dir().join("hamesh-editor-smoke.txt");
+                let file_ok = std::fs::read_to_string(&path)
+                    .map(|s| s == EXPECTED)
+                    .unwrap_or(false);
+                (driver_ok, file_ok)
+            }
+            None => (false, false),
+        };
+        let (verdict, code) = if answered && asked {
+            ("PASS", 0)
+        } else if !asked {
+            ("FAIL(no-edit-in-driver)", 1)
+        } else {
+            ("FAIL(file-bytes-differ)", 1)
+        };
+        self.trace
+            .record("editor.smoke_assert", verdict, self.app.revision, None);
+        println!("SMOKE-EDITOR-{verdict}");
+        code
+    }
+
     /// Attach current revision stamps to an Ok payload (uniform envelope).
     fn stamped(&self, mut v: serde_json::Value) -> inspect_srv::OpOutcome {
         if let Some(o) = v.as_object_mut() {
@@ -1605,6 +1785,12 @@ impl HameshWindowApp {
                                     "console": "pressed",
                                     "mechanism": "HumanEquivalent",
                                 })))
+                            } else if self.use_editor {
+                                self.editor_press(x, y);
+                                Some(self.stamped(serde_json::json!({
+                                    "editor": "pressed",
+                                    "mechanism": "HumanEquivalent",
+                                })))
                             } else {
                                 let (hit, acted, focus) = self.apply_press(x, y);
                                 self.trace.record(
@@ -1630,6 +1816,12 @@ impl HameshWindowApp {
                     self.console_press(x, y);
                     Some(self.stamped(serde_json::json!({
                         "console": "pressed",
+                        "mechanism": "HumanEquivalent",
+                    })))
+                } else if self.use_editor {
+                    self.editor_press(x, y);
+                    Some(self.stamped(serde_json::json!({
+                        "editor": "pressed",
                         "mechanism": "HumanEquivalent",
                     })))
                 } else {
@@ -1675,8 +1867,36 @@ impl HameshWindowApp {
                         "focused": self.console.as_ref().and_then(|c| c.widgets.focus.focused()),
                         "mechanism": "HumanEquivalent",
                     })))
+                } else if self.use_editor && self.editor.is_some() {
+                    // Editor owns its driver state: same key vocabulary.
+                    let k = match key {
+                        KeyMsg::Char(c) => WKey::Char(c),
+                        KeyMsg::Enter => WKey::Enter,
+                        KeyMsg::Backspace => WKey::Backspace,
+                        KeyMsg::Delete => WKey::Delete,
+                        KeyMsg::Left => WKey::Left,
+                        KeyMsg::Right => WKey::Right,
+                        KeyMsg::Up => WKey::Up,
+                        KeyMsg::Down => WKey::Down,
+                        KeyMsg::Home => WKey::Home,
+                        KeyMsg::End => WKey::End,
+                        KeyMsg::Tab => WKey::Tab,
+                        KeyMsg::ShiftTab => WKey::ShiftTab,
+                        KeyMsg::Escape => WKey::Escape,
+                    };
+                    let out = self.editor_keys_apply(vec![k]);
+                    self.trace
+                        .record("ext.key", &format!("-> {out}"), self.app.revision, None);
+                    Some(self.stamped(serde_json::json!({
+                        "result": out,
+                        "focused": self.editor.as_ref().map(|e| e.focused_zone()),
+                        "mechanism": "HumanEquivalent",
+                    })))
                 } else if self.widgets.is_none() {
-                    Some(self.err("NO_M3", "keyboard needs --m3 or --console mode".to_string()))
+                    Some(self.err(
+                        "NO_M3",
+                        "keyboard needs --m3, --console or --editor mode".to_string(),
+                    ))
                 } else {
                     let k = match key {
                         KeyMsg::Char(c) => WKey::Char(c),
@@ -1704,7 +1924,30 @@ impl HameshWindowApp {
                 }
             }
             Op::Type { id, text } => {
-                if self.use_console && self.console.is_some() {
+                if self.use_editor && self.editor.is_some() {
+                    // Editor types straight into the composer and commits
+                    // to the current line: the inspector `type` op is a
+                    // paste with no focus tricks.
+                    let note = {
+                        let Some(e) = self.editor.as_mut() else {
+                            return;
+                        };
+                        e.type_text(&text)
+                    };
+                    self.refresh_editor();
+                    self.trace.record(
+                        "ext.type",
+                        &format!("id={id} editor: {note}"),
+                        self.app.revision,
+                        None,
+                    );
+                    Some(self.stamped(serde_json::json!({
+                        "success": true,
+                        "hit": "edit-field",
+                        "notes": [note],
+                        "mechanism": "HumanEquivalent",
+                    })))
+                } else if self.use_console && self.console.is_some() {
                     let layout =
                         hamesh_layout::compute(&self.app, self.size.0 as f32, self.size.1 as f32);
                     // type_human borrows console widgets + app disjointly.
@@ -1728,7 +1971,10 @@ impl HameshWindowApp {
                         "mechanism": format!("{:?}", r.mechanism),
                     })))
                 } else if self.widgets.is_none() {
-                    Some(self.err("NO_M3", "typing needs --m3 or --console mode".to_string()))
+                    Some(self.err(
+                        "NO_M3",
+                        "typing needs --m3, --console or --editor mode".to_string(),
+                    ))
                 } else {
                     let layout =
                         hamesh_layout::compute(&self.app, self.size.0 as f32, self.size.1 as f32);
@@ -1921,6 +2167,18 @@ impl ApplicationHandler<UserEvent> for HameshWindowApp {
             self.enter_console();
             println!("CONSOLE open: Pi session console — click, type, Tab, F12 dumps Eye evidence, Esc quits/aborts");
         }
+        if self.use_editor {
+            let file =
+                std::env::args().find_map(|a| a.strip_prefix("--file=").map(|s| s.to_string()));
+            self.enter_editor(file);
+            println!("EDITOR open: file editor — click, type, Tab, F12 dumps Eye evidence, Esc cancels/quits");
+        }
+        if self.use_editor {
+            let file =
+                std::env::args().find_map(|a| a.strip_prefix("--file=").map(|s| s.to_string()));
+            self.enter_editor(file);
+            println!("EDITOR open: file editor — click, type, Tab, F12 dumps Eye evidence, Esc cancels/quits");
+        }
         if self.use_pi && self.pi.is_none() {
             let (job_tx, job_rx) = std::sync::mpsc::channel::<PiJob>();
             let (evt_tx, evt_rx) = std::sync::mpsc::channel::<PiEvt>();
@@ -2037,6 +2295,9 @@ impl ApplicationHandler<UserEvent> for HameshWindowApp {
                 if self.use_console {
                     self.refresh_console();
                 }
+                if self.use_editor {
+                    self.refresh_editor();
+                }
                 if let Some(gpu) = self.gpu.as_mut() {
                     gpu.resize(self.size.0, self.size.1);
                 }
@@ -2102,6 +2363,8 @@ impl ApplicationHandler<UserEvent> for HameshWindowApp {
                         self.m3_click();
                     } else if self.use_console {
                         self.console_press(self.cursor.0, self.cursor.1);
+                    } else if self.use_editor {
+                        self.editor_press(self.cursor.0, self.cursor.1);
                     } else {
                         let (hit, acted, focus) = self.apply_press(self.cursor.0, self.cursor.1);
                         sync_label(&mut self.app);
@@ -2150,6 +2413,12 @@ impl ApplicationHandler<UserEvent> for HameshWindowApp {
                     self.console_key(&event);
                     return;
                 }
+                if self.use_editor && event.physical_key != PhysicalKey::Code(KeyCode::Escape) {
+                    // Editor path consumes everything except Escape: the
+                    // window arm routes Escape to cancel-or-quit below.
+                    self.editor_key(&event);
+                    return;
+                }
                 match event.physical_key {
                     PhysicalKey::Code(KeyCode::Escape) => {
                         // Live run: Escape aborts it and stays open (one
@@ -2160,6 +2429,14 @@ impl ApplicationHandler<UserEvent> for HameshWindowApp {
                             && self.pi.as_ref().is_some_and(|l| l.live_index.is_some())
                         {
                             self.console_keys_apply(vec![WKey::Escape]);
+                        } else if self.use_editor {
+                            // Edit zone: Escape cancels and stays open.
+                            // Elsewhere: Escape quits (no live runs here).
+                            if self.editor.as_ref().is_some_and(|e| e.focus == 1) {
+                                self.editor_keys_apply(vec![WKey::Escape]);
+                            } else {
+                                event_loop.exit();
+                            }
                         } else {
                             event_loop.exit();
                         }
@@ -2174,6 +2451,8 @@ impl ApplicationHandler<UserEvent> for HameshWindowApp {
                             "pi-action"
                         } else if self.use_console {
                             "console-abort"
+                        } else if self.use_editor {
+                            "btn-save"
                         } else if self.use_blocks {
                             "dash-action"
                         } else {
@@ -2324,6 +2603,28 @@ impl ApplicationHandler<UserEvent> for HameshWindowApp {
                             None,
                         );
                     }
+                } else if self.use_editor {
+                    let amount = match delta {
+                        winit::event::MouseScrollDelta::LineDelta(_, y) => y * 60.0,
+                        winit::event::MouseScrollDelta::PixelDelta(p) => -(p.y as f32),
+                    };
+                    let layout =
+                        hamesh_layout::compute(&self.app, self.size.0 as f32, self.size.1 as f32);
+                    let scrolled = if let Some(e) = self.editor.as_mut() {
+                        let (w, h) = (self.cursor.0, self.cursor.1);
+                        Some(hamesh_editor::wheel(e, &layout, w, h, -amount))
+                    } else {
+                        None
+                    };
+                    if scrolled.is_some_and(|s| s) {
+                        self.refresh_editor();
+                        self.trace.record(
+                            "editor.wheel",
+                            &format!("dy={amount}"),
+                            self.app.revision,
+                            None,
+                        );
+                    }
                 }
             }
             WindowEvent::RedrawRequested => self.paint(),
@@ -2368,6 +2669,10 @@ impl ApplicationHandler<UserEvent> for HameshWindowApp {
             self.console_smoke_done = true;
             self.console_smoke_script();
         }
+        if self.use_editor && self.smoke_deadline.is_some() && !self.editor_smoke_done {
+            self.editor_smoke_done = true;
+            self.editor_smoke_script();
+        }
         if let Some(deadline) = self.smoke_deadline {
             if Instant::now() >= deadline {
                 // Fire once: with ControlFlow::Poll the loop can re-enter
@@ -2379,6 +2684,8 @@ impl ApplicationHandler<UserEvent> for HameshWindowApp {
                     self.smoke_exit_code = Some(self.m3_pi_assert());
                 } else if self.use_pi && self.use_console {
                     self.smoke_exit_code = Some(self.console_pi_assert());
+                } else if self.use_editor {
+                    self.smoke_exit_code = Some(self.editor_smoke_assert());
                 }
                 self.dump_inspection();
                 self.dump_gpu_snapshot();
@@ -2435,6 +2742,10 @@ fn main() {
     app.use_console = std::env::args().any(|a| a == "--console");
     if app.use_console {
         println!("CONSOLE mode: Pi session console from hamesh-console");
+    }
+    app.use_editor = std::env::args().any(|a| a == "--editor");
+    if app.use_editor {
+        println!("EDITOR mode: file editor from hamesh-editor");
     }
     if app.use_gallery {
         println!("GALLERY mode: ListView + Picker workspace from hamesh-gallery");

@@ -1226,6 +1226,7 @@ dependencies = [
  "hamesh-console",
  "hamesh-core",
  "hamesh-diag",
+ "hamesh-editor",
  "hamesh-gallery",
  "hamesh-inspect",
  "hamesh-layout",

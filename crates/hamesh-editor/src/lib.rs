@@ -105,6 +105,8 @@ impl Editor {
         }
         std::fs::write(&path, out).map_err(|e| format!("cannot write {}: {e}", path.display()))?;
         self.saved = self.lines.clone();
+        // The saved line is the new cancel baseline (see Enter-commit).
+        self.edit_base = self.composer.text.clone();
         Ok(format!(
             "saved {} ({} lines)",
             path.display(),
@@ -114,6 +116,20 @@ impl Editor {
 
     pub fn save_enabled(&self) -> bool {
         self.path.is_some() && self.lines != self.saved
+    }
+
+    /// Focused zone name for the Eye: lines, edit or actions.
+    pub fn focused_zone(&self) -> &str {
+        ["lines", "edit", "actions"][self.focus]
+    }
+
+    /// Type text into the composer and commit it to the current line,
+    /// for the inspector `type` op. No focus tricks: it works wherever
+    /// the composer is, exactly like a paste.
+    pub fn type_text(&mut self, text: &str) -> String {
+        self.composer.insert(text);
+        self.commit_line();
+        format!("typed {} chars", text.chars().count())
     }
 
     pub fn line_count(&self) -> usize {
@@ -441,9 +457,10 @@ pub fn key(e: &mut Editor, k: Key) -> String {
                 e.composer.end();
                 "caret end".to_string()
             }
-            // Commit is a no-op on content (edits are live) but returns
-            // focus to the lines, symmetric with entering edit mode.
+            // Commit accepts the live edits as the new baseline for a
+            // later cancel, and returns focus to the lines.
             Key::Enter => {
+                e.edit_base = e.composer.text.clone();
                 e.focus = 0;
                 "line committed".to_string()
             }
@@ -577,6 +594,15 @@ mod tests {
             std::fs::read_to_string(&p).unwrap(),
             "alpha\nbeta!\ngamma\n"
         );
+        // Cancel after a save restores the SAVED line, not the
+        // pre-first-edit text: save refreshes the cancel baseline.
+        let _ = key(&mut e, Key::Tab);
+        let _ = key(&mut e, Key::Enter);
+        let _ = key(&mut e, Key::Char('?'));
+        assert!(e.save_enabled());
+        let _ = key(&mut e, Key::Escape);
+        assert_eq!(e.lines[1], "beta!");
+        assert!(!e.save_enabled());
     }
 
     #[test]
@@ -587,6 +613,7 @@ mod tests {
         assert_eq!((e.focus, e.action_idx), (0, 0));
         let _ = key(&mut e, Key::Tab);
         assert_eq!((e.focus, e.action_idx), (1, 0));
+        assert_eq!(e.focused_zone(), "edit");
         let _ = key(&mut e, Key::Tab);
         assert_eq!((e.focus, e.action_idx), (2, 0), "save button");
         let _ = key(&mut e, Key::Tab);
@@ -633,6 +660,18 @@ mod tests {
             Some("focus")
         );
         assert_eq!(field.props.get("border").map(|s| s.as_str()), Some("2"));
+    }
+
+    #[test]
+    fn type_text_inserts_and_commits_like_a_paste() {
+        let (_g, p) = fixture("abc", false, false);
+        let mut e = Editor::new();
+        e.open(&p).unwrap();
+        let note = e.type_text("XY");
+        assert!(note.contains("typed 2 chars"), "{note}");
+        assert_eq!(e.lines[0], "abcXY");
+        assert!(e.save_enabled());
+        assert_eq!(e.focused_zone(), "lines");
     }
 
     #[test]

@@ -110,10 +110,35 @@ judgement, not an implementation detail. Recommendation: pick (a)
 or (b) at the milestone review; (a) aligns with the a11y backlog,
 (b) is immediately buildable.
 
-## 7. Next step
+## 7. Next step (taken): App 2 mini text editor
 
-App 2 (mini text editor: real file open/edit/save, keyboard nav,
-scroll — exercises composer + file IO, zero new deps) alongside
-ranked fixes 1–2 above, which are now directly justified by
-observed operator failures. Then the milestone review: merge
-decisions for PR #7 + 037 branch, and the Agent X direction call.
+Built `hamesh-editor`: file lines in a virtualized `ListView`, the
+selected line edited in a `Composer`, status strip plus Save — zero
+framework changes, maximal reuse of the tasks/console patterns.
+
+## 8. App 2 verification (desktop evidence in `docs/037/evidence/`)
+
+- Headless: 7/7 (`cargo test -p hamesh-editor`) — byte-exact
+  CRLF/LF round trips, dirty/save gate, Escape restore,
+  Tab traversal, Eye-clean frames, press-to-edit, type-to-edit.
+- Window: `--editor --inspect --smoke-test` → scripted fixture
+  open/edit/save with a file-bytes assert (`SMOKE-EDITOR-PASS`).
+- External operator loop on a real CRLF file, keyboard only:
+  map/detail → Down → Enter → type → Tab → Enter (save) →
+  file bytes `one|two!|three` with CRLF intact → type more →
+  Escape → line restored to the *saved* text, badge clean.
+- Two defects caught along the way, both fixed with regression
+  coverage: an 8px chrome overflow clipping the edit field at
+  800x600 (measured, budget now 188px from evidence), and a stale
+  cancel baseline that reverted past the save point (cancel now
+  restores the saved line; commit and save refresh the baseline).
+- Still open: ranked weaknesses 1–2 from §5 (external Hand parity
+  for tasks/gallery/sheet; Enter-on-button in the shared core) —
+  unchanged, now joined by editor `--file=` handling for missing
+  files (currently an honest note, no dialog).
+
+## 9. Standing recommendation
+
+Merge decisions for PR #7 + 037 branch, and the Agent X direction
+call (a: accessibility-bridge operation, b: parallel native
+client, c ruled out), remain the milestone review items.
