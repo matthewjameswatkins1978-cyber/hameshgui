@@ -120,13 +120,14 @@ impl Tasks {
     }
 
     /// Whether an action can run right now. Toggle needs a selected
-    /// task; Clear only means something while the filter is open.
-    /// Disabled actions paint muted and refuse to run — through every
-    /// input path, pointer and keyboard alike.
+    /// task; Clear only means something while a filter query is active
+    /// (open popup with a non-empty query). Disabled actions paint
+    /// muted and refuse to run — through every input path, pointer
+    /// and keyboard alike.
     pub fn action_enabled(&self, command: &str) -> bool {
         match command {
             "toggle-done" => self.selected_task().is_some(),
-            "clear-filter" => self.filter.is_open(),
+            "clear-filter" => self.filter.is_open() && !self.filter.query().is_empty(),
             _ => false,
         }
     }
@@ -526,9 +527,13 @@ pub fn wheel(t: &mut Tasks, layout: &hamesh_layout::LayoutOutput, x: f32, y: f32
 
 pub fn key(t: &mut Tasks, k: Key) -> String {
     if matches!(k, Key::Tab | Key::ShiftTab) {
-        // Moving focus dismisses the popup; ShiftTab walks back.
+        // Tab moves focus and never discards a live query: the popup
+        // stays open while the query is non-empty so Clear remains
+        // reachable by keyboard. An empty query still dismisses.
         // Inside the actions zone Tab walks the buttons themselves.
-        t.filter.close();
+        if t.filter.query().is_empty() {
+            t.filter.close();
+        }
         let fwd = matches!(k, Key::Tab);
         (t.focus, t.action_idx) = match (t.focus, fwd) {
             (2, true) if t.action_idx + 1 < ACTIONS.len() => (2, t.action_idx + 1),
@@ -547,7 +552,14 @@ pub fn key(t: &mut Tasks, k: Key) -> String {
         }
         match k {
             Key::Enter => toggle_selected(t),
-            Key::Escape => "list: no popup to dismiss".to_string(),
+            Key::Escape => {
+                if t.filter.is_open() {
+                    t.filter.close();
+                    "filter dismissed".to_string()
+                } else {
+                    "list: no popup to dismiss".to_string()
+                }
+            }
             _ => "list: key ignored".to_string(),
         }
     } else if t.focus == 1 {
@@ -577,7 +589,14 @@ pub fn key(t: &mut Tasks, k: Key) -> String {
             // Enter runs the focused button through the same gate as a
             // pointer press: disabled means disabled, everywhere.
             Key::Enter => act(t, ACTIONS[t.action_idx]),
-            Key::Escape => "actions: nothing to dismiss".to_string(),
+            Key::Escape => {
+                if t.filter.is_open() {
+                    t.filter.close();
+                    "filter dismissed".to_string()
+                } else {
+                    "actions: nothing to dismiss".to_string()
+                }
+            }
             _ => "actions: pointer or Enter".to_string(),
         }
     }
@@ -755,9 +774,8 @@ mod tests {
         assert!(!t.action_enabled("clear-filter"));
         let note = key(&mut t, Key::Enter);
         assert!(note.contains("disabled"), "{note}");
-        // Open the filter: clear enables. (Tab would dismiss first —
-        // cancel discards the query — so the keyboard test takes focus
-        // here directly; traversal itself is proved above.)
+        // Open the filter and type: a non-empty query enables Clear.
+        // Tab preserves the query so the buttons stay reachable.
         t.filter.open();
         t.focus = 1;
         let _ = key(&mut t, Key::Char('o'));
@@ -779,6 +797,43 @@ mod tests {
         let (cx, cy) = center_of(&scene, "btn-clear");
         let note = press(&mut t, &app, &scene, cx, cy);
         assert!(note.contains("disabled"), "{note}");
+    }
+
+    #[test]
+    fn clear_is_reachable_by_keyboard_alone() {
+        // End-to-end through normal Key events only: type a query,
+        // Tab to Clear, activate. No direct focus or filter pokes.
+        let mut t = Tasks::new();
+        assert_eq!((t.focus, t.action_idx), (0, 0));
+        assert_eq!(key(&mut t, Key::Tab), "focus -> filter");
+        assert_eq!(t.focus, 1);
+        let note = key(&mut t, Key::Char('o'));
+        assert!(note.contains("filter type"), "{note}");
+        assert!(t.filter.is_open());
+        assert!(!t.filter.query().is_empty());
+        assert!(t.shown().len() < 8);
+        assert!(t.action_enabled("clear-filter"));
+        // Tab into the actions zone: the query survives, Clear stays enabled.
+        assert_eq!(key(&mut t, Key::Tab), "focus -> actions");
+        assert_eq!((t.focus, t.action_idx), (2, 0));
+        assert!(t.filter.is_open(), "Tab must not discard the query");
+        assert!(t.action_enabled("clear-filter"));
+        assert_eq!(key(&mut t, Key::Tab), "focus -> actions");
+        assert_eq!((t.focus, t.action_idx), (2, 1), "Clear button");
+        assert!(t.action_enabled("clear-filter"));
+        let note = key(&mut t, Key::Enter);
+        assert!(note.contains("filter cleared"), "{note}");
+        assert!(t.filter.query().is_empty());
+        assert_eq!(t.shown().len(), 8, "full list returns");
+        assert_eq!((t.focus, t.action_idx), (2, 1), "focus stays on Clear");
+        // The focused button carries the ring.
+        let (app, _layout, _scene) = frame(&mut t, 1440.0, 900.0);
+        let clear = app.get("btn-clear").unwrap();
+        assert_eq!(
+            clear.props.get("border_token").map(|s| s.as_str()),
+            Some("focus")
+        );
+        assert_eq!(clear.props.get("border").map(|s| s.as_str()), Some("2"));
     }
 
     #[test]

@@ -110,8 +110,13 @@ contract. The convergence point is the shared pieces above.
   button (Tab/ShiftTab both directions); focused button carries the
   ring; Enter runs the focused action through one shared gate that
   refuses disabled actions with a note — pointer and keyboard alike.
-  Clear stays enabled only with an open popup and refines instead of
-  dismissing; Toggle dismisses after acting.
+  Tab moves focus without discarding a live query, so Clear stays
+  reachable by keyboard; an empty query still dismisses. Clear is
+  enabled only with a non-empty query and refines instead of
+  dismissing; Toggle dismisses after acting. Escape cancels the
+  popup from any zone. Proven by a keyboard-only regression
+  (`clear_is_reachable_by_keyboard_alone`): type, Tab, Tab, Enter —
+  query clears, full list returns, focus stays on Clear with the ring.
 - **Duplicate ids.** `App::add` panics unconditionally (debug AND
   release, proven by `cargo test --release -p hamesh-core`); the
   guard caught two real collisions during 036, including an
