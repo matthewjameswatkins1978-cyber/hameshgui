@@ -726,6 +726,8 @@ impl HameshWindowApp {
             self.console_abort()
         } else if note == "attach requested" {
             self.console_attach()
+        } else if note == "new session requested" {
+            self.console_new()
         } else {
             note
         };
@@ -778,8 +780,70 @@ impl HameshWindowApp {
             dir,
             cwd,
         }));
+        // Ask the fresh worker who it is right away: without this the
+        // strip keeps showing the session we just left.
+        if let Some(link) = self.pi.as_ref() {
+            let _ = link.job_tx.send(PiJob::GetState);
+        }
         self.refresh_console();
         format!("attached sid={} (history restoring)", req.id)
+    }
+
+    /// Translate the driver's new-session intent into a worker respawn
+    /// on a freshly minted session id. Same gate and same retire-first
+    /// discipline as attach: two workers never share a session.
+    fn console_new(&mut self) -> String {
+        if self.pi.as_ref().is_some_and(|l| l.live_index.is_some()) {
+            return "new session refused: run live, abort first".to_string();
+        }
+        let req = match self.console.as_mut().and_then(|c| c.pending_new.take()) {
+            Some(r) => r,
+            None => return "new session refused: no request".to_string(),
+        };
+        let fallback = self.pi_session.clone().unwrap_or(SessionCfg {
+            id: String::new(),
+            dir: String::new(),
+            cwd: String::new(),
+        });
+        let dir = if req.dir.is_empty() {
+            fallback.dir
+        } else {
+            req.dir
+        };
+        let cwd = if req.cwd.is_empty() {
+            fallback.cwd
+        } else {
+            req.cwd
+        };
+        if dir.is_empty() || cwd.is_empty() {
+            return "usage: /new [dir] [cwd] (dir/cwd fall back to the current session)"
+                .to_string();
+        }
+        let secs = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0);
+        let id = format!("ax-{secs}");
+        // Retire the old worker first: dropping its link ends its loop
+        // and kills its child before the new one starts.
+        self.pi = None;
+        if let Some(c) = self.console.as_mut() {
+            c.widgets.feed.messages.clear();
+            c.widgets.feed.scroll_px = 0.0;
+            // The previous session's identity must never linger on the
+            // strip while the fresh worker handshakes.
+            c.set_status("—", "—", 0, false);
+        }
+        self.spawn_pi_link(Some(SessionCfg {
+            id: id.clone(),
+            dir,
+            cwd,
+        }));
+        if let Some(link) = self.pi.as_ref() {
+            let _ = link.job_tx.send(PiJob::GetState);
+        }
+        self.refresh_console();
+        format!("new session sid={id} (fresh, no history)")
     }
 
     /// Console keyboard: map the winit event onto the shared key core,
@@ -872,6 +936,11 @@ impl HameshWindowApp {
         // button converge here with pointer and inspector key paths.
         if last == "attach requested" {
             last = self.console_attach();
+            self.refresh_console();
+        }
+        // And New: the `/new` submit and the New button converge here.
+        if last == "new session requested" {
+            last = self.console_new();
             self.refresh_console();
         }
         let submitted: Option<String> = match (had_enter, before) {

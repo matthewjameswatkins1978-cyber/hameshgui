@@ -50,12 +50,24 @@ pub struct AttachRequest {
     pub cwd: String,
 }
 
+/// A parsed `/new` request, stashed for the host: the host mints a
+/// fresh session id and respawns the worker (the attach pattern, with
+/// no id to restore). Empty `dir`/`cwd` mean "reuse the current ones".
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct NewRequest {
+    pub dir: String,
+    pub cwd: String,
+}
+
 pub struct Console {
     pub widgets: Widgets,
     pub status: EngineStatus,
     /// Pending attach request from an `/attach` submit or the Attach
     /// button prefill flow. The host takes it exactly once.
     pub pending_attach: Option<AttachRequest>,
+    /// Pending new-session request from a `/new` submit or the New
+    /// button prefill flow. The host takes it exactly once.
+    pub pending_new: Option<NewRequest>,
 }
 
 impl Console {
@@ -70,6 +82,7 @@ impl Console {
             widgets,
             status: EngineStatus::default(),
             pending_attach: None,
+            pending_new: None,
         }
     }
 
@@ -159,7 +172,7 @@ pub fn compose(c: &mut Console, width: f32, height: f32) -> App {
                 ..Default::default()
             },
             |s| {
-                b::caption(s, "console-attach-hint", "/attach <id> [dir] [cwd]");
+                b::caption(s, "console-attach-hint", "/attach · /new");
                 b::spacer(s, "console-aspacer");
                 let attach_focused = c
                     .widgets
@@ -172,6 +185,17 @@ pub fn compose(c: &mut Console, width: f32, height: f32) -> App {
                     "Attach",
                     b::ButtonOpts::new(b::ButtonVariant::Ghost, "attach-hint")
                         .focused(attach_focused),
+                );
+                let new_focused = c
+                    .widgets
+                    .focus
+                    .focused()
+                    .is_some_and(|f| f == "console-new");
+                b::button(
+                    s,
+                    "console-new",
+                    "New",
+                    b::ButtonOpts::new(b::ButtonVariant::Ghost, "new-session").focused(new_focused),
                 );
                 let state = if c.abort_enabled() {
                     b::ButtonState::Rest
@@ -237,6 +261,31 @@ fn parse_attach(text: &str) -> Result<AttachRequest, String> {
     }
 }
 
+/// Parse an `/new` submit into a [`NewRequest`]. Optional dir/cwd fall
+/// back to the host's current session (`""` = unset); a bare `/new`
+/// starts a fresh session in the same place, which is the common case.
+fn parse_new(text: &str) -> Result<NewRequest, String> {
+    let mut parts = text.split_whitespace();
+    match (parts.next(), parts.next(), parts.next(), parts.next()) {
+        (Some("/new"), dir, cwd, None) => Ok(NewRequest {
+            dir: dir.unwrap_or_default().to_string(),
+            cwd: cwd.unwrap_or_default().to_string(),
+        }),
+        _ => Err("usage: /new [dir] [cwd]".to_string()),
+    }
+}
+
+/// Prefill the composer with a slash-command prefix and hand over the
+/// composer: the one hand-over the Attach and New buttons share.
+fn prefill(c: &mut Console, prefix: &str) {
+    c.widgets.composer.text = prefix.to_string();
+    c.widgets.composer.caret = prefix.chars().count();
+    c.widgets.composer.preedit = None;
+    if let Some(pos) = c.widgets.focus.order.iter().position(|o| o == "composer") {
+        c.widgets.focus.current = pos;
+    }
+}
+
 pub fn key(c: &mut Console, app: &mut App, k: &Key) -> String {
     if matches!(k, Key::Enter) && c.widgets.focus.focused() == Some("console-abort") {
         return if c.abort_enabled() {
@@ -248,20 +297,31 @@ pub fn key(c: &mut Console, app: &mut App, k: &Key) -> String {
     if matches!(k, Key::Enter) && c.widgets.focus.focused() == Some("console-attach") {
         // Attach button: prefill the slash command and hand over the
         // composer, pointer-press equivalent.
-        c.widgets.composer.text = "/attach ".to_string();
-        c.widgets.composer.caret = "/attach ".chars().count();
-        c.widgets.composer.preedit = None;
-        if let Some(pos) = c.widgets.focus.order.iter().position(|o| o == "composer") {
-            c.widgets.focus.current = pos;
-        }
+        prefill(c, "/attach ");
         return "attach: type /attach <id> [dir] [cwd]".to_string();
+    }
+    if matches!(k, Key::Enter) && c.widgets.focus.focused() == Some("console-new") {
+        // New button: the same hand-over, for a fresh session.
+        prefill(c, "/new ");
+        return "new: type /new [dir] [cwd]".to_string();
     }
     if matches!(k, Key::Enter) && c.widgets.focus.focused() == Some("composer") {
         // Fold any preedit so the prefix test sees the real text.
         c.widgets.composer.commit("");
-        if c.widgets.composer.text.starts_with("/attach") {
+        if c.widgets.composer.text.starts_with("/attach")
+            || c.widgets.composer.text.starts_with("/new")
+        {
             let text = std::mem::take(&mut c.widgets.composer.text);
             c.widgets.composer.caret = 0;
+            if text.starts_with("/new") {
+                return match parse_new(&text) {
+                    Ok(req) => {
+                        c.pending_new = Some(req);
+                        "new session requested".to_string()
+                    }
+                    Err(usage) => usage,
+                };
+            }
             return match parse_attach(&text) {
                 Ok(req) => {
                     c.pending_attach = Some(req);
@@ -292,13 +352,13 @@ pub fn press(c: &mut Console, app: &App, scene: &hamesh_scene::Scene, x: f32, y:
             Hit::Action { command } if command == "attach-hint" => {
                 // Prefill the slash command and hand over the composer:
                 // pointer equivalent of Tab-to-Attach + Enter.
-                c.widgets.composer.text = "/attach ".to_string();
-                c.widgets.composer.caret = "/attach ".chars().count();
-                c.widgets.composer.preedit = None;
-                if let Some(pos) = c.widgets.focus.order.iter().position(|o| o == "composer") {
-                    c.widgets.focus.current = pos;
-                }
+                prefill(c, "/attach ");
                 "attach: type /attach <id> [dir] [cwd]".to_string()
+            }
+            Hit::Action { command } if command == "new-session" => {
+                // Pointer equivalent of Tab-to-New + Enter.
+                prefill(c, "/new ");
+                "new: type /new [dir] [cwd]".to_string()
             }
             Hit::Action { command } => format!("unknown command {command}"),
             Hit::ListRow { .. } => {
@@ -351,6 +411,7 @@ mod tests {
                 "composer",
                 "console-attach-hint",
                 "console-attach",
+                "console-new",
                 "console-abort",
             ] {
                 assert!(app.get(id).is_some(), "missing {id} at {w}x{h}");
@@ -462,22 +523,26 @@ mod tests {
         let mut c = Console::new();
         let (mut app, _) = refresh(&mut c, 800.0, 600.0);
         // Idle: Abort is disabled, so Tab skips it (feed -> composer
-        // -> attach).
+        // -> attach -> new).
         assert_eq!(c.widgets.focus.focused(), Some("feed"));
         let _ = key(&mut c, &mut app, &Key::Tab);
         assert_eq!(c.widgets.focus.focused(), Some("composer"));
         let _ = key(&mut c, &mut app, &Key::Tab);
         assert_eq!(c.widgets.focus.focused(), Some("console-attach"));
         let _ = key(&mut c, &mut app, &Key::Tab);
+        assert_eq!(c.widgets.focus.focused(), Some("console-new"));
+        let _ = key(&mut c, &mut app, &Key::Tab);
         assert_eq!(c.widgets.focus.focused(), Some("feed"));
-        // Streaming: Abort enables and joins the Tab order after
-        // Attach; Enter raises the same intent as a pointer press, for
+        // Streaming: Abort enables and joins the Tab order after Attach
+        // and New; Enter raises the same intent as a pointer press, for
         // the host to translate into a worker cancel.
         c.set_status("m", "s", 1, true);
         let (mut app2, _) = refresh(&mut c, 800.0, 600.0);
         let _ = key(&mut c, &mut app2, &Key::Tab);
         let _ = key(&mut c, &mut app2, &Key::Tab);
         assert_eq!(c.widgets.focus.focused(), Some("console-attach"));
+        let _ = key(&mut c, &mut app2, &Key::Tab);
+        assert_eq!(c.widgets.focus.focused(), Some("console-new"));
         let _ = key(&mut c, &mut app2, &Key::Tab);
         assert_eq!(c.widgets.focus.focused(), Some("console-abort"));
         let note = key(&mut c, &mut app2, &Key::Enter);
@@ -522,6 +587,68 @@ mod tests {
         let note = key(&mut c, &mut app3, &Key::Enter);
         assert!(note.contains("submitted"), "{note}");
         assert!(c.pending_attach.is_some(), "attach stash survives");
+    }
+
+    #[test]
+    fn new_command_parses_and_stashes() {
+        let mut c = Console::new();
+        let (mut app, _) = refresh(&mut c, 800.0, 600.0);
+        let _ = key(&mut c, &mut app, &Key::Tab); // composer
+        for ch in "/new".chars() {
+            let _ = key(&mut c, &mut app, &Key::Char(ch));
+        }
+        let note = key(&mut c, &mut app, &Key::Enter);
+        assert_eq!(note, "new session requested");
+        // A bare /new means "same place, fresh session": the host fills
+        // dir/cwd from the session it is on.
+        assert_eq!(
+            c.pending_new,
+            Some(NewRequest {
+                dir: String::new(),
+                cwd: String::new(),
+            })
+        );
+        assert!(c.pending_attach.is_none(), "the two commands stay distinct");
+        // Explicit dir/cwd win.
+        let (mut app2, _) = refresh(&mut c, 800.0, 600.0);
+        for ch in "/new d:/s d:/w".chars() {
+            let _ = key(&mut c, &mut app2, &Key::Char(ch));
+        }
+        let _ = key(&mut c, &mut app2, &Key::Enter);
+        assert_eq!(
+            c.pending_new,
+            Some(NewRequest {
+                dir: "d:/s".to_string(),
+                cwd: "d:/w".to_string(),
+            })
+        );
+        // Extra fields are refused, not guessed.
+        let (mut app3, _) = refresh(&mut c, 800.0, 600.0);
+        for ch in "/new a b c".chars() {
+            let _ = key(&mut c, &mut app3, &Key::Char(ch));
+        }
+        let note = key(&mut c, &mut app3, &Key::Enter);
+        assert!(note.contains("usage"), "{note}");
+        assert!(c.widgets.feed.messages.is_empty(), "nothing submitted");
+    }
+
+    #[test]
+    fn new_button_prefills_and_enters() {
+        let mut c = Console::new();
+        let (app, _layout, scene) = frame(&mut c, 800.0, 600.0);
+        let (x, y) = center_of(&scene, "console-new");
+        let note = press(&mut c, &app, &scene, x, y);
+        assert!(note.contains("/new"), "{note}");
+        assert_eq!(c.widgets.composer.text, "/new ");
+        assert_eq!(c.widgets.focus.focused(), Some("composer"));
+        // Keyboard equivalence: Tab to the button, Enter prefills.
+        let (mut app2, _, _scene2) = frame(&mut c, 800.0, 600.0);
+        let _ = key(&mut c, &mut app2, &Key::Tab); // composer -> attach
+        let _ = key(&mut c, &mut app2, &Key::Tab); // attach -> new
+        assert_eq!(c.widgets.focus.focused(), Some("console-new"));
+        let note = key(&mut c, &mut app2, &Key::Enter);
+        assert!(note.contains("/new"), "{note}");
+        assert_eq!(c.widgets.composer.text, "/new ");
     }
 
     #[test]
