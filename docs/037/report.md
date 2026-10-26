@@ -132,12 +132,44 @@ framework changes, maximal reuse of the tasks/console patterns.
   800x600 (measured, budget now 188px from evidence), and a stale
   cancel baseline that reverted past the save point (cancel now
   restores the saved line; commit and save refresh the baseline).
-- Still open: ranked weaknesses 1–2 from §5 (external Hand parity
-  for tasks/gallery/sheet; Enter-on-button in the shared core) —
-  unchanged, now joined by editor `--file=` handling for missing
+- Still open at the time: ranked weaknesses 1–2 from §5 — now
+  worked (see §10). Remaining: editor `--file=` handling for missing
   files (currently an honest note, no dialog).
 
-## 9. Standing recommendation
+## 10. Ranked fixes landed: external Hand parity + Enter-on-button
+
+- **Parity for tasks/gallery/sheet.** Inspector `Key`/`ClickId`/
+  `ClickAt` now route to the driver `press`/`key` cores with the same
+  rev discipline and trace shape as console/editor (`*_keys_apply`
+  + `*_press` per mode, one shared `keymsg_to_wkey` mapping instead
+  of a fourth copy). `focused_zone()` on all three drivers (+ console
+  + editor already had it) so the Eye reports focus honestly.
+  Headless: tasks 11/11, gallery 5/5, sheet 7/7. Live, keyboard-only:
+  tasks (Tab traversal with zone names, Char filter, Tab Tab Enter
+  Clear, stale-inject → STALE → retry, row press with popup-occlusion
+  honestly hit-tested, Escape dismiss); gallery (Tab to picker, type
+  to narrow, row press); sheet (Tab to buttons, Enter activates,
+  button press). Evidence: `*-live-operated.png` × 3.
+- **Enter-on-button for console.** The shared core still has no
+  button activation (deliberately: commands are driver-owned, and a
+  god-function dispatcher was explicitly rejected in 036). Instead
+  the console driver maps Enter on the focused Abort to the same
+  abort intent as a pointer press, and one window-level gate
+  (`console_abort`) turns it into a worker cancel — pointer, Enter
+  and inspector key share it. Live proof: Tab Tab Enter cancelled a
+  streaming run mid-response (`abort requested (cancel sent)` → Idle,
+  screenshot `console-enter-abort.png`). Tasks/sheet need no such
+  change (their zone actions already run on Enter); editor needs none
+  (zone-gated Save already works).
+- **Incidents, honestly recorded.** (i) A ~100-paragraph streaming
+  run made the inspector stop answering (`TIMEOUT ui busy`, UI thread
+  silent for 60s+ while the process stayed alive); cause not yet
+  isolated — needs a bounded follow-up, not a conclusion. A moderate
+  run immediately afterwards behaved perfectly. (ii) One `detail`
+  read returned an empty envelope during a Done→GetState transition;
+  retry succeeded. Both are open unknowns, not verdicts.
+
+## 11. Standing recommendation
 
 Merge decisions for PR #7 + 037 branch, and the Agent X direction
 call (a: accessibility-bridge operation, b: parallel native
