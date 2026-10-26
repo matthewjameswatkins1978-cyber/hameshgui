@@ -68,6 +68,9 @@ pub struct Console {
     /// Pending new-session request from a `/new` submit or the New
     /// button prefill flow. The host takes it exactly once.
     pub pending_new: Option<NewRequest>,
+    /// Last engine failure, as a bounded headline. `None` means the
+    /// engine has nothing to complain about.
+    pub error: Option<String>,
 }
 
 impl Console {
@@ -83,6 +86,7 @@ impl Console {
             status: EngineStatus::default(),
             pending_attach: None,
             pending_new: None,
+            error: None,
         }
     }
 
@@ -103,6 +107,24 @@ impl Console {
     pub fn abort_enabled(&self) -> bool {
         self.status.streaming
     }
+
+    /// Host-fed engine failure, shown as a bounded headline in the
+    /// strip with the badge turned to `Error`. The host sets it when a
+    /// worker action fails and clears it on the next success, so the
+    /// strip never keeps claiming an error the engine has moved past.
+    pub fn set_error(&mut self, error: Option<&str>) {
+        self.error = error.map(|e| {
+            let mut head: String = e.chars().take(ERROR_MAX_CHARS).collect();
+            if e.chars().count() > ERROR_MAX_CHARS {
+                head.push('…');
+            }
+            head
+        });
+    }
+
+    pub fn has_error(&self) -> bool {
+        self.error.is_some()
+    }
 }
 
 impl Default for Console {
@@ -110,6 +132,11 @@ impl Default for Console {
         Self::new()
     }
 }
+
+/// How much of an engine error the strip shows. The strip is a
+/// headline, not a log: the full text already arrives as a system
+/// message in the feed, and a long caption would crowd the buttons.
+const ERROR_MAX_CHARS: usize = 60;
 
 /// Feed viewport budget at this height: chrome (status strip, composer,
 /// abort row, gaps, padding) takes ~228px; the feed gets the rest.
@@ -136,7 +163,12 @@ pub fn compose(c: &mut Console, width: f32, height: f32) -> App {
             |s| {
                 b::title(s, "console-title", "Console");
                 b::spacer(s, "console-hspace");
-                let (badge_text, variant) = if c.status.streaming {
+                // An unresolved engine failure outranks the streaming
+                // badge: the operator needs to see that something broke,
+                // not only that a run is in flight.
+                let (badge_text, variant) = if c.has_error() {
+                    ("Error", b::Variant::Error)
+                } else if c.status.streaming {
                     ("Streaming", b::Variant::Success)
                 } else {
                     ("Idle", b::Variant::Neutral)
@@ -144,11 +176,12 @@ pub fn compose(c: &mut Console, width: f32, height: f32) -> App {
                 b::badge(s, "console-status", badge_text, variant);
                 b::caption(s, "console-model", &c.status.model);
                 b::caption(s, "console-session", &c.status.session);
-                b::caption(
-                    s,
-                    "console-count",
-                    &format!("{} messages", c.status.messages),
-                );
+                // One message is not "1 messages": the strip gets read.
+                let count = match c.status.messages {
+                    1 => "1 message".to_string(),
+                    n => format!("{n} messages"),
+                };
+                b::caption(s, "console-count", &count);
             },
         );
     }
@@ -172,7 +205,13 @@ pub fn compose(c: &mut Console, width: f32, height: f32) -> App {
                 ..Default::default()
             },
             |s| {
-                b::caption(s, "console-attach-hint", "/attach · /new");
+                // An error takes the hint's slot: one line, bounded, so
+                // the buttons keep their room at 800px. The full text is
+                // already a system message in the feed.
+                match c.error.as_deref() {
+                    Some(err) => b::caption(s, "console-error", err),
+                    None => b::caption(s, "console-attach-hint", "/attach · /new"),
+                };
                 b::spacer(s, "console-aspacer");
                 let attach_focused = c
                     .widgets
@@ -587,6 +626,92 @@ mod tests {
         let note = key(&mut c, &mut app3, &Key::Enter);
         assert!(note.contains("submitted"), "{note}");
         assert!(c.pending_attach.is_some(), "attach stash survives");
+    }
+
+    /// Text of a caption/component id, or "" when the node is absent.
+    fn text_of(app: &App, id: &str) -> String {
+        app.get(id)
+            .and_then(|c| c.props.get("text").cloned())
+            .unwrap_or_default()
+    }
+
+    #[test]
+    fn error_state_paints_a_headline_and_turns_the_badge() {
+        let mut c = Console::new();
+        let (app, _layout, scene) = frame(&mut c, 800.0, 600.0);
+        assert!(app.get("console-error").is_none(), "no error, no node");
+        assert_eq!(text_of(&app, "console-status"), "Idle");
+
+        c.set_error(Some("boom"));
+        assert!(c.has_error());
+        let (app2, _layout2, scene2) = frame(&mut c, 800.0, 600.0);
+        assert_eq!(text_of(&app2, "console-error"), "boom");
+        assert!(app2.get("console-attach-hint").is_none(), "the hint yields");
+        let badge = app2.get("console-status").unwrap();
+        assert_eq!(badge.props.get("text").map(|s| s.as_str()), Some("Error"));
+        assert_eq!(
+            badge.props.get("variant").map(|s| s.as_str()),
+            Some("error")
+        );
+        for n in &scene2.nodes {
+            assert!(!n.clipped, "{} clipped while showing an error", n.id);
+        }
+        let _ = (scene, 800.0);
+
+        // Wider window: same story, still nothing clipped.
+        let (app3, _l3, scene3) = frame(&mut c, 1440.0, 900.0);
+        assert_eq!(text_of(&app3, "console-error"), "boom");
+        for n in &scene3.nodes {
+            assert!(!n.clipped, "{} clipped at 1440x900", n.id);
+        }
+
+        // Clearing removes the node and restores the hint.
+        c.set_error(None);
+        assert!(!c.has_error());
+        let (app4, _l4, scene4) = frame(&mut c, 800.0, 600.0);
+        assert!(app4.get("console-error").is_none());
+        assert_eq!(text_of(&app4, "console-attach-hint"), "/attach · /new");
+        assert_eq!(text_of(&app4, "console-status"), "Idle");
+        for n in &scene4.nodes {
+            assert!(!n.clipped, "{} clipped after clearing", n.id);
+        }
+    }
+
+    #[test]
+    fn long_errors_are_bounded_and_never_clip() {
+        let mut c = Console::new();
+        let long = "x".repeat(400);
+        c.set_error(Some(&long));
+        let head = c.error.clone().unwrap();
+        assert_eq!(head.chars().count(), 61, "60 chars plus the ellipsis");
+        assert!(head.ends_with('…'));
+        // Worst case reaches the tree as one bounded line: no node may
+        // be clipped at the narrowest supported window.
+        for (w, h) in [(800.0, 600.0), (1440.0, 900.0)] {
+            let (app, _layout, scene) = frame(&mut c, w, h);
+            assert_eq!(text_of(&app, "console-error").chars().count(), 61);
+            for n in &scene.nodes {
+                assert!(!n.clipped, "{} clipped at {w}x{h}", n.id);
+            }
+        }
+    }
+
+    #[test]
+    fn error_outranks_the_streaming_badge_until_cleared() {
+        let mut c = Console::new();
+        c.set_status("m", "s", 3, true);
+        let (app, _layout, _scene) = frame(&mut c, 800.0, 600.0);
+        assert_eq!(text_of(&app, "console-status"), "Streaming");
+        c.set_error(Some("state: timeout"));
+        let (app2, _layout2, _scene2) = frame(&mut c, 800.0, 600.0);
+        assert_eq!(text_of(&app2, "console-status"), "Error");
+        c.set_error(None);
+        let (app3, _layout3, _scene3) = frame(&mut c, 800.0, 600.0);
+        assert_eq!(
+            text_of(&app3, "console-status"),
+            "Streaming",
+            "clearing the error restores the run badge"
+        );
     }
 
     #[test]

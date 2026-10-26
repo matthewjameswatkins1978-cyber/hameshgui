@@ -1571,6 +1571,9 @@ impl HameshWindowApp {
                             link.live_index = Some(i);
                             link.follow = true;
                         }
+                        // A run that starts is proof the engine is
+                        // talking again: clear any stale headline.
+                        c.set_error(None);
                         changed = true;
                     }
                 }
@@ -1612,6 +1615,9 @@ impl HameshWindowApp {
                         }
                         let vp = c.widgets.feed_viewport.max(200.0);
                         c.widgets.feed.scroll_to_bottom(vp);
+                        // A run that finishes is success: drop any stale
+                        // headline rather than leaving it beside new work.
+                        c.set_error(None);
                         self.trace.record(
                             "console.pi_done",
                             &format!(
@@ -1642,6 +1648,10 @@ impl HameshWindowApp {
                             link.live_index = None;
                         }
                         c.widgets.feed.push("system", &format!("Pi error: {e}"));
+                        // The feed keeps the detail; the strip carries
+                        // the bounded headline until the engine works
+                        // again, so a failure cannot pass unseen.
+                        c.set_error(Some(&e));
                         let vp = c.widgets.feed_viewport.max(200.0);
                         c.widgets.feed.scroll_to_bottom(vp);
                         changed = true;
@@ -1657,6 +1667,10 @@ impl HameshWindowApp {
                             messages,
                             streaming,
                         );
+                        // A worker that answers GetState is healthy: the
+                        // headline's cause is gone, so clear it. A failure
+                        // sets it again in its own arm.
+                        c.set_error(None);
                         changed = true;
                     }
                 }
