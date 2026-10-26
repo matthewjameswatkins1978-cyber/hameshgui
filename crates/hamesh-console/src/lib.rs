@@ -170,7 +170,16 @@ pub fn compose(c: &mut Console, width: f32, height: f32) -> App {
     rebuild_feed_nodes(&mut app, &mut c.widgets, "feed", width - 60.0);
     sync_composer(&mut app, &c.widgets);
     sync_feed_count(&mut app, &c.widgets);
+    // Preserve keyboard focus across recomposes: a refresh must never
+    // strand the operator on the feed. Falls back to the head of the
+    // order when the focused node is gone (e.g. Abort disabling).
+    let prev = c.widgets.focus.focused().map(|s| s.to_string());
     c.widgets.focus = Focus::rebuild(&app);
+    if let Some(id) = prev {
+        if let Some(pos) = c.widgets.focus.order.iter().position(|o| o == &id) {
+            c.widgets.focus.current = pos;
+        }
+    }
     app
 }
 
@@ -307,6 +316,29 @@ mod tests {
         let (app2, _, scene2) = frame(&mut c, 800.0, 600.0);
         let (x, y) = center_of(&scene2, "console-abort");
         assert_eq!(press(&mut c, &app2, &scene2, x, y), "abort requested");
+    }
+
+    #[test]
+    fn focus_survives_recompose() {
+        // Regression: every refresh used to rebuild focus from zero,
+        // stranding the operator on the feed after any intervening
+        // refresh (e.g. the one a `type` op triggers before Enter).
+        let mut c = Console::new();
+        let (mut app, _) = refresh(&mut c, 800.0, 600.0);
+        let _ = key(&mut c, &mut app, &Key::Tab);
+        assert_eq!(c.widgets.focus.focused(), Some("composer"));
+        let (mut app2, _) = refresh(&mut c, 800.0, 600.0);
+        assert_eq!(c.widgets.focus.focused(), Some("composer"));
+        let _ = key(&mut c, &mut app2, &Key::Char('x'));
+        assert_eq!(c.widgets.focus.focused(), Some("composer"));
+        assert_eq!(
+            app2.get("composer")
+                .unwrap()
+                .props
+                .get("text")
+                .map(|s| s.as_str()),
+            Some("x")
+        );
     }
 
     #[test]

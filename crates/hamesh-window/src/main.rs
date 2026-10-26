@@ -176,8 +176,14 @@ struct HameshWindowApp {
     /// shared `Hit` router and `Key` vocabulary as gallery and tasks.
     use_sheet: bool,
     sheet: Option<hamesh_sheet::Sheet>,
+    /// Console mode (`--console`): the 037 Pi session console from
+    /// hamesh-console (M3 chat + live engine status). Same shared
+    /// router and key core; driver-owned state like tasks.
+    use_console: bool,
+    console: Option<hamesh_console::Console>,
     shift_held: bool,
     m3_smoke_done: bool,
+    console_smoke_done: bool,
     /// M4 live loop: background Pi worker link. `None` unless `--pi`.
     /// Never blocks the UI thread; drains between frames.
     pi: Option<PiLink>,
@@ -221,8 +227,11 @@ impl HameshWindowApp {
             tasks: None,
             use_sheet: false,
             sheet: None,
+            use_console: false,
+            console: None,
             shift_held: false,
             m3_smoke_done: false,
+            console_smoke_done: false,
             pi: None,
             use_pi: false,
             cursor: (0.0, 0.0),
@@ -561,6 +570,181 @@ impl HameshWindowApp {
         }
     }
 
+    /// Swap the demo tree for the 037 console tree (called once, on open).
+    fn enter_console(&mut self) {
+        self.console = Some(hamesh_console::Console::new());
+        self.refresh_console();
+        if self.pi.is_some() {
+            if let Some(link) = self.pi.as_ref() {
+                let _ = link.job_tx.send(PiJob::GetState);
+            }
+        }
+        self.trace.record(
+            "console.enter",
+            "Pi session console live; same intents as the M3 drill",
+            self.app.revision,
+            None,
+        );
+    }
+
+    /// Recompose the console tree from driver state after any intent.
+    /// Streaming/messages mirror the live worker link every frame.
+    fn refresh_console(&mut self) {
+        if let Some(c) = self.console.as_mut() {
+            let streaming = self.pi.as_ref().is_some_and(|l| l.live_index.is_some());
+            let messages = c.widgets.feed.messages.len() as i64;
+            let (model, session) = (c.status.model.clone(), c.status.session.clone());
+            c.set_status(&model, &session, messages, streaming);
+            let (app, _) = hamesh_console::refresh(c, self.size.0 as f32, self.size.1 as f32);
+            self.app = app;
+            self.scene_rev += 1;
+        }
+    }
+
+    /// Console mouse: the driver press path (shared Hit router), then
+    /// trace. Abort resolves to a worker cancel only while a run is
+    /// actually live; anything else is driver state, not a job.
+    fn console_press(&mut self, x: f32, y: f32) {
+        let (_, scene) = self.layout_and_scene();
+        let note = match self.console.as_mut() {
+            Some(c) => {
+                let note = hamesh_console::press(c, &self.app, &scene, x, y);
+                if note == "abort requested"
+                    && self.pi.as_ref().is_some_and(|l| l.live_index.is_some())
+                {
+                    if let Some(link) = self.pi.as_ref() {
+                        let _ = link.job_tx.send(PiJob::Abort);
+                    }
+                    "abort requested (cancel sent)".to_string()
+                } else if note == "abort requested" {
+                    "abort stale (run already settled)".to_string()
+                } else {
+                    note
+                }
+            }
+            None => "console not entered".to_string(),
+        };
+        self.refresh_console();
+        self.trace
+            .record("console.click", &note, self.app.revision, None);
+        println!("CONSOLE click: {note}");
+    }
+
+    /// Console keyboard: map the winit event onto the shared key core,
+    /// exactly like the M3 path. F12 dumps Eye evidence anywhere.
+    fn console_key(&mut self, event: &winit::event::KeyEvent) {
+        if event.physical_key == PhysicalKey::Code(KeyCode::F12) {
+            self.dump_inspection();
+            return;
+        }
+        if self.console.is_none() {
+            return;
+        }
+        let mut keys: Vec<WKey> = Vec::new();
+        if let Some(text) = event.text.as_ref() {
+            for c in text.chars() {
+                // Enter arrives as text too; the physical key wins below.
+                if c != '\r' && c != '\n' {
+                    keys.push(WKey::Char(c));
+                }
+            }
+        }
+        match event.physical_key {
+            PhysicalKey::Code(KeyCode::Enter) | PhysicalKey::Code(KeyCode::NumpadEnter) => {
+                keys.push(WKey::Enter)
+            }
+            PhysicalKey::Code(KeyCode::Backspace) => keys.push(WKey::Backspace),
+            PhysicalKey::Code(KeyCode::Delete) => keys.push(WKey::Delete),
+            PhysicalKey::Code(KeyCode::ArrowLeft) => keys.push(WKey::Left),
+            PhysicalKey::Code(KeyCode::ArrowRight) => keys.push(WKey::Right),
+            PhysicalKey::Code(KeyCode::ArrowUp) => keys.push(WKey::Up),
+            PhysicalKey::Code(KeyCode::ArrowDown) => keys.push(WKey::Down),
+            PhysicalKey::Code(KeyCode::Home) => keys.push(WKey::Home),
+            PhysicalKey::Code(KeyCode::End) => keys.push(WKey::End),
+            PhysicalKey::Code(KeyCode::Tab) => keys.push(if self.shift_held {
+                WKey::ShiftTab
+            } else {
+                WKey::Tab
+            }),
+            _ => {}
+        }
+        if keys.is_empty() {
+            return;
+        }
+        let _ = self.console_keys_apply(keys);
+    }
+
+    /// Shared key-application core for the console: the winit path, the
+    /// inspector path and the smoke script all land here — one rule for
+    /// hand, eye and keyboard, mirroring `m3_keys_apply`.
+    fn console_keys_apply(&mut self, keys: Vec<WKey>) -> String {
+        // Escape during a live run aborts it; Escape when idle is a
+        // no-op here — the window arm still quits.
+        if keys.contains(&WKey::Escape) && self.pi.as_ref().is_some_and(|l| l.live_index.is_some())
+        {
+            if let Some(link) = self.pi.as_ref() {
+                let _ = link.job_tx.send(PiJob::Abort);
+            }
+            self.trace.record(
+                "console.pi_abort",
+                "escape during live run",
+                self.app.revision,
+                None,
+            );
+        }
+        // Detect a submission AFTER the batch: typing and Enter land in
+        // one go, so a pre-read of the composer always sees it empty. A
+        // submission happened iff Enter was applied while the composer
+        // was focused and the feed grew by a user message.
+        let had_enter = keys.contains(&WKey::Enter);
+        let before = self.console.as_ref().map(|c| {
+            (
+                c.widgets.focus.focused() == Some(c.widgets.composer_id.as_str()),
+                c.widgets.feed.messages.len(),
+            )
+        });
+        let mut last = String::new();
+        for k in &keys {
+            if let Some(c) = self.console.as_mut() {
+                last = hamesh_console::key(c, &mut self.app, k);
+            }
+        }
+        self.refresh_console();
+        let submitted: Option<String> = match (had_enter, before) {
+            (true, Some((true, before_len))) => self
+                .console
+                .as_ref()
+                .filter(|c| c.widgets.feed.messages.len() > before_len)
+                .and_then(|c| {
+                    c.widgets
+                        .feed
+                        .messages
+                        .iter()
+                        .rev()
+                        .find(|m| m.role == "user")
+                })
+                .map(|m| m.text.clone()),
+            _ => None,
+        };
+        if let (Some(text), Some(link)) = (submitted, self.pi.as_ref()) {
+            let _ = link.job_tx.send(PiJob::Prompt(text.clone()));
+            self.trace.record(
+                "console.pi_queued",
+                &format!("submitted {text:?} to worker"),
+                self.app.revision,
+                None,
+            );
+        }
+        // One routing: every key batch leaves the same trace shape here.
+        self.trace.record(
+            "console.key",
+            &format!("-> {last}"),
+            self.app.revision,
+            None,
+        );
+        last
+    }
+
     /// Tasks mouse: the shared press path, then trace.
     fn tasks_click(&mut self) {
         let (_, scene) = self.layout_and_scene();
@@ -851,6 +1035,10 @@ enum PiJob {
     /// a live run (M4 follow-up); the worker already honors it today.
     #[allow(dead_code)]
     Abort,
+    /// Fetch live engine state (model, session, counts). The console
+    /// requests it on open and after every run settles; the driver only
+    /// ever paints what this round trip reported.
+    GetState,
 }
 
 /// Streamed Pi activity back to the UI thread. The UI never blocks on
@@ -862,6 +1050,7 @@ enum PiEvt {
     Delta(String),
     Done { text: String, aborted: bool },
     Failed(String),
+    State(hamesh_pi::EngineState),
 }
 
 /// Link to the background Pi worker. `live_index` is the feed slot
@@ -892,6 +1081,14 @@ fn pi_worker(jobs: std::sync::mpsc::Receiver<PiJob>, events: std::sync::mpsc::Se
             PiJob::Abort => {
                 let _ = client.abort(std::time::Duration::from_secs(10));
             }
+            PiJob::GetState => match client.get_state(std::time::Duration::from_secs(20)) {
+                Ok(st) => {
+                    let _ = events.send(PiEvt::State(st));
+                }
+                Err(e) => {
+                    let _ = events.send(PiEvt::Failed(format!("state: {e}")));
+                }
+            },
             PiJob::Prompt(text) => {
                 let _ = events.send(PiEvt::Started);
                 let r = client.prompt_and_wait(
@@ -929,6 +1126,7 @@ impl HameshWindowApp {
             Delta(String),
             Done { text: String, aborted: bool },
             Failed(String),
+            State(hamesh_pi::EngineState),
         }
         let mut acts = Vec::new();
         if let Some(link) = self.pi.as_mut() {
@@ -938,6 +1136,7 @@ impl HameshWindowApp {
                     PiEvt::Delta(d) => acts.push(Act::Delta(d)),
                     PiEvt::Done { text, aborted } => acts.push(Act::Done { text, aborted }),
                     PiEvt::Failed(e) => acts.push(Act::Failed(e)),
+                    PiEvt::State(st) => acts.push(Act::State(st)),
                 }
             }
         }
@@ -955,12 +1154,24 @@ impl HameshWindowApp {
                             link.follow = true;
                         }
                         changed = true;
+                    } else if let Some(c) = self.console.as_mut() {
+                        let i = c.widgets.feed.push_live("agent");
+                        if let Some(link) = self.pi.as_mut() {
+                            link.live_index = Some(i);
+                            link.follow = true;
+                        }
+                        changed = true;
                     }
                 }
                 Act::Delta(d) => {
                     let idx = self.pi.as_ref().and_then(|l| l.live_index);
                     if let (Some(i), Some(w)) = (idx, self.widgets.as_mut()) {
                         if let Some(m) = w.feed.messages.get_mut(i) {
+                            m.text.push_str(&d);
+                            changed = true;
+                        }
+                    } else if let (Some(i), Some(c)) = (idx, self.console.as_mut()) {
+                        if let Some(m) = c.widgets.feed.messages.get_mut(i) {
                             m.text.push_str(&d);
                             changed = true;
                         }
@@ -984,6 +1195,26 @@ impl HameshWindowApp {
                             None,
                         );
                         changed = true;
+                    } else if let Some(c) = self.console.as_mut() {
+                        if let Some(link) = self.pi.as_mut() {
+                            link.live_index = None;
+                        }
+                        let vp = c.widgets.feed_viewport.max(200.0);
+                        c.widgets.feed.scroll_to_bottom(vp);
+                        self.trace.record(
+                            "console.pi_done",
+                            &format!(
+                                "aborted={aborted} chars={} messages={}",
+                                text.chars().count(),
+                                c.widgets.feed.messages.len()
+                            ),
+                            self.app.revision,
+                            None,
+                        );
+                        if let Some(link) = self.pi.as_ref() {
+                            let _ = link.job_tx.send(PiJob::GetState);
+                        }
+                        changed = true;
                     }
                 }
                 Act::Failed(e) => {
@@ -995,12 +1226,34 @@ impl HameshWindowApp {
                         let vp = w.feed_viewport.max(200.0);
                         w.feed.scroll_to_bottom(vp);
                         changed = true;
+                    } else if let Some(c) = self.console.as_mut() {
+                        if let Some(link) = self.pi.as_mut() {
+                            link.live_index = None;
+                        }
+                        c.widgets.feed.push("system", &format!("Pi error: {e}"));
+                        let vp = c.widgets.feed_viewport.max(200.0);
+                        c.widgets.feed.scroll_to_bottom(vp);
+                        changed = true;
+                    }
+                }
+                Act::State(st) => {
+                    if let Some(c) = self.console.as_mut() {
+                        let messages = c.widgets.feed.messages.len() as i64;
+                        let streaming = self.pi.as_ref().is_some_and(|l| l.live_index.is_some());
+                        c.set_status(
+                            st.model_name.as_deref().unwrap_or("—"),
+                            st.session_id.as_deref().unwrap_or("—"),
+                            messages,
+                            streaming,
+                        );
+                        changed = true;
                     }
                 }
             }
         }
         if changed {
             self.refresh_feed();
+            self.refresh_console();
         }
     }
 
@@ -1175,6 +1428,102 @@ impl HameshWindowApp {
         );
     }
 
+    /// Console smoke script: run once after open — focus the composer
+    /// through the real focus path, type, submit, scroll. Same proof as
+    /// the M3 script, through the console driver instead of M3 widgets.
+    fn console_smoke_script(&mut self) {
+        let layout = hamesh_layout::compute(&self.app, self.size.0 as f32, self.size.1 as f32);
+        let (ok, hit) = match self.console.as_mut() {
+            Some(c) => {
+                let f = hamesh_automation::focus_human(
+                    &mut self.app,
+                    &mut c.widgets,
+                    &layout,
+                    "composer",
+                );
+                (f.success, f.hit_component)
+            }
+            None => (false, None),
+        };
+        self.trace.record(
+            "console.smoke_focus",
+            &format!("success={ok} hit={hit:?}"),
+            self.app.revision,
+            None,
+        );
+        if !ok {
+            return;
+        }
+        // One batch through the shared core (queues a Pi job when --pi).
+        // Under --pi the prompt demands a verifiable token back, so the
+        // end-of-smoke check can assert the reply instead of eyeballing it.
+        let prompt = if self.use_pi {
+            "Reply with only this exact token and nothing else: HAMESH-SMOKE-OK"
+        } else {
+            "console smoke"
+        };
+        let mut keys: Vec<WKey> = prompt.chars().map(WKey::Char).collect();
+        keys.push(WKey::Enter);
+        let out = self.console_keys_apply(keys);
+        self.trace.record(
+            "console.smoke_keys",
+            &format!("applied keys -> {out}"),
+            self.app.revision,
+            None,
+        );
+        if let Some(c) = self.console.as_mut() {
+            c.widgets
+                .feed
+                .scroll_by(-120.0, c.widgets.feed_viewport.max(200.0));
+        }
+        self.refresh_console();
+        let (n_msgs, composer_text, focused) = match self.console.as_ref() {
+            Some(c) => (
+                c.widgets.feed.messages.len(),
+                c.widgets.composer.text.clone(),
+                c.widgets.focus.focused().unwrap_or("?").to_string(),
+            ),
+            None => (0, "<no console>".to_string(), "?".to_string()),
+        };
+        self.trace.record(
+            "console.smoke_script",
+            &format!("typed + submitted + scrolled; messages={n_msgs} composer={composer_text:?} focus={focused}"),
+            self.app.revision,
+            None,
+        );
+    }
+
+    /// End-of-smoke verdict for the console loop (only under --pi):
+    /// same token proof as the M3 loop, read off the console feed.
+    fn console_pi_assert(&mut self) -> i32 {
+        const TOKEN: &str = "HAMESH-SMOKE-OK";
+        let (asked, answered, streaming) = match self.console.as_ref() {
+            Some(c) => {
+                let mut asked_at: Option<usize> = None;
+                let mut answered = false;
+                for (i, m) in c.widgets.feed.messages.iter().enumerate() {
+                    if m.role == "user" && m.text.contains(TOKEN) {
+                        asked_at = Some(i);
+                    }
+                    if m.role == "agent"
+                        && m.text.contains(TOKEN)
+                        && asked_at.is_some_and(|a| i > a)
+                    {
+                        answered = true;
+                    }
+                }
+                let streaming = self.pi.as_ref().is_some_and(|l| l.live_index.is_some());
+                (asked_at.is_some(), answered, streaming)
+            }
+            None => (false, false, false),
+        };
+        let (verdict, code) = pi_verdict(asked, answered, streaming);
+        self.trace
+            .record("console.pi_assert", verdict, self.app.revision, None);
+        println!("SMOKE-PI-{verdict}");
+        code
+    }
+
     /// Attach current revision stamps to an Ok payload (uniform envelope).
     fn stamped(&self, mut v: serde_json::Value) -> inspect_srv::OpOutcome {
         if let Some(o) = v.as_object_mut() {
@@ -1248,17 +1597,27 @@ impl HameshWindowApp {
                         .map(|n| (n.rect.x + n.rect.w / 2.0, n.rect.y + n.rect.h / 2.0));
                     match center {
                         Some((x, y)) => {
-                            let (hit, acted, focus) = self.apply_press(x, y);
-                            self.trace.record(
-                                "ext.click",
-                                &format!("id={id} hit={hit:?} acted={acted}"),
-                                self.app.revision,
-                                None,
-                            );
-                            Some(self.stamped(serde_json::json!({
-                                "hit": hit, "acted": acted, "focus": focus,
-                                "mechanism": "HumanEquivalent",
-                            })))
+                            if self.use_console {
+                                // Driver-owned state: the console press
+                                // path interprets the hit, not the tree.
+                                self.console_press(x, y);
+                                Some(self.stamped(serde_json::json!({
+                                    "console": "pressed",
+                                    "mechanism": "HumanEquivalent",
+                                })))
+                            } else {
+                                let (hit, acted, focus) = self.apply_press(x, y);
+                                self.trace.record(
+                                    "ext.click",
+                                    &format!("id={id} hit={hit:?} acted={acted}"),
+                                    self.app.revision,
+                                    None,
+                                );
+                                Some(self.stamped(serde_json::json!({
+                                    "hit": hit, "acted": acted, "focus": focus,
+                                    "mechanism": "HumanEquivalent",
+                                })))
+                            }
                         }
                         None => Some(self.err("NOT_FOUND", format!("no layout rect for {id}"))),
                     }
@@ -1267,6 +1626,12 @@ impl HameshWindowApp {
             Op::ClickAt { x, y, expect_rev } => {
                 if let Some(e) = self.check_stale(&expect_rev) {
                     Some(e)
+                } else if self.use_console {
+                    self.console_press(x, y);
+                    Some(self.stamped(serde_json::json!({
+                        "console": "pressed",
+                        "mechanism": "HumanEquivalent",
+                    })))
                 } else {
                     let (hit, acted, focus) = self.apply_press(x, y);
                     self.trace.record(
@@ -1284,8 +1649,34 @@ impl HameshWindowApp {
             Op::Key { key, expect_rev } => {
                 if let Some(e) = self.check_stale(&expect_rev) {
                     Some(e)
+                } else if self.use_console && self.console.is_some() {
+                    // Console owns its widgets: same key vocabulary and
+                    // HumanEquivalent mechanism as the M3 path.
+                    let k = match key {
+                        KeyMsg::Char(c) => WKey::Char(c),
+                        KeyMsg::Enter => WKey::Enter,
+                        KeyMsg::Backspace => WKey::Backspace,
+                        KeyMsg::Delete => WKey::Delete,
+                        KeyMsg::Left => WKey::Left,
+                        KeyMsg::Right => WKey::Right,
+                        KeyMsg::Up => WKey::Up,
+                        KeyMsg::Down => WKey::Down,
+                        KeyMsg::Home => WKey::Home,
+                        KeyMsg::End => WKey::End,
+                        KeyMsg::Tab => WKey::Tab,
+                        KeyMsg::ShiftTab => WKey::ShiftTab,
+                        KeyMsg::Escape => WKey::Escape,
+                    };
+                    let out = self.console_keys_apply(vec![k]);
+                    self.trace
+                        .record("ext.key", &format!("-> {out}"), self.app.revision, None);
+                    Some(self.stamped(serde_json::json!({
+                        "result": out,
+                        "focused": self.console.as_ref().and_then(|c| c.widgets.focus.focused()),
+                        "mechanism": "HumanEquivalent",
+                    })))
                 } else if self.widgets.is_none() {
-                    Some(self.err("NO_M3", "keyboard needs --m3 mode".to_string()))
+                    Some(self.err("NO_M3", "keyboard needs --m3 or --console mode".to_string()))
                 } else {
                     let k = match key {
                         KeyMsg::Char(c) => WKey::Char(c),
@@ -1313,8 +1704,31 @@ impl HameshWindowApp {
                 }
             }
             Op::Type { id, text } => {
-                if self.widgets.is_none() {
-                    Some(self.err("NO_M3", "typing needs --m3 mode".to_string()))
+                if self.use_console && self.console.is_some() {
+                    let layout =
+                        hamesh_layout::compute(&self.app, self.size.0 as f32, self.size.1 as f32);
+                    // type_human borrows console widgets + app disjointly.
+                    let r = {
+                        let Some(c) = self.console.as_mut() else {
+                            return;
+                        };
+                        type_human(&mut self.app, &mut c.widgets, &layout, &id, &text)
+                    };
+                    self.refresh_console();
+                    self.trace.record(
+                        "ext.type",
+                        &format!("id={id} success={} {:?}", r.success, r.notes),
+                        self.app.revision,
+                        None,
+                    );
+                    Some(self.stamped(serde_json::json!({
+                        "success": r.success,
+                        "hit": r.hit_component,
+                        "notes": r.notes,
+                        "mechanism": format!("{:?}", r.mechanism),
+                    })))
+                } else if self.widgets.is_none() {
+                    Some(self.err("NO_M3", "typing needs --m3 or --console mode".to_string()))
                 } else {
                     let layout =
                         hamesh_layout::compute(&self.app, self.size.0 as f32, self.size.1 as f32);
@@ -1503,6 +1917,10 @@ impl ApplicationHandler<UserEvent> for HameshWindowApp {
                 win.set_ime_allowed(true);
             }
         }
+        if self.use_console {
+            self.enter_console();
+            println!("CONSOLE open: Pi session console — click, type, Tab, F12 dumps Eye evidence, Esc quits/aborts");
+        }
         if self.use_pi && self.pi.is_none() {
             let (job_tx, job_rx) = std::sync::mpsc::channel::<PiJob>();
             let (evt_tx, evt_rx) = std::sync::mpsc::channel::<PiEvt>();
@@ -1616,6 +2034,9 @@ impl ApplicationHandler<UserEvent> for HameshWindowApp {
                 if self.use_sheet {
                     self.refresh_sheet();
                 }
+                if self.use_console {
+                    self.refresh_console();
+                }
                 if let Some(gpu) = self.gpu.as_mut() {
                     gpu.resize(self.size.0, self.size.1);
                 }
@@ -1679,6 +2100,8 @@ impl ApplicationHandler<UserEvent> for HameshWindowApp {
                         self.sheet_click();
                     } else if self.use_m3 {
                         self.m3_click();
+                    } else if self.use_console {
+                        self.console_press(self.cursor.0, self.cursor.1);
                     } else {
                         let (hit, acted, focus) = self.apply_press(self.cursor.0, self.cursor.1);
                         sync_label(&mut self.app);
@@ -1722,12 +2145,21 @@ impl ApplicationHandler<UserEvent> for HameshWindowApp {
                     self.m3_key(&event);
                     return;
                 }
+                if self.use_console && event.physical_key != PhysicalKey::Code(KeyCode::Escape) {
+                    // Console path consumes everything except Escape (abort/quit).
+                    self.console_key(&event);
+                    return;
+                }
                 match event.physical_key {
                     PhysicalKey::Code(KeyCode::Escape) => {
                         // Live run: Escape aborts it and stays open (one
                         // rule via m3_keys_apply). Idle: Escape quits.
                         if self.use_m3 && self.pi.as_ref().is_some_and(|l| l.live_index.is_some()) {
                             self.m3_keys_apply(vec![WKey::Escape]);
+                        } else if self.use_console
+                            && self.pi.as_ref().is_some_and(|l| l.live_index.is_some())
+                        {
+                            self.console_keys_apply(vec![WKey::Escape]);
                         } else {
                             event_loop.exit();
                         }
@@ -1740,6 +2172,8 @@ impl ApplicationHandler<UserEvent> for HameshWindowApp {
                         );
                         let target = if self.use_blocks_pi {
                             "pi-action"
+                        } else if self.use_console {
+                            "console-abort"
                         } else if self.use_blocks {
                             "dash-action"
                         } else {
@@ -1870,6 +2304,26 @@ impl ApplicationHandler<UserEvent> for HameshWindowApp {
                             None,
                         );
                     }
+                } else if self.use_console {
+                    let amount = match delta {
+                        winit::event::MouseScrollDelta::LineDelta(_, y) => y * 60.0,
+                        winit::event::MouseScrollDelta::PixelDelta(p) => -(p.y as f32),
+                    };
+                    let scrolled = if let Some(c) = self.console.as_mut() {
+                        c.widgets.feed.scroll_by(-amount, 400.0);
+                        Some(c.widgets.feed.scroll_px)
+                    } else {
+                        None
+                    };
+                    if let Some(px) = scrolled {
+                        self.refresh_console();
+                        self.trace.record(
+                            "console.wheel",
+                            &format!("scroll {px}"),
+                            self.app.revision,
+                            None,
+                        );
+                    }
                 }
             }
             WindowEvent::RedrawRequested => self.paint(),
@@ -1910,6 +2364,10 @@ impl ApplicationHandler<UserEvent> for HameshWindowApp {
             self.m3_smoke_done = true;
             self.m3_smoke_script();
         }
+        if self.use_console && self.smoke_deadline.is_some() && !self.console_smoke_done {
+            self.console_smoke_done = true;
+            self.console_smoke_script();
+        }
         if let Some(deadline) = self.smoke_deadline {
             if Instant::now() >= deadline {
                 // Fire once: with ControlFlow::Poll the loop can re-enter
@@ -1919,6 +2377,8 @@ impl ApplicationHandler<UserEvent> for HameshWindowApp {
                 self.smoke_deadline = None;
                 if self.use_pi && self.use_m3 {
                     self.smoke_exit_code = Some(self.m3_pi_assert());
+                } else if self.use_pi && self.use_console {
+                    self.smoke_exit_code = Some(self.console_pi_assert());
                 }
                 self.dump_inspection();
                 self.dump_gpu_snapshot();
@@ -1972,6 +2432,10 @@ fn main() {
     app.use_gallery = std::env::args().any(|a| a == "--gallery");
     app.use_tasks = std::env::args().any(|a| a == "--tasks");
     app.use_sheet = std::env::args().any(|a| a == "--sheet");
+    app.use_console = std::env::args().any(|a| a == "--console");
+    if app.use_console {
+        println!("CONSOLE mode: Pi session console from hamesh-console");
+    }
     if app.use_gallery {
         println!("GALLERY mode: ListView + Picker workspace from hamesh-gallery");
     }

@@ -1211,6 +1211,7 @@ version = "0.2.0"
 dependencies = [
  "hamesh-automation",
  "hamesh-blocks",
+ "hamesh-console",
  "hamesh-core",
  "hamesh-diag",
  "hamesh-gallery",
