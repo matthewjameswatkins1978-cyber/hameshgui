@@ -490,17 +490,41 @@ impl HameshWindowApp {
         }
     }
 
-    /// Gallery mouse: the shared press path, then trace.
-    fn gallery_click(&mut self) {
+    /// Gallery mouse: the driver press path (shared Hit router), then
+    /// trace. Inspector and OS clicks converge here.
+    fn gallery_press(&mut self, x: f32, y: f32) {
         let (_, scene) = self.layout_and_scene();
         let note = match self.gallery.as_mut() {
-            Some(g) => hamesh_gallery::press(g, &self.app, &scene, self.cursor.0, self.cursor.1),
+            Some(g) => hamesh_gallery::press(g, &self.app, &scene, x, y),
             None => "gallery not entered".to_string(),
         };
         self.refresh_gallery();
         self.trace
             .record("gallery.click", &note, self.app.revision, None);
         println!("GALLERY click: {note}");
+    }
+
+    fn gallery_click(&mut self) {
+        let (x, y) = (self.cursor.0, self.cursor.1);
+        self.gallery_press(x, y);
+    }
+
+    /// Shared driver-application core for gallery: inspector keys and
+    /// OS keys converge here. Never quits: the window arm owns exit.
+    fn gallery_keys_apply(&mut self, keys: Vec<WKey>) -> String {
+        let Some(g) = self.gallery.as_mut() else {
+            return "gallery not entered".to_string();
+        };
+        let names: Vec<String> = g.layer_rows.iter().map(|r| r.label.clone()).collect();
+        let mut notes = Vec::new();
+        for k in keys {
+            notes.push(hamesh_gallery::key(g, k, &names));
+        }
+        let note = notes.join(" | ");
+        self.refresh_gallery();
+        self.trace
+            .record("gallery.key", &note, self.app.revision, None);
+        note
     }
 
     /// Gallery keyboard: map the winit event onto the shared intent core.
@@ -542,15 +566,7 @@ impl HameshWindowApp {
         }
         // Escape with a closed popup quits; otherwise the popup owns it.
         let escape_quits = keys.len() == 1 && matches!(keys[0], Key::Escape) && !g.fonts.is_open();
-        let names: Vec<String> = g.layer_rows.iter().map(|r| r.label.clone()).collect();
-        let mut notes = Vec::new();
-        for k in keys {
-            notes.push(hamesh_gallery::key(g, k, &names));
-        }
-        let note = notes.join(" | ");
-        self.refresh_gallery();
-        self.trace
-            .record("gallery.key", &note, self.app.revision, None);
+        let note = self.gallery_keys_apply(keys);
         println!("GALLERY key: {note}");
         if escape_quits {
             event_loop.exit();
@@ -639,28 +655,33 @@ impl HameshWindowApp {
         }
     }
 
+    /// Translate the driver's abort intent into a worker cancel — but
+    /// only while a run is actually live. Pointer click, keyboard Enter
+    /// and inspector key all share this gate.
+    fn console_abort(&mut self) -> String {
+        if self.pi.as_ref().is_some_and(|l| l.live_index.is_some()) {
+            if let Some(link) = self.pi.as_ref() {
+                let _ = link.job_tx.send(PiJob::Abort);
+            }
+            "abort requested (cancel sent)".to_string()
+        } else {
+            "abort stale (run already settled)".to_string()
+        }
+    }
+
     /// Console mouse: the driver press path (shared Hit router), then
-    /// trace. Abort resolves to a worker cancel only while a run is
-    /// actually live; anything else is driver state, not a job.
+    /// trace. Driver state decides; the abort intent goes through
+    /// `console_abort` so every input path shares one gate.
     fn console_press(&mut self, x: f32, y: f32) {
         let (_, scene) = self.layout_and_scene();
         let note = match self.console.as_mut() {
-            Some(c) => {
-                let note = hamesh_console::press(c, &self.app, &scene, x, y);
-                if note == "abort requested"
-                    && self.pi.as_ref().is_some_and(|l| l.live_index.is_some())
-                {
-                    if let Some(link) = self.pi.as_ref() {
-                        let _ = link.job_tx.send(PiJob::Abort);
-                    }
-                    "abort requested (cancel sent)".to_string()
-                } else if note == "abort requested" {
-                    "abort stale (run already settled)".to_string()
-                } else {
-                    note
-                }
-            }
+            Some(c) => hamesh_console::press(c, &self.app, &scene, x, y),
             None => "console not entered".to_string(),
+        };
+        let note = if note == "abort requested" {
+            self.console_abort()
+        } else {
+            note
         };
         self.refresh_console();
         self.trace
@@ -748,6 +769,12 @@ impl HameshWindowApp {
             }
         }
         self.refresh_console();
+        // Keyboard Enter on the Abort button raises the same intent as a
+        // pointer press; translate it through the shared abort gate.
+        if last == "abort requested" {
+            last = self.console_abort();
+            self.refresh_console();
+        }
         let submitted: Option<String> = match (had_enter, before) {
             (true, Some((true, before_len))) => self
                 .console
@@ -860,17 +887,40 @@ impl HameshWindowApp {
         last
     }
 
-    /// Tasks mouse: the shared press path, then trace.
-    fn tasks_click(&mut self) {
+    /// Tasks mouse: the driver press path (shared Hit router), then
+    /// trace. Inspector and OS clicks converge here.
+    fn tasks_press(&mut self, x: f32, y: f32) {
         let (_, scene) = self.layout_and_scene();
         let note = match self.tasks.as_mut() {
-            Some(t) => hamesh_tasks::press(t, &self.app, &scene, self.cursor.0, self.cursor.1),
+            Some(t) => hamesh_tasks::press(t, &self.app, &scene, x, y),
             None => "tasks not entered".to_string(),
         };
         self.refresh_tasks();
         self.trace
             .record("tasks.click", &note, self.app.revision, None);
         println!("TASKS click: {note}");
+    }
+
+    fn tasks_click(&mut self) {
+        let (x, y) = (self.cursor.0, self.cursor.1);
+        self.tasks_press(x, y);
+    }
+
+    /// Shared driver-application core for tasks: inspector keys and
+    /// OS keys converge here. Never quits: the window arm owns exit.
+    fn tasks_keys_apply(&mut self, keys: Vec<WKey>) -> String {
+        let Some(t) = self.tasks.as_mut() else {
+            return "tasks not entered".to_string();
+        };
+        let mut notes = Vec::new();
+        for k in keys {
+            notes.push(hamesh_tasks::key(t, k));
+        }
+        let note = notes.join(" | ");
+        self.refresh_tasks();
+        self.trace
+            .record("tasks.key", &note, self.app.revision, None);
+        note
     }
 
     /// Tasks keyboard: map the winit event onto the shared intent core.
@@ -915,14 +965,7 @@ impl HameshWindowApp {
             return;
         }
         let escape_quits = keys.len() == 1 && matches!(keys[0], Key::Escape) && !t.filter.is_open();
-        let mut notes = Vec::new();
-        for k in keys {
-            notes.push(hamesh_tasks::key(t, k));
-        }
-        let note = notes.join(" | ");
-        self.refresh_tasks();
-        self.trace
-            .record("tasks.key", &note, self.app.revision, None);
+        let note = self.tasks_keys_apply(keys);
         println!("TASKS key: {note}");
         if escape_quits {
             event_loop.exit();
@@ -950,11 +993,12 @@ impl HameshWindowApp {
         }
     }
 
-    /// Sheet mouse: the shared press path, then trace.
-    fn sheet_click(&mut self) {
+    /// Sheet mouse: the driver press path (shared Hit router), then
+    /// trace. Inspector and OS clicks converge here.
+    fn sheet_press(&mut self, x: f32, y: f32) {
         let (_, scene) = self.layout_and_scene();
         let note = match self.sheet.as_mut() {
-            Some(t) => hamesh_sheet::press(t, &self.app, &scene, self.cursor.0, self.cursor.1),
+            Some(t) => hamesh_sheet::press(t, &self.app, &scene, x, y),
             None => "sheet not entered".to_string(),
         };
         self.refresh_sheet();
@@ -963,10 +1007,32 @@ impl HameshWindowApp {
         println!("SHEET click: {note}");
     }
 
+    fn sheet_click(&mut self) {
+        let (x, y) = (self.cursor.0, self.cursor.1);
+        self.sheet_press(x, y);
+    }
+
+    /// Shared driver-application core for the sheet: inspector keys
+    /// and OS keys converge here. Never quits: the window arm owns exit.
+    fn sheet_keys_apply(&mut self, keys: Vec<WKey>) -> String {
+        let Some(t) = self.sheet.as_mut() else {
+            return "sheet not entered".to_string();
+        };
+        let mut notes = Vec::new();
+        for k in keys {
+            notes.push(hamesh_sheet::key(t, k));
+        }
+        let note = notes.join(" | ");
+        self.refresh_sheet();
+        self.trace
+            .record("sheet.key", &note, self.app.revision, None);
+        note
+    }
+
     /// Sheet keyboard: map the winit event onto the shared intent core.
     fn sheet_key(&mut self, event: &winit::event::KeyEvent, event_loop: &ActiveEventLoop) {
         use hamesh_widgets::Key;
-        let Some(t) = self.sheet.as_mut() else {
+        if self.sheet.is_none() {
             return;
         };
         if event.physical_key == PhysicalKey::Code(KeyCode::F12) {
@@ -1011,14 +1077,7 @@ impl HameshWindowApp {
             event_loop.exit();
             return;
         }
-        let mut notes = Vec::new();
-        for k in keys {
-            notes.push(hamesh_sheet::key(t, k));
-        }
-        let note = notes.join(" | ");
-        self.refresh_sheet();
-        self.trace
-            .record("sheet.key", &note, self.app.revision, None);
+        let note = self.sheet_keys_apply(keys);
         println!("SHEET key: {note}");
     }
 
@@ -1061,6 +1120,26 @@ impl HameshWindowApp {
         }
         let _ = self.m3_keys_apply(keys);
         true
+    }
+
+    /// KeyMsg (inspector protocol) to the shared key vocabulary. One
+    /// mechanical mapping for every mode; drivers own the semantics.
+    fn keymsg_to_wkey(key: &inspect_srv::KeyMsg) -> WKey {
+        match key {
+            inspect_srv::KeyMsg::Char(c) => WKey::Char(*c),
+            inspect_srv::KeyMsg::Enter => WKey::Enter,
+            inspect_srv::KeyMsg::Backspace => WKey::Backspace,
+            inspect_srv::KeyMsg::Delete => WKey::Delete,
+            inspect_srv::KeyMsg::Left => WKey::Left,
+            inspect_srv::KeyMsg::Right => WKey::Right,
+            inspect_srv::KeyMsg::Up => WKey::Up,
+            inspect_srv::KeyMsg::Down => WKey::Down,
+            inspect_srv::KeyMsg::Home => WKey::Home,
+            inspect_srv::KeyMsg::End => WKey::End,
+            inspect_srv::KeyMsg::Tab => WKey::Tab,
+            inspect_srv::KeyMsg::ShiftTab => WKey::ShiftTab,
+            inspect_srv::KeyMsg::Escape => WKey::Escape,
+        }
     }
 
     /// Shared key-application core: the winit path maps events to keys,
@@ -1791,6 +1870,24 @@ impl HameshWindowApp {
                                     "editor": "pressed",
                                     "mechanism": "HumanEquivalent",
                                 })))
+                            } else if self.use_tasks {
+                                self.tasks_press(x, y);
+                                Some(self.stamped(serde_json::json!({
+                                    "tasks": "pressed",
+                                    "mechanism": "HumanEquivalent",
+                                })))
+                            } else if self.use_gallery {
+                                self.gallery_press(x, y);
+                                Some(self.stamped(serde_json::json!({
+                                    "gallery": "pressed",
+                                    "mechanism": "HumanEquivalent",
+                                })))
+                            } else if self.use_sheet {
+                                self.sheet_press(x, y);
+                                Some(self.stamped(serde_json::json!({
+                                    "sheet": "pressed",
+                                    "mechanism": "HumanEquivalent",
+                                })))
                             } else {
                                 let (hit, acted, focus) = self.apply_press(x, y);
                                 self.trace.record(
@@ -1822,6 +1919,24 @@ impl HameshWindowApp {
                     self.editor_press(x, y);
                     Some(self.stamped(serde_json::json!({
                         "editor": "pressed",
+                        "mechanism": "HumanEquivalent",
+                    })))
+                } else if self.use_tasks {
+                    self.tasks_press(x, y);
+                    Some(self.stamped(serde_json::json!({
+                        "tasks": "pressed",
+                        "mechanism": "HumanEquivalent",
+                    })))
+                } else if self.use_gallery {
+                    self.gallery_press(x, y);
+                    Some(self.stamped(serde_json::json!({
+                        "gallery": "pressed",
+                        "mechanism": "HumanEquivalent",
+                    })))
+                } else if self.use_sheet {
+                    self.sheet_press(x, y);
+                    Some(self.stamped(serde_json::json!({
+                        "sheet": "pressed",
                         "mechanism": "HumanEquivalent",
                     })))
                 } else {
@@ -1892,10 +2007,40 @@ impl HameshWindowApp {
                         "focused": self.editor.as_ref().map(|e| e.focused_zone()),
                         "mechanism": "HumanEquivalent",
                     })))
+                } else if self.use_tasks && self.tasks.is_some() {
+                    // Tasks owns its driver state (list/filter/actions zones).
+                    let out = self.tasks_keys_apply(vec![Self::keymsg_to_wkey(&key)]);
+                    self.trace
+                        .record("ext.key", &format!("-> {out}"), self.app.revision, None);
+                    Some(self.stamped(serde_json::json!({
+                        "result": out,
+                        "focused": self.tasks.as_ref().map(|t| t.focused_zone()),
+                        "mechanism": "HumanEquivalent",
+                    })))
+                } else if self.use_gallery && self.gallery.is_some() {
+                    // Gallery owns its driver state (layers/picker zones).
+                    let out = self.gallery_keys_apply(vec![Self::keymsg_to_wkey(&key)]);
+                    self.trace
+                        .record("ext.key", &format!("-> {out}"), self.app.revision, None);
+                    Some(self.stamped(serde_json::json!({
+                        "result": out,
+                        "focused": self.gallery.as_ref().map(|g| g.focused_zone()),
+                        "mechanism": "HumanEquivalent",
+                    })))
+                } else if self.use_sheet && self.sheet.is_some() {
+                    // Sheet owns its driver state (selection/buttons zones).
+                    let out = self.sheet_keys_apply(vec![Self::keymsg_to_wkey(&key)]);
+                    self.trace
+                        .record("ext.key", &format!("-> {out}"), self.app.revision, None);
+                    Some(self.stamped(serde_json::json!({
+                        "result": out,
+                        "focused": self.sheet.as_ref().map(|t| t.focused_zone()),
+                        "mechanism": "HumanEquivalent",
+                    })))
                 } else if self.widgets.is_none() {
                     Some(self.err(
                         "NO_M3",
-                        "keyboard needs --m3, --console or --editor mode".to_string(),
+                        "keyboard needs an interactive mode (m3, console, editor, tasks, gallery or sheet)".to_string(),
                     ))
                 } else {
                     let k = match key {
@@ -1973,7 +2118,7 @@ impl HameshWindowApp {
                 } else if self.widgets.is_none() {
                     Some(self.err(
                         "NO_M3",
-                        "typing needs --m3, --console or --editor mode".to_string(),
+                        "typing needs an interactive mode (m3, console or editor)".to_string(),
                     ))
                 } else {
                     let layout =

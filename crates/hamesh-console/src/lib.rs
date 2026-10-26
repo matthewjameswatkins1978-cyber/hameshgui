@@ -192,10 +192,17 @@ pub fn refresh(c: &mut Console, w: f32, h: f32) -> (App, hamesh_layout::LayoutOu
 }
 
 /// Keyboard through the shared M3 core: typing, Tab/ShiftTab focus,
-/// submit, feed scroll. Abort stays on pointer (Hit::Action) and the
-/// host-level Escape rule; Enter on the focused Abort is a known core
-/// gap (see the regression test), not a second event system.
+/// submit, feed scroll. The core has no Enter-on-button, so Enter on
+/// the focused Abort button maps to the same abort intent as a pointer
+/// press (same gate); everything else goes through the shared core.
 pub fn key(c: &mut Console, app: &mut App, k: &Key) -> String {
+    if matches!(k, Key::Enter) && c.widgets.focus.focused() == Some("console-abort") {
+        return if c.abort_enabled() {
+            "abort requested".to_string()
+        } else {
+            "abort-run disabled: nothing to abort".to_string()
+        };
+    }
     let note = handle_key(app, &mut c.widgets, k);
     sync_feed_count(app, &c.widgets);
     note
@@ -370,7 +377,7 @@ mod tests {
     }
 
     #[test]
-    fn tab_reaches_abort_when_it_matters_but_enter_is_a_known_core_gap() {
+    fn tab_reaches_abort_and_enter_runs_the_shared_gate() {
         let mut c = Console::new();
         let (mut app, _) = refresh(&mut c, 800.0, 600.0);
         // Idle: Abort is disabled, so Tab skips it (feed -> composer).
@@ -379,16 +386,20 @@ mod tests {
         assert_eq!(c.widgets.focus.focused(), Some("composer"));
         let _ = key(&mut c, &mut app, &Key::Tab);
         assert_eq!(c.widgets.focus.focused(), Some("feed"));
-        // Streaming: Abort enables and joins the Tab order.
+        // Streaming: Abort enables and joins the Tab order; Enter
+        // raises the same intent as a pointer press, for the host to
+        // translate into a worker cancel.
         c.set_status("m", "s", 1, true);
         let (mut app2, _) = refresh(&mut c, 800.0, 600.0);
         let _ = key(&mut c, &mut app2, &Key::Tab);
         let _ = key(&mut c, &mut app2, &Key::Tab);
         assert_eq!(c.widgets.focus.focused(), Some("console-abort"));
-        // The shared core has no Enter-on-button: this locks in the
-        // observed gap (Abort stays pointer + host-Escape) for the
-        // follow-on decision instead of hiding it.
         let note = key(&mut c, &mut app2, &Key::Enter);
-        assert!(note.contains("ignored"), "{note}");
+        assert_eq!(note, "abort requested");
+        // Gone idle with focus still on Abort: Enter refuses honestly —
+        // the same note a pointer press produces.
+        c.set_status("m", "s", 1, false);
+        let note = key(&mut c, &mut app2, &Key::Enter);
+        assert!(note.contains("disabled"), "{note}");
     }
 }
