@@ -1000,6 +1000,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "hamesh-console"
+version = "0.2.0"
+dependencies = [
+ "hamesh-blocks",
+ "hamesh-core",
+ "hamesh-layout",
+ "hamesh-scene",
+ "hamesh-text",
+ "hamesh-widgets",
+]
+
+[[package]]
 name = "hamesh-core"
 version = "0.2.0"
 dependencies = [
