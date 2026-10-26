@@ -1245,6 +1245,26 @@ enum PiEvt {
     Done { text: String, aborted: bool },
     Failed(String),
     State(hamesh_pi::EngineState),
+    History(Vec<hamesh_pi::HistoryMessage>),
+}
+
+/// Persistent-session launch config, all from CLI flags. `None` means
+/// the existing ephemeral worker (`--pi` alone).
+#[derive(Clone, Debug)]
+struct SessionCfg {
+    id: String,
+    dir: String,
+    cwd: String,
+}
+
+fn session_cfg() -> Option<SessionCfg> {
+    let arg =
+        |name: &str| std::env::args().find_map(|a| a.strip_prefix(name).map(|s| s.to_string()));
+    Some(SessionCfg {
+        id: arg("--session-id=")?,
+        dir: arg("--session-dir=")?,
+        cwd: arg("--session-cwd=")?,
+    })
 }
 
 /// Link to the background Pi worker. `live_index` is the feed slot
@@ -1257,9 +1277,19 @@ struct PiLink {
 }
 
 /// Run `pi --mode rpc` off-thread: prompt, stream deltas, report done.
-/// Never touches UI state; everything crosses on channels.
-fn pi_worker(jobs: std::sync::mpsc::Receiver<PiJob>, events: std::sync::mpsc::Sender<PiEvt>) {
-    let mut client = match hamesh_pi::PiClient::spawn_ephemeral("pi", None) {
+/// With a session config, attaches to a persistent Pi session and ships
+/// its restored history first. Never touches UI state; everything
+/// crosses on channels.
+fn pi_worker(
+    jobs: std::sync::mpsc::Receiver<PiJob>,
+    events: std::sync::mpsc::Sender<PiEvt>,
+    session: Option<SessionCfg>,
+) {
+    let client = match &session {
+        Some(s) => hamesh_pi::PiClient::spawn_session("pi", Some(&s.cwd), &s.dir, &s.id),
+        None => hamesh_pi::PiClient::spawn_ephemeral("pi", None),
+    };
+    let mut client = match client {
         Ok(c) => c,
         Err(e) => {
             let _ = events.send(PiEvt::Failed(format!("spawn: {e}")));
@@ -1269,6 +1299,17 @@ fn pi_worker(jobs: std::sync::mpsc::Receiver<PiJob>, events: std::sync::mpsc::Se
     if let Err(e) = client.get_state(std::time::Duration::from_secs(20)) {
         let _ = events.send(PiEvt::Failed(format!("handshake: {e}")));
         return;
+    }
+    if session.is_some() {
+        match client.get_history(std::time::Duration::from_secs(30)) {
+            Ok(h) => {
+                let _ = events.send(PiEvt::History(h));
+            }
+            Err(e) => {
+                let _ = events.send(PiEvt::Failed(format!("history: {e}")));
+                return;
+            }
+        }
     }
     while let Ok(job) = jobs.recv() {
         match job {
@@ -1321,6 +1362,7 @@ impl HameshWindowApp {
             Done { text: String, aborted: bool },
             Failed(String),
             State(hamesh_pi::EngineState),
+            History(Vec<hamesh_pi::HistoryMessage>),
         }
         let mut acts = Vec::new();
         if let Some(link) = self.pi.as_mut() {
@@ -1331,6 +1373,7 @@ impl HameshWindowApp {
                     PiEvt::Done { text, aborted } => acts.push(Act::Done { text, aborted }),
                     PiEvt::Failed(e) => acts.push(Act::Failed(e)),
                     PiEvt::State(st) => acts.push(Act::State(st)),
+                    PiEvt::History(h) => acts.push(Act::History(h)),
                 }
             }
         }
@@ -1440,6 +1483,25 @@ impl HameshWindowApp {
                             messages,
                             streaming,
                         );
+                        changed = true;
+                    }
+                }
+                Act::History(h) => {
+                    if let Some(c) = self.console.as_mut() {
+                        for m in &h {
+                            c.widgets.feed.push(&m.role, &m.text);
+                        }
+                        let vp = c.widgets.feed_viewport.max(200.0);
+                        c.widgets.feed.scroll_to_bottom(vp);
+                        self.trace.record(
+                            "console.history",
+                            &format!("restored {} messages", h.len()),
+                            self.app.revision,
+                            None,
+                        );
+                        if let Some(link) = self.pi.as_ref() {
+                            let _ = link.job_tx.send(PiJob::GetState);
+                        }
                         changed = true;
                     }
                 }
@@ -2318,16 +2380,11 @@ impl ApplicationHandler<UserEvent> for HameshWindowApp {
             self.enter_editor(file);
             println!("EDITOR open: file editor — click, type, Tab, F12 dumps Eye evidence, Esc cancels/quits");
         }
-        if self.use_editor {
-            let file =
-                std::env::args().find_map(|a| a.strip_prefix("--file=").map(|s| s.to_string()));
-            self.enter_editor(file);
-            println!("EDITOR open: file editor — click, type, Tab, F12 dumps Eye evidence, Esc cancels/quits");
-        }
         if self.use_pi && self.pi.is_none() {
             let (job_tx, job_rx) = std::sync::mpsc::channel::<PiJob>();
             let (evt_tx, evt_rx) = std::sync::mpsc::channel::<PiEvt>();
-            std::thread::spawn(move || pi_worker(job_rx, evt_tx));
+            let session = session_cfg();
+            std::thread::spawn(move || pi_worker(job_rx, evt_tx, session));
             self.pi = Some(PiLink {
                 job_tx,
                 evt_rx,
@@ -2340,25 +2397,23 @@ impl ApplicationHandler<UserEvent> for HameshWindowApp {
                 self.app.revision,
                 None,
             );
-            println!("PI live mode: composer submits to a background pi worker");
-        }
-        if self.use_pi && self.pi.is_none() {
-            let (job_tx, job_rx) = std::sync::mpsc::channel::<PiJob>();
-            let (evt_tx, evt_rx) = std::sync::mpsc::channel::<PiEvt>();
-            std::thread::spawn(move || pi_worker(job_rx, evt_tx));
-            self.pi = Some(PiLink {
-                job_tx,
-                evt_rx,
-                live_index: None,
-                follow: false,
-            });
-            self.trace.record(
-                "pi.worker",
-                "background pi worker spawned (--pi)",
-                self.app.revision,
-                None,
-            );
-            println!("PI live mode: composer submits to a background pi worker");
+            match session_cfg() {
+                Some(s) => {
+                    self.trace.record(
+                        "pi.session",
+                        &format!("attach sid={} dir={} cwd={}", s.id, s.dir, s.cwd),
+                        self.app.revision,
+                        None,
+                    );
+                    println!(
+                        "PI session mode: attach sid={} (persistent, history restores)",
+                        s.id
+                    );
+                }
+                None => {
+                    println!("PI live mode: composer submits to a background pi worker");
+                }
+            }
         }
         if self.use_inspect && !self.inspect_serving {
             if let Some(proxy) = self.proxy.clone() {

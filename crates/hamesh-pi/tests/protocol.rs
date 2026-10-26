@@ -80,6 +80,12 @@ fn fake_pi_server(listener: TcpListener) {
                 // terms; the client treats EOF as TransportClosed.
                 break;
             }
+            Some("get_messages") => respond(
+                &mut writer,
+                &id,
+                "get_messages",
+                "{\"messages\":[{\"role\":\"system\",\"content\":\"boilerplate\"},{\"role\":\"user\",\"content\":\"hello\"},{\"role\":\"assistant\",\"content\":[{\"type\":\"text\",\"text\":\"hi there\"},{\"type\":\"toolCall\",\"name\":\"read\"}]},{\"role\":\"toolResult\",\"content\":\"done\"},{\"role\":\"mystery\",\"content\":\"kept verbatim\"},{\"role\":\"assistant\"}]}",
+            ),
             _ => respond(&mut writer, &id, "unknown", "{\"success_ignored\":true}"),
         }
     }
@@ -134,11 +140,42 @@ fn unknown_command_surfaces_command_error() {
     let (mut client, handle) = connect_fake();
     // The fake answers unknown commands with success:true + junk data.
     // A success:false answer must surface as a Command error instead:
-    // emulate by asking for an unknown shape through get_messages, which
-    // the fake answers with success:true (no error) — so assert the
-    // plumbing instead: malformed JSON response path.
-    let v = client.get_messages(TIMEOUT).expect("get_messages");
-    assert!(v.get("success_ignored").is_some());
+    // emulate through run_bash, which the fake answers with success:true
+    // (no error) — so assert the plumbing instead: malformed JSON path.
+    let v = client.run_bash("true", TIMEOUT).expect("run_bash plumbing");
+    assert!(v.output.is_empty());
+    drop(client);
+    handle.join().expect("fake server thread");
+}
+
+#[test]
+fn history_parses_tolerantly() {
+    use hamesh_pi::HistoryMessage;
+    let (mut client, handle) = connect_fake();
+    let h = client.get_history(TIMEOUT).expect("get_history");
+    // system boilerplate dropped, assistant mapped to agent, toolCall
+    // noted, unknown role kept verbatim, content-less assistant skipped.
+    assert_eq!(
+        h,
+        vec![
+            HistoryMessage {
+                role: "user".to_string(),
+                text: "hello".to_string()
+            },
+            HistoryMessage {
+                role: "agent".to_string(),
+                text: "hi there\n[tool call: read]".to_string()
+            },
+            HistoryMessage {
+                role: "tool".to_string(),
+                text: "done".to_string()
+            },
+            HistoryMessage {
+                role: "mystery".to_string(),
+                text: "kept verbatim".to_string()
+            },
+        ]
+    );
     drop(client);
     handle.join().expect("fake server thread");
 }

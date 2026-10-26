@@ -115,6 +115,91 @@ pub struct ModelOption {
     pub name: String,
 }
 
+/// One restored conversation message: a feed role (`user`, `agent`,
+/// `tool`, `system`) plus displayable text.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct HistoryMessage {
+    pub role: String,
+    pub text: String,
+}
+
+/// Extract plain text from a message `content` that may be a string or
+/// an array of typed blocks (`text`, `toolCall`, `image`, ...). Mirrors
+/// Agent X's history extraction; unknown blocks are noted, never fatal.
+fn content_text(content: &serde_json::Value) -> String {
+    if let Some(s) = content.as_str() {
+        return s.to_string();
+    }
+    let mut text = String::new();
+    let mut notes = Vec::new();
+    for block in content.as_array().cloned().unwrap_or_default() {
+        let kind = block.get("type").and_then(|t| t.as_str()).unwrap_or("");
+        match kind {
+            "text" => {
+                if let Some(s) = block.get("text").and_then(|t| t.as_str()) {
+                    text.push_str(s);
+                }
+            }
+            "toolCall" => notes.push(format!(
+                "[tool call: {}]",
+                block.get("name").and_then(|n| n.as_str()).unwrap_or("?")
+            )),
+            "image" => notes.push("[image]".to_string()),
+            _ => {}
+        }
+    }
+    for note in notes {
+        if !text.is_empty() {
+            text.push('\n');
+        }
+        text.push_str(&note);
+    }
+    text
+}
+
+fn history_message(m: &serde_json::Value) -> Option<HistoryMessage> {
+    let role = m.get("role")?.as_str()?;
+    match role {
+        "system" => None,
+        "user" => Some(HistoryMessage {
+            role: "user".to_string(),
+            text: content_text(m.get("content").unwrap_or(&serde_json::Value::Null)),
+        }),
+        "assistant" => {
+            let text = content_text(m.get("content").unwrap_or(&serde_json::Value::Null));
+            if text.is_empty() {
+                None
+            } else {
+                Some(HistoryMessage {
+                    role: "agent".to_string(),
+                    text,
+                })
+            }
+        }
+        "toolResult" | "bashExecution" => Some(HistoryMessage {
+            role: "tool".to_string(),
+            text: content_text(m.get("content").unwrap_or(&serde_json::Value::Null)),
+        }),
+        "custom" if m.get("display").and_then(|d| d.as_bool()).unwrap_or(false) => {
+            Some(HistoryMessage {
+                role: "system".to_string(),
+                text: content_text(m.get("content").unwrap_or(&serde_json::Value::Null)),
+            })
+        }
+        "branchSummary" | "compactionSummary" => Some(HistoryMessage {
+            role: "system".to_string(),
+            text: format!(
+                "[context summary] {}",
+                m.get("summary").and_then(|s| s.as_str()).unwrap_or("")
+            ),
+        }),
+        _ => Some(HistoryMessage {
+            role: role.to_string(),
+            text: content_text(m.get("content").unwrap_or(&serde_json::Value::Null)),
+        }),
+    }
+}
+
 /// Outcome of a direct `bash` RPC command (no LLM run).
 #[derive(Clone, Debug)]
 pub struct BashResult {
@@ -568,6 +653,20 @@ impl PiClient {
 
     pub fn get_messages(&mut self, timeout: Duration) -> Result<serde_json::Value, PiError> {
         self.command("get_messages", &[], timeout)
+    }
+
+    /// Fetch restored conversation history as displayable (role, text)
+    /// pairs. Shape mirrors Agent X's `ParseHistory` tolerance: unknown
+    /// roles and content shapes are skipped or summarized, never fatal;
+    /// `system` boilerplate is dropped.
+    pub fn get_history(&mut self, timeout: Duration) -> Result<Vec<HistoryMessage>, PiError> {
+        let data = self.get_messages(timeout)?;
+        let empty = Vec::new();
+        let messages = data
+            .get("messages")
+            .and_then(|m| m.as_array())
+            .unwrap_or(&empty);
+        Ok(messages.iter().filter_map(history_message).collect())
     }
 
     pub fn run_bash(
