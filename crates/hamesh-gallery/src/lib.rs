@@ -72,6 +72,25 @@ impl Gallery {
         ["layers", "picker"][self.focus]
     }
 
+    /// Type text into the picker field, this app's one text sink: the
+    /// same route `Key::Char` walks in the picker zone (focus it, open
+    /// the popup on demand, one `push_char` per char). The driver owns
+    /// its layer labels and needs no caller argument; empty text
+    /// touches nothing.
+    pub fn type_text(&mut self, text: &str) -> String {
+        if text.is_empty() {
+            return "picker: nothing to type".to_string();
+        }
+        self.focus = 1;
+        if !self.fonts.is_open() {
+            self.fonts.open();
+        }
+        for c in text.chars() {
+            let _ = self.fonts.push_char(c);
+        }
+        format!("picker type: {:?}", self.fonts.query())
+    }
+
     fn narrow(&self, width: f32) -> bool {
         width < 1000.0
     }
@@ -597,6 +616,29 @@ mod tests {
             note.contains("dismissed"),
             "the note says what happened: {note}"
         );
+    }
+
+    #[test]
+    fn type_text_walks_the_picker_route_without_caller_labels() {
+        // 038-A: gallery `type` used to answer NO_M3. The driver now
+        // owns the route (and its labels), so no caller argument is
+        // needed and the typed path agrees with the keyboard exactly.
+        let mut typed = Gallery::new();
+        assert_eq!(typed.type_text(""), "picker: nothing to type");
+        assert_eq!(typed.focused_zone(), "layers", "empty text touches nothing");
+
+        let mut keyed = Gallery::new();
+        let _ = key(&mut keyed, Key::Tab, &[]);
+        for c in "newsreader".chars() {
+            let _ = key(&mut keyed, Key::Char(c), &[]);
+        }
+
+        let note = typed.type_text("newsreader");
+        assert!(note.contains("newsreader"), "{note}");
+        assert_eq!(typed.focused_zone(), "picker");
+        assert!(typed.fonts.is_open());
+        assert_eq!(typed.fonts.query(), keyed.fonts.query());
+        assert_eq!(typed.fonts.filtered(), keyed.fonts.filtered());
     }
 
     #[test]

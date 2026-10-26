@@ -2292,10 +2292,56 @@ impl HameshWindowApp {
                         "notes": r.notes,
                         "mechanism": format!("{:?}", r.mechanism),
                     })))
+                } else if self.use_tasks && self.tasks.is_some() {
+                    // Tasks types into its filter through the driver's
+                    // own route: same narrowing a human's keys produce.
+                    let note = {
+                        let Some(t) = self.tasks.as_mut() else {
+                            return;
+                        };
+                        t.type_text(&text)
+                    };
+                    self.refresh_tasks();
+                    self.trace.record(
+                        "ext.type",
+                        &format!("id={id} tasks: {note}"),
+                        self.app.revision,
+                        None,
+                    );
+                    Some(self.stamped(serde_json::json!({
+                        "success": true,
+                        "hit": id,
+                        "notes": [note],
+                        "focused": self.tasks.as_ref().map(|t| t.focused_zone()),
+                        "mechanism": "HumanEquivalent",
+                    })))
+                } else if self.use_gallery && self.gallery.is_some() {
+                    // Gallery types into its picker field; labels stay
+                    // inside the driver, no caller argument.
+                    let note = {
+                        let Some(g) = self.gallery.as_mut() else {
+                            return;
+                        };
+                        g.type_text(&text)
+                    };
+                    self.refresh_gallery();
+                    self.trace.record(
+                        "ext.type",
+                        &format!("id={id} gallery: {note}"),
+                        self.app.revision,
+                        None,
+                    );
+                    Some(self.stamped(serde_json::json!({
+                        "success": true,
+                        "hit": id,
+                        "notes": [note],
+                        "focused": self.gallery.as_ref().map(|g| g.focused_zone()),
+                        "mechanism": "HumanEquivalent",
+                    })))
                 } else if self.widgets.is_none() {
                     Some(self.err(
                         "NO_M3",
-                        "typing needs an interactive mode (m3, console or editor)".to_string(),
+                        "typing needs an interactive mode (m3, console, editor, tasks or gallery); sheet has no text field".to_string(),
                     ))
                 } else {
                     let layout =

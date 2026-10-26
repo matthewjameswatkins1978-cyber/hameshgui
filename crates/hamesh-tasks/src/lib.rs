@@ -100,6 +100,26 @@ impl Tasks {
         ["list", "filter", "actions"][self.focus]
     }
 
+    /// Type text into the filter, the app's one text sink: the same
+    /// route `Key::Char` walks (focus the field, open the popup on
+    /// demand, one `push_char` per char), so narrowing, selection
+    /// identity and the painted tree are exactly what a human typing
+    /// produces. Empty text touches nothing.
+    pub fn type_text(&mut self, text: &str) -> String {
+        if text.is_empty() {
+            return "filter: nothing to type".to_string();
+        }
+        self.focus = 1;
+        if !self.filter.is_open() {
+            self.filter.open();
+        }
+        for c in text.chars() {
+            let _ = self.filter.push_char(c);
+        }
+        self.resync_selection();
+        format!("filter type: {:?}", self.filter.query())
+    }
+
     /// Re-derive the list cursor from the stored item after the query
     /// changes. A filtered-out item keeps its identity with no row.
     fn resync_selection(&mut self) {
@@ -658,6 +678,38 @@ mod tests {
         assert_eq!(badge.props.get("text").map(|s| s.as_str()), Some("Done"));
         let bar = app.get("done-bar").unwrap();
         assert_eq!(bar.props.get("value").unwrap(), "12.5");
+    }
+
+    #[test]
+    fn type_text_walks_the_same_route_as_the_keyboard() {
+        // 038-A: the inspector `type` op used to answer NO_M3 for this
+        // app even though `key Char` narrows the filter. Driving it
+        // through the driver must land in exactly that same state.
+        let mut typed = Tasks::new();
+        assert_eq!(typed.type_text(""), "filter: nothing to type");
+        assert_eq!(typed.focused_zone(), "list", "empty text touches nothing");
+
+        let mut keyed = Tasks::new();
+        keyed.focus = 1;
+        for c in "router".chars() {
+            let _ = key(&mut keyed, Key::Char(c));
+        }
+
+        assert_eq!(typed.type_text("router"), "filter type: \"router\"");
+        assert_eq!(typed.focused_zone(), "filter");
+        assert!(typed.filter.is_open());
+        assert_eq!(typed.shown(), vec![0]);
+        assert_eq!(typed.shown(), keyed.shown());
+        assert_eq!(typed.selected_task(), keyed.selected_task());
+
+        // The painted tree is the human one: only the match is left.
+        let (app, _layout, _scene) = frame(&mut typed, 1440.0, 900.0);
+        assert!(app.get("tasks-row-1").is_none());
+        assert!(app.get("tasks-row-0").is_some());
+
+        // Dismissing restores the queue through the same Escape contract.
+        let _ = key(&mut typed, Key::Escape);
+        assert_eq!(typed.shown().len(), 8);
     }
 
     #[test]
