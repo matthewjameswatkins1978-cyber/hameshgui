@@ -1049,6 +1049,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "hamesh-editor"
+version = "0.2.0"
+dependencies = [
+ "hamesh-blocks",
+ "hamesh-core",
+ "hamesh-layout",
+ "hamesh-scene",
+ "hamesh-text",
+ "hamesh-widgets",
+]
+
+[[package]]
 name = "hamesh-faults"
 version = "0.2.0"
 dependencies = [
