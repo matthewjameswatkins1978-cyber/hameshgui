@@ -152,6 +152,8 @@ struct HameshWindowApp {
     /// CPU presentation resources survive unchanged frames and resizes.
     cpu_surface_dims: Option<(u32, u32)>,
     cpu_pixels: Vec<u32>,
+    /// Cached scene avoids re-shaping and re-layout when content is unchanged.
+    last_scene: Option<(u64, (u32, u32), hamesh_scene::Scene)>,
     gpu: Option<gpu::GpuState>,
     use_gpu: bool,
     proxy: Option<EventLoopProxy<UserEvent>>,
@@ -227,6 +229,7 @@ impl HameshWindowApp {
             surface: None,
             cpu_surface_dims: None,
             cpu_pixels: Vec::new(),
+            last_scene: None,
             gpu: None,
             use_gpu: false,
             proxy: None,
@@ -266,6 +269,19 @@ impl HameshWindowApp {
         let layout = hamesh_layout::compute(&self.app, self.size.0 as f32, self.size.1 as f32);
         let scene = hamesh_scene::build(&self.app, &layout, self.scene_rev);
         (layout, scene)
+    }
+
+    fn get_or_build_scene(&mut self) -> hamesh_scene::Scene {
+        let key = (self.scene_rev, self.size);
+        if let Some((rev, size, scene)) = &self.last_scene {
+            if *rev == key.0 && *size == key.1 {
+                return scene.clone();
+            }
+        }
+        let layout = hamesh_layout::compute(&self.app, self.size.0 as f32, self.size.1 as f32);
+        let scene = hamesh_scene::build(&self.app, &layout, self.scene_rev);
+        self.last_scene = Some((key.0, key.1, scene.clone()));
+        scene
     }
 
     /// Feed width for layout: viewport minus chrome. Kept in one place so
@@ -322,51 +338,64 @@ impl HameshWindowApp {
             self.paint_gpu();
             return;
         }
-        // Rasterize only on a requested redraw. Keep the conversion storage
-        // across frames; moving an unchanged window must not allocate or
-        // rebuild another scene on a busy self-triggered redraw loop.
-        let (_layout, scene) = self.layout_and_scene();
-        let frame = hamesh_render::render(&scene);
-        let src = frame.pixmap.data();
-        self.cpu_pixels.resize((w as usize) * (h as usize), 0);
-        let (pixels, _remainder) = src.as_chunks::<4>();
-        for (pixel, chunk) in self.cpu_pixels.iter_mut().zip(pixels) {
-            let (r, g, b, a) = (chunk[0], chunk[1], chunk[2], chunk[3]);
-            let (r, g, b) = if a == 0 {
-                (0, 0, 0)
-            } else if a == 255 {
-                (r as u32, g as u32, b as u32)
-            } else {
-                let a = a as u32;
-                (
-                    (r as u32) * 255 / a,
-                    (g as u32) * 255 / a,
-                    (b as u32) * 255 / a,
-                )
-            };
-            *pixel = (r << 16) | (g << 8) | b;
+        if self.surface.is_none() {
+            return;
         }
-        let Some(surface) = self.surface.as_mut() else {
+        let (Some(ww), Some(hh)) = (NonZeroU32::new(w), NonZeroU32::new(h)) else {
             return;
         };
-        if let (Some(ww), Some(hh)) = (NonZeroU32::new(w), NonZeroU32::new(h)) {
-            if self.cpu_surface_dims != Some((w, h)) {
+
+        let dims_changed = self.cpu_surface_dims != Some((w, h));
+        let scene_changed = self.scene_rev != self.presented_rev;
+
+        // If neither dimensions nor scene changed, and we have pixel data,
+        // reuse the converted presentation buffer rather than re-rasterizing.
+        if dims_changed || scene_changed || self.cpu_pixels.is_empty() {
+            let scene = self.get_or_build_scene();
+            let frame = hamesh_render::render(&scene);
+            let src = frame.pixmap.data();
+            self.cpu_pixels.resize((w as usize) * (h as usize), 0);
+            let (pixels, _remainder) = src.as_chunks::<4>();
+            for (pixel, chunk) in self.cpu_pixels.iter_mut().zip(pixels) {
+                let (r, g, b, a) = (chunk[0], chunk[1], chunk[2], chunk[3]);
+                let (r, g, b) = if a == 0 {
+                    (0, 0, 0)
+                } else if a == 255 {
+                    (r as u32, g as u32, b as u32)
+                } else {
+                    let a = a as u32;
+                    (
+                        (r as u32) * 255 / a,
+                        (g as u32) * 255 / a,
+                        (b as u32) * 255 / a,
+                    )
+                };
+                *pixel = (r << 16) | (g << 8) | b;
+            }
+            if dims_changed {
+                let Some(surface) = self.surface.as_mut() else {
+                    return;
+                };
                 if surface.resize(ww, hh).is_err() {
                     return;
                 }
                 self.cpu_surface_dims = Some((w, h));
             }
-            if let Ok(mut buffer) = surface.buffer_mut() {
-                buffer.copy_from_slice(&self.cpu_pixels);
-                if buffer.present().is_ok() {
-                    self.frames += 1;
-                }
+        }
+
+        let Some(surface) = self.surface.as_mut() else {
+            return;
+        };
+        if let Ok(mut buffer) = surface.buffer_mut() {
+            buffer.copy_from_slice(&self.cpu_pixels);
+            if buffer.present().is_ok() {
+                self.frames += 1;
             }
         }
     }
 
     fn paint_gpu(&mut self) {
-        let (_layout, scene) = self.layout_and_scene();
+        let scene = self.get_or_build_scene();
         let Some(gpu) = self.gpu.as_mut() else {
             self.trace.record(
                 "gpu.unavailable",
@@ -378,15 +407,17 @@ impl HameshWindowApp {
         };
         match gpu.paint(&scene) {
             Ok(nodes) => {
-                self.frames += 1;
-                if self.frames == 1 {
-                    self.trace.record(
-                        "gpu.first_frame",
-                        &format!("presented {nodes} vello nodes"),
-                        self.app.revision,
-                        None,
-                    );
-                    println!("GPU first frame: {nodes} nodes presented");
+                if nodes > 0 {
+                    self.frames += 1;
+                    if self.frames == 1 {
+                        self.trace.record(
+                            "gpu.first_frame",
+                            &format!("presented {nodes} vello nodes"),
+                            self.app.revision,
+                            None,
+                        );
+                        println!("GPU first frame: {nodes} nodes presented");
+                    }
                 }
             }
             Err(e) => {
@@ -2723,7 +2754,11 @@ impl ApplicationHandler<UserEvent> for HameshWindowApp {
                 event_loop.exit();
             }
             WindowEvent::Resized(size) => {
-                self.size = (size.width.max(1), size.height.max(1));
+                let new_size = (size.width.max(1), size.height.max(1));
+                if self.size == new_size {
+                    return;
+                }
+                self.size = new_size;
                 self.scene_rev += 1;
                 if self.use_gallery {
                     self.refresh_gallery();
@@ -2749,11 +2784,27 @@ impl ApplicationHandler<UserEvent> for HameshWindowApp {
                     self.app.revision,
                     None,
                 );
+                if let Some(window) = &self.window {
+                    window.request_redraw();
+                }
+            }
+            WindowEvent::ScaleFactorChanged { .. } => {
+                self.scene_rev += 1;
+                if let Some(window) = &self.window {
+                    window.request_redraw();
+                }
+            }
+            WindowEvent::Occluded(occluded) => {
+                if !occluded {
+                    if let Some(window) = &self.window {
+                        window.request_redraw();
+                    }
+                }
             }
             WindowEvent::CursorMoved { position, .. } => {
                 self.cursor = (position.x as f32, position.y as f32);
                 if self.use_gallery {
-                    let (_, scene) = self.layout_and_scene();
+                    let scene = self.get_or_build_scene();
                     let changed = match self.gallery.as_mut() {
                         Some(g) => hamesh_gallery::hover(
                             g,
@@ -2769,7 +2820,7 @@ impl ApplicationHandler<UserEvent> for HameshWindowApp {
                     }
                 }
                 if self.use_tasks {
-                    let (_, scene) = self.layout_and_scene();
+                    let scene = self.get_or_build_scene();
                     let changed = match self.tasks.as_mut() {
                         Some(t) => {
                             hamesh_tasks::hover(t, &scene, self.cursor.0, self.cursor.1, &self.app)
@@ -2781,7 +2832,7 @@ impl ApplicationHandler<UserEvent> for HameshWindowApp {
                     }
                 }
                 if self.use_sheet {
-                    let (_, scene) = self.layout_and_scene();
+                    let scene = self.get_or_build_scene();
                     let changed = match self.sheet.as_mut() {
                         Some(t) => {
                             hamesh_sheet::hover(t, &scene, self.cursor.0, self.cursor.1, &self.app)
