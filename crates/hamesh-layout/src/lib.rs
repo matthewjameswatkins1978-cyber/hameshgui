@@ -24,6 +24,15 @@ pub struct TextMeasure {
     pub shaping: hamesh_text::FontSpec,
 }
 
+impl PartialEq for TextMeasure {
+    fn eq(&self, other: &Self) -> bool {
+        self.text == other.text
+            && self.font_size.to_bits() == other.font_size.to_bits()
+            && self.line_height.map(|v| v.to_bits()) == other.line_height.map(|v| v.to_bits())
+            && self.shaping.fingerprint() == other.shaping.fingerprint()
+    }
+}
+
 /// Measure a text leaf: known dimensions win, otherwise parley.
 /// MinContent asks for the longest word (wrapping upper bound).
 /// Width includes the renderer's text origin inset on both sides
@@ -135,7 +144,7 @@ impl Rect {
     }
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct LayoutNode {
     pub rect: Rect,
     /// False when component.visible == false or an ancestor is hidden.
@@ -145,7 +154,7 @@ pub struct LayoutNode {
     pub z: i32,
 }
 
-#[derive(Debug)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct LayoutOutput {
     pub nodes: HashMap<String, LayoutNode>,
     pub viewport: Rect,
@@ -306,139 +315,59 @@ fn child_style(comp: &hamesh_core::Component) -> Style {
     }
 }
 
-/// Compute layout for the whole tree at a fixed viewport size.
-///
-/// Text leaves (`Text`/`Status` roles) carry their content as Taffy
-/// node context and are measured with parley, so labels size to
-/// their text. Every other leaf measures zero (style sizes win).
-pub fn compute(app: &App, viewport_w: f32, viewport_h: f32) -> LayoutOutput {
-    // One Taffy tree per positioning context: the main tree plus a
-    // separate tree for every overlay-rooted subtree. Overlays take
-    // no space in their parent's flow; their subtree lays out
-    // against the overlay's own rect instead.
-    let mut trees: Vec<TaffyTree<Option<TextMeasure>>> = vec![TaffyTree::new()];
-    let mut node_of: HashMap<String, (usize, NodeId)> = HashMap::new();
-    let mut order: Vec<String> = Vec::new();
-    // Component id of each tree's root (tree 0 is the app root).
-    let mut tree_roots: Vec<String> = vec![app.root.0.clone()];
+#[derive(Clone, Debug, PartialEq)]
+struct ComponentSnapshot {
+    role: hamesh_core::Role,
+    visible: bool,
+    parent: Option<hamesh_core::ComponentId>,
+    children: Vec<hamesh_core::ComponentId>,
+    is_overlay: bool,
+    style: Style,
+    text_measure: Option<TextMeasure>,
+}
 
-    // Post-order creation: children first so parents can reference them.
-    fn build(
-        app: &App,
-        id: &str,
-        trees: &mut Vec<TaffyTree<Option<TextMeasure>>>,
-        tree_idx: usize,
-        node_of: &mut HashMap<String, (usize, NodeId)>,
-        order: &mut Vec<String>,
-        tree_roots: &mut Vec<String>,
-    ) {
-        let comp = app.components.get(id).expect("missing component");
-        let mut kids = Vec::new();
-        for c in &comp.children {
-            let child = app.components.get(&c.0).expect("missing child");
-            if is_overlay(child) {
-                trees.push(TaffyTree::new());
-                let overlay_idx = trees.len() - 1;
-                tree_roots.push(c.0.clone());
-                build(app, &c.0, trees, overlay_idx, node_of, order, tree_roots);
-            } else {
-                build(app, &c.0, trees, tree_idx, node_of, order, tree_roots);
-                kids.push(node_of[&c.0].1);
-            }
-        }
-        let style = child_style(comp);
-        let node = if kids.is_empty()
-            && matches!(
-                comp.role,
-                hamesh_core::Role::Text | hamesh_core::Role::Status | hamesh_core::Role::Button
-            ) {
-            let font_size = comp
-                .props
-                .get("font_size")
-                .and_then(|v| v.parse::<f32>().ok())
-                .unwrap_or(16.0);
-            let line_height = comp
-                .props
-                .get("lh")
-                .and_then(|v| v.parse::<f32>().ok())
-                .filter(|v| *v > 0.0);
-            let text = comp.props.get("text").cloned().unwrap_or_default();
-            trees[tree_idx]
-                .new_leaf_with_context(
-                    style,
-                    Some(TextMeasure {
-                        text,
-                        font_size,
-                        line_height,
-                        shaping: hamesh_text::FontSpec::parse(
-                            comp.props.get("font").map(String::as_str),
-                            comp.props.get("font_vars").map(String::as_str),
-                            comp.props.get("font_style").map(String::as_str),
-                            comp.props.get("tracking").map(String::as_str),
-                        ),
-                    }),
-                )
-                .expect("taffy text leaf")
-        } else if kids.is_empty() {
-            trees[tree_idx].new_leaf(style).expect("taffy leaf")
-        } else {
-            trees[tree_idx]
-                .new_with_children(style, &kids)
-                .expect("taffy node")
-        };
-        node_of.insert(id.to_string(), (tree_idx, node));
-        order.push(id.to_string());
+fn is_text_leaf(comp: &hamesh_core::Component, has_kids: bool) -> bool {
+    !has_kids
+        && matches!(
+            comp.role,
+            hamesh_core::Role::Text | hamesh_core::Role::Status | hamesh_core::Role::Button
+        )
+}
+
+fn extract_text_measure(comp: &hamesh_core::Component) -> TextMeasure {
+    let font_size = comp
+        .props
+        .get("font_size")
+        .and_then(|v| v.parse::<f32>().ok())
+        .unwrap_or(16.0);
+    let line_height = comp
+        .props
+        .get("lh")
+        .and_then(|v| v.parse::<f32>().ok())
+        .filter(|v| *v > 0.0);
+    let text = comp.props.get("text").cloned().unwrap_or_default();
+    TextMeasure {
+        text,
+        font_size,
+        line_height,
+        shaping: hamesh_text::FontSpec::parse(
+            comp.props.get("font").map(String::as_str),
+            comp.props.get("font_vars").map(String::as_str),
+            comp.props.get("font_style").map(String::as_str),
+            comp.props.get("tracking").map(String::as_str),
+        ),
     }
+}
 
-    build(
-        app,
-        &app.root.0,
-        &mut trees,
-        0,
-        &mut node_of,
-        &mut order,
-        &mut tree_roots,
-    );
-
-    // The main tree fills the viewport exactly: Taffy AvailableSpace
-    // alone does not force an auto-sized root to expand, so pin it
-    // explicitly. Overlay trees size from their declared w/h (or hug
-    // content bounded by the viewport — see the overlay rect below).
-    {
-        let root_node = node_of[&app.root.0].1;
-        let mut root_style = trees[0].style(root_node).expect("root style").clone();
-        root_style.size = Size {
-            width: Dimension::length(viewport_w),
-            height: Dimension::length(viewport_h),
-        };
-        trees[0]
-            .set_style(root_node, root_style)
-            .expect("root size");
-    }
-    for root_id in &tree_roots {
-        let tnode = node_of[root_id].1;
-        let ti = node_of[root_id].0;
-        trees[ti]
-            .compute_layout_with_measure(
-                tnode,
-                Size {
-                    width: AvailableSpace::Definite(viewport_w),
-                    height: AvailableSpace::Definite(viewport_h),
-                },
-                |inputs, _node, ctx, style| {
-                    taffy::compute::compute_leaf_layout(
-                        inputs,
-                        style,
-                        |_, _| 0.0,
-                        |known, avail| measure_text(ctx.and_then(|c| c.as_ref()), known, avail),
-                    )
-                },
-            )
-            .expect("taffy layout");
-    }
-
-    // Parent rects are needed for clipped_by_parent detection.
-    let mut nodes: HashMap<String, LayoutNode> = HashMap::new();
+fn extract_layout_output(
+    trees: &[TaffyTree<Option<TextMeasure>>],
+    node_of: &HashMap<String, (usize, NodeId)>,
+    order: &[String],
+    app: &App,
+    viewport_w: f32,
+    viewport_h: f32,
+) -> LayoutOutput {
+    let mut nodes: HashMap<String, LayoutNode> = HashMap::with_capacity(order.len());
     let viewport = Rect {
         x: 0.0,
         y: 0.0,
@@ -447,9 +376,9 @@ pub fn compute(app: &App, viewport_w: f32, viewport_h: f32) -> LayoutOutput {
     };
 
     // First pass: rects + effective visibility.
-    for id in &order {
-        let comp = &app.components[&id.clone()];
-        let (tree_idx, tnode) = node_of[&id.clone()];
+    for id in order {
+        let comp = &app.components[id];
+        let (tree_idx, tnode) = node_of[id];
         let l = trees[tree_idx].layout(tnode).expect("layout");
         let overlay_self = is_overlay(comp);
         // Taffy locations are parent-relative: accumulate absolute offset.
@@ -545,22 +474,18 @@ pub fn compute(app: &App, viewport_w: f32, viewport_h: f32) -> LayoutOutput {
     }
 
     // Second pass: clipped_by_parent — rect extends beyond parent rect.
-    // Overlay roots live in another positioning context: nothing
-    // above them means anything to them.
-    for id in &order {
-        if is_overlay(&app.components[&id.clone()]) {
+    for id in order {
+        if is_overlay(&app.components[id]) {
             continue;
         }
-        let parent = app.components[&id.clone()].parent.clone();
+        let parent = app.components[id].parent.clone();
         if let Some(pid) = parent {
-            if let (Some(n), Some(p)) =
-                (nodes.get(&id.clone()).cloned(), nodes.get(&pid.0).cloned())
-            {
+            if let (Some(n), Some(p)) = (nodes.get(id).cloned(), nodes.get(&pid.0).cloned()) {
                 let clipped = n.rect.x < p.rect.x
                     || n.rect.y < p.rect.y
                     || n.rect.x + n.rect.w > p.rect.x + p.rect.w + 1.0
                     || n.rect.y + n.rect.h > p.rect.y + p.rect.h + 1.0;
-                if let Some(nn) = nodes.get_mut(&id.clone()) {
+                if let Some(nn) = nodes.get_mut(id) {
                     nn.clipped_by_parent = clipped;
                 }
             }
@@ -568,6 +493,348 @@ pub fn compute(app: &App, viewport_w: f32, viewport_h: f32) -> LayoutOutput {
     }
 
     LayoutOutput { nodes, viewport }
+}
+
+struct BuildCtx<'a> {
+    app: &'a App,
+    trees: &'a mut Vec<TaffyTree<Option<TextMeasure>>>,
+    node_of: &'a mut HashMap<String, (usize, NodeId)>,
+    order: &'a mut Vec<String>,
+    tree_roots: &'a mut Vec<String>,
+    snapshots: Option<&'a mut HashMap<String, ComponentSnapshot>>,
+}
+
+fn build_tree_node(ctx: &mut BuildCtx, id: &str, tree_idx: usize) {
+    let comp = ctx.app.components.get(id).expect("missing component");
+    let mut kids = Vec::new();
+    for c in &comp.children {
+        let child = ctx.app.components.get(&c.0).expect("missing child");
+        if is_overlay(child) {
+            ctx.trees.push(TaffyTree::new());
+            let overlay_idx = ctx.trees.len() - 1;
+            ctx.tree_roots.push(c.0.clone());
+            build_tree_node(ctx, &c.0, overlay_idx);
+        } else {
+            build_tree_node(ctx, &c.0, tree_idx);
+            kids.push(ctx.node_of[&c.0].1);
+        }
+    }
+    let style = child_style(comp);
+    let has_kids = !kids.is_empty();
+    let is_txt = is_text_leaf(comp, has_kids);
+    let tm = if is_txt {
+        Some(extract_text_measure(comp))
+    } else {
+        None
+    };
+    let node = if let Some(ref m) = tm {
+        ctx.trees[tree_idx]
+            .new_leaf_with_context(style.clone(), Some(m.clone()))
+            .expect("taffy text leaf")
+    } else if kids.is_empty() {
+        ctx.trees[tree_idx]
+            .new_leaf(style.clone())
+            .expect("taffy leaf")
+    } else {
+        ctx.trees[tree_idx]
+            .new_with_children(style.clone(), &kids)
+            .expect("taffy node")
+    };
+    if let Some(snaps) = ctx.snapshots.as_mut() {
+        snaps.insert(
+            id.to_string(),
+            ComponentSnapshot {
+                role: comp.role.clone(),
+                visible: comp.visible,
+                parent: comp.parent.clone(),
+                children: comp.children.clone(),
+                is_overlay: is_overlay(comp),
+                style,
+                text_measure: tm,
+            },
+        );
+    }
+    ctx.node_of.insert(id.to_string(), (tree_idx, node));
+    ctx.order.push(id.to_string());
+}
+
+/// Compute layout for the whole tree from scratch at a fixed viewport size.
+/// Guaranteed full rebuild with no retained state.
+pub fn compute_full(app: &App, viewport_w: f32, viewport_h: f32) -> LayoutOutput {
+    let mut trees: Vec<TaffyTree<Option<TextMeasure>>> = vec![TaffyTree::new()];
+    let mut node_of: HashMap<String, (usize, NodeId)> =
+        HashMap::with_capacity(app.components.len());
+    let mut order: Vec<String> = Vec::with_capacity(app.components.len());
+    let mut tree_roots: Vec<String> = vec![app.root.0.clone()];
+
+    {
+        let mut ctx = BuildCtx {
+            app,
+            trees: &mut trees,
+            node_of: &mut node_of,
+            order: &mut order,
+            tree_roots: &mut tree_roots,
+            snapshots: None,
+        };
+        build_tree_node(&mut ctx, &app.root.0, 0);
+    }
+
+    {
+        let root_node = node_of[&app.root.0].1;
+        let mut root_style = trees[0].style(root_node).expect("root style").clone();
+        root_style.size = Size {
+            width: Dimension::length(viewport_w),
+            height: Dimension::length(viewport_h),
+        };
+        trees[0]
+            .set_style(root_node, root_style)
+            .expect("root size");
+    }
+    for root_id in &tree_roots {
+        let tnode = node_of[root_id].1;
+        let ti = node_of[root_id].0;
+        trees[ti]
+            .compute_layout_with_measure(
+                tnode,
+                Size {
+                    width: AvailableSpace::Definite(viewport_w),
+                    height: AvailableSpace::Definite(viewport_h),
+                },
+                |inputs, _node, ctx, style| {
+                    taffy::compute::compute_leaf_layout(
+                        inputs,
+                        style,
+                        |_, _| 0.0,
+                        |known, avail| measure_text(ctx.and_then(|c| c.as_ref()), known, avail),
+                    )
+                },
+            )
+            .expect("taffy layout");
+    }
+
+    extract_layout_output(&trees, &node_of, &order, app, viewport_w, viewport_h)
+}
+
+/// Persistent layout state retaining Taffy trees and incremental node invalidations.
+///
+/// Borrows the incremental layout technique from GPUI Fast and Taffy:
+/// retains node mappings across frames, invalidates only changed styles or
+/// text measurements, marks affected subtrees dirty, and lets Taffy skip
+/// unaffected branches. Falls back cleanly to full rebuild whenever tree
+/// topology (roots, children, overlays) changes.
+#[derive(Default)]
+pub struct LayoutCache {
+    trees: Vec<TaffyTree<Option<TextMeasure>>>,
+    node_of: HashMap<String, (usize, NodeId)>,
+    order: Vec<String>,
+    tree_roots: Vec<String>,
+    snapshots: HashMap<String, ComponentSnapshot>,
+    root_id: Option<String>,
+    viewport: (f32, f32),
+    font_gen: u64,
+}
+
+impl LayoutCache {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn clear(&mut self) {
+        self.trees.clear();
+        self.node_of.clear();
+        self.order.clear();
+        self.tree_roots.clear();
+        self.snapshots.clear();
+        self.root_id = None;
+        self.viewport = (0.0, 0.0);
+        self.font_gen = 0;
+    }
+
+    fn rebuild(&mut self, app: &App, viewport_w: f32, viewport_h: f32) -> LayoutOutput {
+        let mut trees: Vec<TaffyTree<Option<TextMeasure>>> = vec![TaffyTree::new()];
+        let mut node_of: HashMap<String, (usize, NodeId)> =
+            HashMap::with_capacity(app.components.len());
+        let mut order: Vec<String> = Vec::with_capacity(app.components.len());
+        let mut tree_roots: Vec<String> = vec![app.root.0.clone()];
+        let mut snapshots: HashMap<String, ComponentSnapshot> =
+            HashMap::with_capacity(app.components.len());
+
+        {
+            let mut ctx = BuildCtx {
+                app,
+                trees: &mut trees,
+                node_of: &mut node_of,
+                order: &mut order,
+                tree_roots: &mut tree_roots,
+                snapshots: Some(&mut snapshots),
+            };
+            build_tree_node(&mut ctx, &app.root.0, 0);
+        }
+
+        {
+            let root_node = node_of[&app.root.0].1;
+            let mut root_style = trees[0].style(root_node).expect("root style").clone();
+            root_style.size = Size {
+                width: Dimension::length(viewport_w),
+                height: Dimension::length(viewport_h),
+            };
+            trees[0]
+                .set_style(root_node, root_style)
+                .expect("root size");
+        }
+
+        for root_id in &tree_roots {
+            let tnode = node_of[root_id].1;
+            let ti = node_of[root_id].0;
+            trees[ti]
+                .compute_layout_with_measure(
+                    tnode,
+                    Size {
+                        width: AvailableSpace::Definite(viewport_w),
+                        height: AvailableSpace::Definite(viewport_h),
+                    },
+                    |inputs, _node, ctx, style| {
+                        taffy::compute::compute_leaf_layout(
+                            inputs,
+                            style,
+                            |_, _| 0.0,
+                            |known, avail| measure_text(ctx.and_then(|c| c.as_ref()), known, avail),
+                        )
+                    },
+                )
+                .expect("taffy layout");
+        }
+
+        let output = extract_layout_output(&trees, &node_of, &order, app, viewport_w, viewport_h);
+
+        self.trees = trees;
+        self.node_of = node_of;
+        self.order = order;
+        self.tree_roots = tree_roots;
+        self.snapshots = snapshots;
+        self.root_id = Some(app.root.0.clone());
+        self.viewport = (viewport_w, viewport_h);
+        self.font_gen = hamesh_text::font_generation();
+
+        output
+    }
+
+    pub fn compute(&mut self, app: &App, viewport_w: f32, viewport_h: f32) -> LayoutOutput {
+        let topology_matches = self.root_id.as_deref() == Some(&app.root.0)
+            && self.order.len() == app.components.len()
+            && self.order.iter().all(|id| {
+                if let (Some(comp), Some(snap)) = (app.components.get(id), self.snapshots.get(id)) {
+                    snap.role == comp.role
+                        && snap.visible == comp.visible
+                        && snap.parent == comp.parent
+                        && snap.children == comp.children
+                        && snap.is_overlay == is_overlay(comp)
+                } else {
+                    false
+                }
+            });
+
+        if !topology_matches {
+            return self.rebuild(app, viewport_w, viewport_h);
+        }
+
+        // Incremental path: topology is intact.
+        let vp_changed = self.viewport != (viewport_w, viewport_h);
+        if vp_changed {
+            let root_node = self.node_of[&app.root.0].1;
+            let mut root_style = self.trees[0].style(root_node).expect("root style").clone();
+            root_style.size = Size {
+                width: Dimension::length(viewport_w),
+                height: Dimension::length(viewport_h),
+            };
+            self.trees[0]
+                .set_style(root_node, root_style)
+                .expect("root size");
+            self.viewport = (viewport_w, viewport_h);
+        }
+
+        let current_font_gen = hamesh_text::font_generation();
+        let font_gen_changed = self.font_gen != current_font_gen;
+        if font_gen_changed {
+            self.font_gen = current_font_gen;
+        }
+
+        for id in &self.order {
+            let comp = &app.components[id];
+            let (tree_idx, node) = self.node_of[id];
+            let snap = self.snapshots.get_mut(id).unwrap();
+
+            let new_style = child_style(comp);
+            if new_style != snap.style {
+                self.trees[tree_idx]
+                    .set_style(node, new_style.clone())
+                    .expect("set_style");
+                snap.style = new_style;
+            }
+
+            if snap.text_measure.is_some() {
+                let new_tm = extract_text_measure(comp);
+                if font_gen_changed || snap.text_measure.as_ref() != Some(&new_tm) {
+                    self.trees[tree_idx]
+                        .set_node_context(node, Some(Some(new_tm.clone())))
+                        .expect("set_context");
+                    let _ = self.trees[tree_idx].mark_dirty(node);
+                    snap.text_measure = Some(new_tm);
+                }
+            }
+        }
+
+        for root_id in &self.tree_roots {
+            let tnode = self.node_of[root_id].1;
+            let ti = self.node_of[root_id].0;
+            self.trees[ti]
+                .compute_layout_with_measure(
+                    tnode,
+                    Size {
+                        width: AvailableSpace::Definite(viewport_w),
+                        height: AvailableSpace::Definite(viewport_h),
+                    },
+                    |inputs, _node, ctx, style| {
+                        taffy::compute::compute_leaf_layout(
+                            inputs,
+                            style,
+                            |_, _| 0.0,
+                            |known, avail| measure_text(ctx.and_then(|c| c.as_ref()), known, avail),
+                        )
+                    },
+                )
+                .expect("taffy layout");
+        }
+
+        extract_layout_output(
+            &self.trees,
+            &self.node_of,
+            &self.order,
+            app,
+            viewport_w,
+            viewport_h,
+        )
+    }
+}
+
+thread_local! {
+    static THREAD_LAYOUT_CACHE: std::cell::RefCell<LayoutCache> = std::cell::RefCell::new(LayoutCache::new());
+}
+
+/// Compute layout for the whole tree, leveraging persistent incremental caching
+/// across frames while preserving exact geometric results.
+pub fn compute(app: &App, viewport_w: f32, viewport_h: f32) -> LayoutOutput {
+    THREAD_LAYOUT_CACHE.with(|c| c.borrow_mut().compute(app, viewport_w, viewport_h))
+}
+
+/// Compute layout using an explicit caller-owned `LayoutCache`.
+pub fn compute_with_cache(
+    cache: &mut LayoutCache,
+    app: &App,
+    viewport_w: f32,
+    viewport_h: f32,
+) -> LayoutOutput {
+    cache.compute(app, viewport_w, viewport_h)
 }
 
 /// Out-of-flow overlay: zero parent footprint, positioned by ox/oy/w/h.
@@ -1269,5 +1536,128 @@ mod tests {
             w >= glyphs + 8.0,
             "pill box {w} must contain glyphs {glyphs} plus padding"
         );
+    }
+
+    #[test]
+    fn differential_incremental_matches_full_rebuild_all_operations() {
+        let mut app = App::new("win");
+        app.add(
+            "win",
+            Component::new("header", Role::Header, "Header")
+                .with_prop("h", "48")
+                .with_prop("text", "Initial Header"),
+        );
+        app.add(
+            "win",
+            Component::new("main", Role::Panel, "Main")
+                .with_prop("layout", "column")
+                .with_prop("flex_grow", "1")
+                .with_prop("gap", "8"),
+        );
+        app.add(
+            "main",
+            Component::new("counter", Role::Text, "Counter")
+                .with_prop("text", "Count: 0")
+                .with_prop("font_size", "16"),
+        );
+        app.add(
+            "main",
+            Component::new("btn", Role::Button, "Button")
+                .with_prop("text", "Submit")
+                .with_prop("h", "36"),
+        );
+        app.add(
+            "win",
+            Component::new("popup", Role::Overlay, "Popup")
+                .with_prop("overlay", "true")
+                .with_prop("ox", "50")
+                .with_prop("oy", "50")
+                .with_prop("w", "200")
+                .with_prop("h", "100")
+                .with_prop("text", "Modal info"),
+        );
+
+        let mut cache = LayoutCache::new();
+
+        // 1. Initial layout: incremental cache output MUST bitwise match compute_full
+        let initial_inc = cache.compute(&app, 800.0, 600.0);
+        let initial_full = compute_full(&app, 800.0, 600.0);
+        assert_eq!(
+            initial_inc, initial_full,
+            "initial incremental layout matches full rebuild"
+        );
+
+        // 2. Incremental text mutations: 20 sequential updates
+        for i in 1..=20 {
+            app.get_mut("counter")
+                .unwrap()
+                .props
+                .insert("text".to_string(), format!("Count: {i} - active"));
+            let inc = cache.compute(&app, 800.0, 600.0);
+            let full = compute_full(&app, 800.0, 600.0);
+            assert_eq!(inc, full, "text mutation at step {i} matches full rebuild");
+        }
+
+        // 3. Incremental style mutations: flex_grow, heights, padding, gap
+        for pad in [0, 4, 8, 16] {
+            app.get_mut("main")
+                .unwrap()
+                .props
+                .insert("pad".to_string(), pad.to_string());
+            app.get_mut("btn")
+                .unwrap()
+                .props
+                .insert("h".to_string(), (36 + pad).to_string());
+            let inc = cache.compute(&app, 800.0, 600.0);
+            let full = compute_full(&app, 800.0, 600.0);
+            assert_eq!(
+                inc, full,
+                "style mutation at pad {pad} matches full rebuild"
+            );
+        }
+
+        // 4. Viewport resizes
+        for (w, h) in [
+            (1024.0, 768.0),
+            (1280.0, 800.0),
+            (1920.0, 1080.0),
+            (800.0, 600.0),
+        ] {
+            let inc = cache.compute(&app, w, h);
+            let full = compute_full(&app, w, h);
+            assert_eq!(inc, full, "resize to {w}x{h} matches full rebuild");
+        }
+
+        // 5. Scrolling (scroll_y)
+        for sy in [0, 20, 50, 120] {
+            app.get_mut("main")
+                .unwrap()
+                .props
+                .insert("scroll_y".to_string(), sy.to_string());
+            let inc = cache.compute(&app, 800.0, 600.0);
+            let full = compute_full(&app, 800.0, 600.0);
+            assert_eq!(inc, full, "scroll_y {sy} matches full rebuild");
+        }
+
+        // 6. Dynamic child addition (topology expansion)
+        app.add(
+            "main",
+            Component::new("extra_label", Role::Text, "Extra")
+                .with_prop("text", "Dynamically added child")
+                .with_prop("h", "24"),
+        );
+        let inc = cache.compute(&app, 800.0, 600.0);
+        let full = compute_full(&app, 800.0, 600.0);
+        assert_eq!(inc, full, "topology addition matches full rebuild");
+
+        // 7. Dynamic child removal (topology retraction)
+        app.components.remove("extra_label");
+        app.get_mut("main")
+            .unwrap()
+            .children
+            .retain(|c| c.0 != "extra_label");
+        let inc = cache.compute(&app, 800.0, 600.0);
+        let full = compute_full(&app, 800.0, 600.0);
+        assert_eq!(inc, full, "topology removal matches full rebuild");
     }
 }

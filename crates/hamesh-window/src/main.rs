@@ -1639,15 +1639,11 @@ impl HameshWindowApp {
                 Act::Delta(d) => {
                     let idx = self.pi.as_ref().and_then(|l| l.live_index);
                     if let (Some(i), Some(w)) = (idx, self.widgets.as_mut()) {
-                        if let Some(m) = w.feed.messages.get_mut(i) {
-                            m.text.push_str(&d);
-                            changed = true;
-                        }
+                        w.feed.append_to_message(i, &d);
+                        changed = true;
                     } else if let (Some(i), Some(c)) = (idx, self.console.as_mut()) {
-                        if let Some(m) = c.widgets.feed.messages.get_mut(i) {
-                            m.text.push_str(&d);
-                            changed = true;
-                        }
+                        c.widgets.feed.append_to_message(i, &d);
+                        changed = true;
                     }
                 }
                 Act::Done { text, aborted } => {

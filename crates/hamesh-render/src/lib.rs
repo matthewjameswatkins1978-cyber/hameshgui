@@ -185,32 +185,42 @@ fn blit_text(pix: &mut Pixmap, node: &hamesh_scene::SceneNode, paint_rect: &hame
         }
     }
     let (fw, fh) = (pix.width() as i32, pix.height() as i32);
+    let fw_u = pix.width() as usize;
+    let [tr, tg, tb, _] = node.text_rgba;
+    let data = pix.data_mut();
+
     for g in &glyphs {
         let (x0, y0) = hamesh_text::glyph_origin(g, ox, oy);
-        for (i, a) in g.alpha.iter().enumerate() {
-            if *a < 8 {
+        for row in 0..g.h {
+            let py = y0 + row as i32;
+            if py < clip_y0 as i32 || py >= clip_y1 as i32 || py < 0 || py >= fh {
                 continue;
             }
-            let px = x0 + (i as u32 % g.w) as i32;
-            let py = y0 + (i as u32 / g.w) as i32;
-            // Clip to the paintable rect (node rect ∩ ancestor clip)
-            // AND the frame.
-            if px < clip_x0 as i32
-                || py < clip_y0 as i32
-                || px >= clip_x1 as i32
-                || py >= clip_y1 as i32
-                || px < 0
-                || py < 0
-                || px >= fw
-                || py >= fh
-            {
-                continue;
-            }
-            let mut p = Paint::default();
-            let [tr, tg, tb, _] = node.text_rgba;
-            p.set_color(Color::from_rgba8(tr, tg, tb, *a));
-            if let Some(dot) = SkRect::from_xywh(px as f32, py as f32, 1.0, 1.0) {
-                pix.fill_rect(dot, &p, Transform::identity(), None);
+            let row_start = row as usize * g.w as usize;
+            let dest_row_offset = py as usize * (fw_u * 4);
+            for col in 0..g.w {
+                let a = g.alpha[row_start + col as usize];
+                if a < 8 {
+                    continue;
+                }
+                let px = x0 + col as i32;
+                if px < clip_x0 as i32 || px >= clip_x1 as i32 || px < 0 || px >= fw {
+                    continue;
+                }
+                let dest_idx = dest_row_offset + px as usize * 4;
+                let sa = a as u32;
+                let inv_sa = 255 - sa;
+                let sr = (tr as u32 * sa + 127) / 255;
+                let sg = (tg as u32 * sa + 127) / 255;
+                let sb = (tb as u32 * sa + 127) / 255;
+                let dr = data[dest_idx] as u32;
+                let dg = data[dest_idx + 1] as u32;
+                let db = data[dest_idx + 2] as u32;
+                let da = data[dest_idx + 3] as u32;
+                data[dest_idx] = (sr + (dr * inv_sa + 127) / 255).min(255) as u8;
+                data[dest_idx + 1] = (sg + (dg * inv_sa + 127) / 255).min(255) as u8;
+                data[dest_idx + 2] = (sb + (db * inv_sa + 127) / 255).min(255) as u8;
+                data[dest_idx + 3] = (sa + (da * inv_sa + 127) / 255).min(255) as u8;
             }
         }
     }
@@ -262,15 +272,56 @@ fn rounded_path(rect: &hamesh_layout::Rect, radius: f32) -> Option<Path> {
 /// never an alternative source of truth: the key must uniquely describe
 /// the thing being cached. Revisions + dimensions do NOT — independent
 /// scenes share them routinely (every headless test builds rev 1 at a
-/// fixed viewport). So the key is a hash over the serialized scene:
-/// every field paint can read is in the identity by construction, and
-/// any future visual field that serializes joins it automatically.
+/// fixed viewport).
+///
+/// Hashing is direct over every visual and structural field paint reads,
+/// avoiding costly JSON serialization and heap allocation per frame.
 /// Two scenes share a key only if they paint identically.
 fn fingerprint(scene: &Scene) -> u64 {
     use std::hash::{Hash, Hasher};
-    let bytes = serde_json::to_vec(scene).expect("scene serializes");
     let mut h = std::collections::hash_map::DefaultHasher::new();
-    bytes.hash(&mut h);
+    scene.viewport_w.to_bits().hash(&mut h);
+    scene.viewport_h.to_bits().hash(&mut h);
+    scene.nodes.len().hash(&mut h);
+    for n in &scene.nodes {
+        n.id.hash(&mut h);
+        n.role.hash(&mut h);
+        n.visible.hash(&mut h);
+        n.ghost.hash(&mut h);
+        n.z.hash(&mut h);
+        n.color.hash(&mut h);
+        n.rect.x.to_bits().hash(&mut h);
+        n.rect.y.to_bits().hash(&mut h);
+        n.rect.w.to_bits().hash(&mut h);
+        n.rect.h.to_bits().hash(&mut h);
+        n.radius.to_bits().hash(&mut h);
+        n.border_w.to_bits().hash(&mut h);
+        n.border_rgba.hash(&mut h);
+        n.fill_frac.map(f32::to_bits).hash(&mut h);
+        n.fill_rgba.hash(&mut h);
+        n.icon.hash(&mut h);
+        n.text.hash(&mut h);
+        n.font_size.to_bits().hash(&mut h);
+        n.line_height.map(f32::to_bits).hash(&mut h);
+        n.lines.hash(&mut h);
+        n.text_rgba.hash(&mut h);
+        n.origin[0].to_bits().hash(&mut h);
+        n.origin[1].to_bits().hash(&mut h);
+        n.caret_x.map(f32::to_bits).hash(&mut h);
+        n.focused.hash(&mut h);
+        n.font_family.hash(&mut h);
+        for (tag, val) in &n.font_vars {
+            tag.hash(&mut h);
+            val.to_bits().hash(&mut h);
+        }
+        n.font_style.hash(&mut h);
+        n.tracking.to_bits().hash(&mut h);
+        n.clip.x.to_bits().hash(&mut h);
+        n.clip.y.to_bits().hash(&mut h);
+        n.clip.w.to_bits().hash(&mut h);
+        n.clip.h.to_bits().hash(&mut h);
+        n.overflow.hash(&mut h);
+    }
     h.finish()
 }
 
@@ -332,6 +383,9 @@ fn render_uncached(scene: &Scene, w: u32, h: u32) -> Pixmap {
     // Background.
     pix.fill(Color::from_rgba8(10, 15, 17, 255));
 
+    let mut cached_clip: Option<hamesh_layout::Rect> = None;
+    let mut cached_mask: Option<tiny_skia::Mask> = None;
+
     for node in &scene.nodes {
         if !node.visible || node.ghost {
             continue;
@@ -342,7 +396,11 @@ fn render_uncached(scene: &Scene, w: u32, h: u32) -> Pixmap {
         // progress bars and icons keep their position and size, and
         // text keeps its resolved origin (bounded per-pixel below).
         let mask = if node.overflow {
-            clip_mask(&node.clip, w, h)
+            if cached_clip.as_ref() != Some(&node.clip) {
+                cached_mask = clip_mask(&node.clip, w, h);
+                cached_clip = Some(node.clip.clone());
+            }
+            cached_mask.as_ref()
         } else {
             None
         };
@@ -356,7 +414,7 @@ fn render_uncached(scene: &Scene, w: u32, h: u32) -> Pixmap {
                     &paint,
                     FillRule::Winding,
                     Transform::identity(),
-                    mask.as_ref(),
+                    mask,
                 );
             }
             if node.border_w > 0.0 {
@@ -376,7 +434,7 @@ fn render_uncached(scene: &Scene, w: u32, h: u32) -> Pixmap {
                         width: node.border_w,
                         ..Default::default()
                     };
-                    pix.stroke_path(&bp, &paint_b, &stroke, Transform::identity(), mask.as_ref());
+                    pix.stroke_path(&bp, &paint_b, &stroke, Transform::identity(), mask);
                 }
             }
         } else {
@@ -384,7 +442,7 @@ fn render_uncached(scene: &Scene, w: u32, h: u32) -> Pixmap {
                 continue;
             };
             // Simple rounded look: draw rect; overlay translucency shows through.
-            pix.fill_rect(r, &paint, Transform::identity(), mask.as_ref());
+            pix.fill_rect(r, &paint, Transform::identity(), mask);
             if node.border_w > 0.0 {
                 let mut paint_b = Paint::default();
                 let [br, bg, bb2, ba] = node.border_rgba;
@@ -400,7 +458,7 @@ fn render_uncached(scene: &Scene, w: u32, h: u32) -> Pixmap {
                 pb.line_to(r.x(), r.y() + r.height());
                 pb.close();
                 if let Some(bp) = pb.finish() {
-                    pix.stroke_path(&bp, &paint_b, &stroke, Transform::identity(), mask.as_ref());
+                    pix.stroke_path(&bp, &paint_b, &stroke, Transform::identity(), mask);
                 }
             }
         }
@@ -424,11 +482,11 @@ fn render_uncached(scene: &Scene, w: u32, h: u32) -> Pixmap {
                             &paint_f,
                             FillRule::Winding,
                             Transform::identity(),
-                            mask.as_ref(),
+                            mask,
                         );
                     }
                 } else if let Some(r) = SkRect::from_xywh(bar.x, bar.y, bar.w, bar.h) {
-                    pix.fill_rect(r, &paint_f, Transform::identity(), mask.as_ref());
+                    pix.fill_rect(r, &paint_f, Transform::identity(), mask);
                 }
             }
         }
@@ -451,13 +509,7 @@ fn render_uncached(scene: &Scene, w: u32, h: u32) -> Pixmap {
                         line_join: tiny_skia::LineJoin::Round,
                         ..Default::default()
                     };
-                    pix.stroke_path(
-                        &ipath,
-                        &paint_i,
-                        &stroke,
-                        Transform::identity(),
-                        mask.as_ref(),
-                    );
+                    pix.stroke_path(&ipath, &paint_i, &stroke, Transform::identity(), mask);
                 }
             }
         }

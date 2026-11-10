@@ -240,6 +240,23 @@ impl Feed {
         self.messages.len() - 1
     }
 
+    /// Append text delta to an existing message and invalidate its cached height.
+    pub fn append_to_message(&mut self, idx: usize, delta: &str) {
+        if let Some(m) = self.messages.get_mut(idx) {
+            m.text.push_str(delta);
+            if let Some(h) = self.heights.get_mut(idx) {
+                *h = -1.0;
+            }
+        }
+    }
+
+    /// Invalidate the cached height for a message at `idx`.
+    pub fn invalidate_height(&mut self, idx: usize) {
+        if let Some(h) = self.heights.get_mut(idx) {
+            *h = -1.0;
+        }
+    }
+
     pub fn relayout(&mut self, width: f32) {
         self.layout_width = width;
         for (i, m) in self.messages.iter().enumerate() {

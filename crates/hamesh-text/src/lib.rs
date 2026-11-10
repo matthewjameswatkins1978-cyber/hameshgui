@@ -208,6 +208,7 @@ pub fn ellipsize(text: &str, max_advance: f32, font_size: f32, spec: &FontSpec) 
 /// Owned parley layout: safe to hand to CPU (swash) and GPU (vello)
 /// consumers. The `Layout` owns its font data (Arc-backed), so no
 /// `FontContext` needs to outlive it — verified by the compiler.
+#[derive(Clone)]
 pub struct TextLayout {
     layout: parley::Layout<peniko::Brush>,
     vars: Vec<([u8; 4], f32)>,
@@ -322,6 +323,41 @@ impl FontSpec {
     }
 }
 
+#[derive(Clone, Debug)]
+enum TextKey<'a> {
+    Owned(u64, String, u32, u32, Option<u32>, u64),
+    Borrowed(u64, &'a str, u32, u32, Option<u32>, u64),
+}
+
+impl<'a> TextKey<'a> {
+    fn as_parts(&self) -> (u64, &str, u32, u32, Option<u32>, u64) {
+        match self {
+            TextKey::Owned(g, s, w, sz, lh, fp) => (*g, s.as_str(), *w, *sz, *lh, *fp),
+            TextKey::Borrowed(g, s, w, sz, lh, fp) => (*g, *s, *w, *sz, *lh, *fp),
+        }
+    }
+}
+
+impl<'a> std::hash::Hash for TextKey<'a> {
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        self.as_parts().hash(state);
+    }
+}
+
+impl<'a, 'b> PartialEq<TextKey<'b>> for TextKey<'a> {
+    fn eq(&self, other: &TextKey<'b>) -> bool {
+        self.as_parts() == other.as_parts()
+    }
+}
+
+impl<'a> Eq for TextKey<'a> {}
+
+thread_local! {
+    static LAYOUT_SHAPE_CACHE: std::cell::RefCell<std::collections::HashMap<TextKey<'static>, TextLayout>> =
+        std::cell::RefCell::new(std::collections::HashMap::new());
+    static LAYOUT_SHAPE_GEN: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+}
+
 impl TextLayout {
     /// Lay out text. `line_height` is an absolute px line box
     /// (parley `LineHeight::Absolute`); `None` keeps the font's
@@ -350,13 +386,59 @@ impl TextLayout {
         line_height: Option<f32>,
         spec: &FontSpec,
     ) -> Self {
-        // Every shaping thread carries the vendored faces: the first
-        // shape on a thread loads them (guarded, amortized), so no
-        // caller — app, drill, or test — can shape a fallback where
-        // a profile face was meant. Explicit `register_fonts_from_dir`
-        // calls (e.g. at startup) stay the deterministic path; this
-        // only closes the ordering hole that poisoned shared caches.
         register_fonts_from_dir(&bundled_fonts_dir());
+        let cur_gen = font_generation();
+        let fp = spec.fingerprint();
+        let max_w_bits = max_width.to_bits();
+        let font_sz_bits = font_size.to_bits();
+        let lh_bits = line_height.map(|v| v.to_bits());
+
+        LAYOUT_SHAPE_CACHE.with(|cache| {
+            LAYOUT_SHAPE_GEN.with(|gen_cell| {
+                let mut c = cache.borrow_mut();
+                if gen_cell.get() != cur_gen {
+                    c.clear();
+                    gen_cell.set(cur_gen);
+                } else {
+                    let borrowed_str: &'static str = unsafe { std::mem::transmute(text) };
+                    let key = TextKey::Borrowed(
+                        cur_gen,
+                        borrowed_str,
+                        max_w_bits,
+                        font_sz_bits,
+                        lh_bits,
+                        fp,
+                    );
+                    if let Some(hit) = c.get(&key) {
+                        return hit.clone();
+                    }
+                }
+
+                let val = Self::shape_uncached(text, max_width, font_size, line_height, spec);
+                if c.len() >= 1024 {
+                    c.clear();
+                }
+                let owned_key = TextKey::Owned(
+                    cur_gen,
+                    text.to_string(),
+                    max_w_bits,
+                    font_sz_bits,
+                    lh_bits,
+                    fp,
+                );
+                c.insert(owned_key, val.clone());
+                val
+            })
+        })
+    }
+
+    fn shape_uncached(
+        text: &str,
+        max_width: f32,
+        font_size: f32,
+        line_height: Option<f32>,
+        spec: &FontSpec,
+    ) -> Self {
         FONT_CX.with(|fcx| {
             LAYOUT_CX.with(|lcx| {
                 let mut fcx = fcx.borrow_mut();
