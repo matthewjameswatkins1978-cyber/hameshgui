@@ -690,7 +690,7 @@ pub fn picker(s: &mut Scope, id: &str, spec: PickerSpec) {
 mod tests {
     use super::*;
     use hamesh_core::App;
-    use hamesh_widgets::{ListView, Picker};
+    use hamesh_widgets::{Hit, ListView, Picker};
 
     fn app_with_list(rows: &[ListRow], view: &mut ListView, viewport_h: f32) -> App {
         let mut app = App::new("win");
@@ -1118,17 +1118,16 @@ mod tests {
             let cx = n.rect.x + n.rect.w / 2.0;
             let cy = n.rect.y + n.rect.h / 2.0;
             // The label leaf wins the hit (deeper z); what matters
-            // is that it climbs to the same option identity.
+            // is that the shared router climbs to the same identity.
             let hit = hamesh_scene::hit_test(&app, &scene, cx, cy).expect("hit");
-            let mut cur = hit;
-            let pick = loop {
-                let c = app.get(&cur).expect("route node");
-                if let Some(v) = c.props.get("pick") {
-                    break v.clone();
-                }
-                cur = c.parent.as_ref().expect("route parent").0.clone();
+            let Hit::PickOption { option: pick, .. } = Hit::of(&app, &hit) else {
+                panic!("hit resolves to option {j}, got {:?}", Hit::of(&app, &hit));
             };
-            assert_eq!(pick, j.to_string(), "hit resolves to option {j}");
+            assert_eq!(
+                pick.to_string(),
+                j.to_string(),
+                "hit resolves to option {j}"
+            );
             p.highlight_at_viewport(cy - pop.y);
             assert_eq!(p.highlight(), Some(j), "pointer row {j} highlights row {j}");
         }

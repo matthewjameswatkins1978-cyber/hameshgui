@@ -18,6 +18,8 @@
 
 use std::ops::Range;
 
+use super::Key;
+
 /// A navigation intent, independent of any particular key code. An
 /// application maps native keys to these once, in its input layer.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -28,6 +30,46 @@ pub enum Nav {
     PageDown,
     Home,
     End,
+}
+
+/// Shared keyboard navigation for a list zone: arrows, paging, ends.
+/// Returns `None` when the key is not list navigation, so the driver
+/// keeps its own semantics for the rest (type-ahead, commit, focus).
+pub fn list_nav(view: &mut ListView, key: &Key) -> Option<bool> {
+    let nav = match key {
+        Key::Up => Nav::Up,
+        Key::Down => Nav::Down,
+        Key::PageUp => Nav::PageUp,
+        Key::PageDown => Nav::PageDown,
+        Key::Home => Nav::Home,
+        Key::End => Nav::End,
+        _ => return None,
+    };
+    Some(view.nav(nav))
+}
+
+/// Shared keyboard navigation for a picker zone: the highlight moves,
+/// the value only changes on commit. Same `None` contract as `list_nav`.
+pub fn picker_nav(picker: &mut Picker, key: &Key) -> Option<bool> {
+    let nav = match key {
+        Key::Up => Nav::Up,
+        Key::Down => Nav::Down,
+        Key::PageUp => Nav::PageUp,
+        Key::PageDown => Nav::PageDown,
+        Key::Home => Nav::Home,
+        Key::End => Nav::End,
+        _ => return None,
+    };
+    Some(picker.nav(nav))
+}
+
+/// Row position of an item identity inside a filtered view.
+/// The reusable selection principle: selection names an ITEM, never
+/// a row. Rows shift under filtering; items do not. A driver keeps the
+/// selected item across query changes and derives the row per frame —
+/// `None` means the item is filtered out (keep the item, show no row).
+pub fn filtered_row(filtered: &[usize], item: usize) -> Option<usize> {
+    filtered.iter().position(|&i| i == item)
 }
 
 /// A scrollable, selectable list of rows of uniform height.
@@ -638,6 +680,39 @@ mod tests {
         l.set_count(n);
         l.set_viewport(viewport);
         l
+    }
+
+    #[test]
+    fn filtered_row_tracks_items_not_rows() {
+        // Selection names the item; the row is derived per filter.
+        let shown = vec![0, 2, 5];
+        assert_eq!(filtered_row(&shown, 2), Some(1));
+        assert_eq!(filtered_row(&shown, 5), Some(2));
+        assert_eq!(filtered_row(&shown, 1), None, "filtered out keeps no row");
+        assert_eq!(filtered_row(&[], 0), None);
+    }
+
+    #[test]
+    fn shared_nav_helpers_cover_arrows_paging_and_ends() {
+        use super::super::Key;
+        let mut l = list(10, 100.0);
+        assert_eq!(list_nav(&mut l, &Key::Down), Some(true));
+        assert_eq!(l.selected(), Some(0));
+        assert_eq!(list_nav(&mut l, &Key::PageDown), Some(true));
+        assert_eq!(l.selected(), Some(5));
+        assert_eq!(list_nav(&mut l, &Key::Home), Some(true));
+        assert_eq!(l.selected(), Some(0));
+        assert_eq!(list_nav(&mut l, &Key::End), Some(true));
+        assert_eq!(l.selected(), Some(9));
+        // Non-navigation keys are not ours: the driver keeps them.
+        assert_eq!(list_nav(&mut l, &Key::Char('x')), None);
+        assert_eq!(list_nav(&mut l, &Key::Enter), None);
+        assert_eq!(list_nav(&mut l, &Key::Tab), None);
+        let mut p = Picker::new((0..10).map(|i| format!("Item {i}")).collect());
+        p.open();
+        assert_eq!(picker_nav(&mut p, &Key::End), Some(true));
+        assert_eq!(p.highlight(), Some(9));
+        assert_eq!(picker_nav(&mut p, &Key::Char('x')), None);
     }
 
     #[test]

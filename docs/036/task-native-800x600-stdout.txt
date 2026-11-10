@@ -1,0 +1,10 @@
+TASKS open: task queue + filter + inspector — click, wheel, type, Tab, F12 dumps Eye evidence, Esc quits
+HAMESH window open: 800x600 — click, Space, R, I, Esc
+EYE app_rev=45 scene_rev=8 frames=7 nodes=43
+TASKS click: selected task row 2
+TASKS click: filter opened
+TASKS key: filter type: true
+EYE app_rev=57 scene_rev=12 frames=58 nodes=55
+TASKS click: task 2 done (popup dismissed)
+EYE app_rev=45 scene_rev=14 frames=91 nodes=43
+trace -> target/hamesh-window-trace.json

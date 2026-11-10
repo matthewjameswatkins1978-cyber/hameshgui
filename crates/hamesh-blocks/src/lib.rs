@@ -161,6 +161,34 @@ pub fn divider(s: &mut Scope, id: &str) {
     s.leaf(c);
 }
 
+/// Surface token chip: a rounded swatch of the named surface with its
+/// token name beneath. Design-system evidence, not decoration: the chip
+/// paints the exact token components reference.
+pub fn swatch(s: &mut Scope, id: &str, surface_token: &str) {
+    col(
+        s,
+        id,
+        LayoutOpts {
+            gap: hamesh_theme::space::XS,
+            ..Default::default()
+        },
+        |t| {
+            let mut chip = styled(Role::Panel, &format!("{id}-chip"), surface_token, "Swatch");
+            chip.props
+                .insert("surface".to_string(), surface_token.to_string());
+            chip.props
+                .insert("radius".to_string(), hamesh_theme::radius::MD.to_string());
+            chip.props.insert("border".to_string(), "1".to_string());
+            chip.props
+                .insert("border_token".to_string(), "border".to_string());
+            chip.props.insert("w".to_string(), "88".to_string());
+            chip.props.insert("h".to_string(), "40".to_string());
+            t.leaf(chip);
+            caption(t, &format!("{id}-name"), surface_token);
+        },
+    );
+}
+
 // ---- Typography ----
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -519,14 +547,14 @@ pub enum ButtonVariant {
 }
 
 impl ButtonVariant {
-    fn surface(&self) -> &str {
+    fn surface(&self) -> &'static str {
         match self {
             Self::Primary => "accent",
             Self::Outline => "surface",
             Self::Ghost => "raised",
         }
     }
-    fn text(&self) -> &str {
+    fn text(&self) -> &'static str {
         match self {
             Self::Primary => "bg",
             Self::Outline => "text",
@@ -542,10 +570,51 @@ impl ButtonVariant {
     }
 }
 
+/// Interaction state of a button. The driver owns the state (hover
+/// from the pointer, pressed from the press, disabled from the model);
+/// the composer only paints it, following the theme state-system
+/// contract: disabled > pressed > hover > rest, focus as a ring.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ButtonState {
+    Rest,
+    Hover,
+    Pressed,
+    Disabled,
+}
+
+impl ButtonState {
+    fn surface(&self, variant: &ButtonVariant) -> &'static str {
+        match (self, variant) {
+            (Self::Disabled, _) => "surface",
+            (_, ButtonVariant::Primary) => match self {
+                Self::Rest => "accent",
+                Self::Hover => "accent_hover",
+                Self::Pressed => "accent_active",
+                Self::Disabled => "surface",
+            },
+            (Self::Rest, ButtonVariant::Outline) => "surface",
+            (Self::Hover, _) => "raised",
+            (Self::Pressed, _) => "surface",
+            (Self::Rest, v) => v.surface(),
+        }
+    }
+    fn text(&self, variant: &ButtonVariant) -> &'static str {
+        match self {
+            Self::Disabled => "muted",
+            _ if matches!(variant, ButtonVariant::Primary) => "bg",
+            Self::Hover => "text",
+            Self::Pressed => "text_dim",
+            Self::Rest => variant.text(),
+        }
+    }
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct ButtonOpts {
     pub variant: ButtonVariant,
     pub action: String,
+    pub state: ButtonState,
+    pub focused: bool,
 }
 
 impl ButtonOpts {
@@ -553,25 +622,50 @@ impl ButtonOpts {
         Self {
             variant,
             action: action.to_string(),
+            state: ButtonState::Rest,
+            focused: false,
         }
+    }
+    pub fn with_state(mut self, state: ButtonState) -> Self {
+        self.state = state;
+        self
+    }
+    pub fn focused(mut self, focused: bool) -> Self {
+        self.focused = focused;
+        self
     }
 }
 
 /// Labeled button with a named action. The host app owns the action —
-/// Blocks never invent behaviour, only declare the intent.
+/// Blocks never invent behaviour, only declare the intent. The driver
+/// supplies interaction state; the composer paints the theme contract.
 pub fn button(s: &mut Scope, id: &str, label: &str, o: ButtonOpts) {
     let (size, lh) = hamesh_theme::type_ramp::LABEL;
     let mut c = styled(Role::Button, id, label, "Button");
+    // Disabled paint and disabled hit-testing are one decision: a
+    // muted button never acts, and automation reports it honestly.
+    c.enabled = !matches!(o.state, ButtonState::Disabled);
     c.props.insert("text".to_string(), label.to_string());
     c.props.insert("font_size".to_string(), size.to_string());
     c.props.insert("lh".to_string(), lh.to_string());
-    c.props
-        .insert("text_token".to_string(), o.variant.text().to_string());
-    c.props
-        .insert("surface".to_string(), o.variant.surface().to_string());
+    c.props.insert(
+        "text_token".to_string(),
+        o.state.text(&o.variant).to_string(),
+    );
+    c.props.insert(
+        "surface".to_string(),
+        o.state.surface(&o.variant).to_string(),
+    );
     c.props
         .insert("radius".to_string(), hamesh_theme::radius::SM.to_string());
-    c.props.insert("border".to_string(), "1".to_string());
+    c.props.insert(
+        "border".to_string(),
+        if o.focused { "2" } else { "1" }.to_string(),
+    );
+    c.props.insert(
+        "border_token".to_string(),
+        if o.focused { "focus" } else { "border" }.to_string(),
+    );
     c.props
         .insert("h".to_string(), hamesh_theme::control::H.to_string());
     c.props.insert("pad".to_string(), "8".to_string());
@@ -747,6 +841,100 @@ fn reconcile_prop(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn swatch_paints_the_named_surface_token() {
+        let mut app = App::new("win");
+        {
+            let mut s = Scope::root(&mut app, "win");
+            swatch(&mut s, "sw", "accent");
+        }
+        let chip = app.get("sw-chip").unwrap();
+        assert_eq!(
+            chip.props.get("surface").map(|s| s.as_str()),
+            Some("accent")
+        );
+        assert_eq!(chip.props.get("radius").map(|s| s.as_str()), Some("10"));
+        let name = app.get("sw-name").unwrap();
+        assert_eq!(name.props.get("text").map(|s| s.as_str()), Some("accent"));
+    }
+
+    #[test]
+    fn button_states_follow_the_theme_contract() {
+        // Every variant paints rest/hover/pressed/disabled from the
+        // state contract; focus is a ring, never a fill change.
+        fn look(
+            variant: ButtonVariant,
+            state: ButtonState,
+            focused: bool,
+        ) -> (String, String, String, String) {
+            let mut app = App::new("win");
+            {
+                let mut s = Scope::root(&mut app, "win");
+                button(
+                    &mut s,
+                    "b",
+                    "Go",
+                    ButtonOpts::new(variant, "go")
+                        .with_state(state)
+                        .focused(focused),
+                );
+            }
+            let b = app.get("b").unwrap();
+            let p = |k: &str| b.props.get(k).cloned().unwrap_or_default();
+            (
+                p("surface"),
+                p("text_token"),
+                p("border"),
+                p("border_token"),
+            )
+        }
+        // Primary walks the accent ramp; dark text stays legible.
+        assert_eq!(
+            look(ButtonVariant::Primary, ButtonState::Rest, false),
+            ("accent".into(), "bg".into(), "1".into(), "border".into())
+        );
+        assert_eq!(
+            look(ButtonVariant::Primary, ButtonState::Hover, false).0,
+            "accent_hover"
+        );
+        assert_eq!(
+            look(ButtonVariant::Primary, ButtonState::Pressed, false),
+            (
+                "accent_active".into(),
+                "bg".into(),
+                "1".into(),
+                "border".into()
+            )
+        );
+        // Outline/Ghost rise on hover, settle on press.
+        assert_eq!(
+            look(ButtonVariant::Outline, ButtonState::Hover, false).0,
+            "raised"
+        );
+        assert_eq!(
+            look(ButtonVariant::Outline, ButtonState::Pressed, false).0,
+            "surface"
+        );
+        assert_eq!(
+            look(ButtonVariant::Ghost, ButtonState::Rest, false).0,
+            "raised"
+        );
+        // Disabled is uniform and quiet on every variant.
+        for v in [
+            ButtonVariant::Primary,
+            ButtonVariant::Outline,
+            ButtonVariant::Ghost,
+        ] {
+            let (surface, text, _, _) = look(v, ButtonState::Disabled, false);
+            assert_eq!((surface.as_str(), text.as_str()), ("surface", "muted"));
+        }
+        // Focus rings the control without touching the fill.
+        let rest = look(ButtonVariant::Outline, ButtonState::Rest, false);
+        let focused = look(ButtonVariant::Outline, ButtonState::Rest, true);
+        assert_eq!(focused.0, rest.0, "focus never moves paint");
+        assert_eq!((focused.2.as_str(), focused.3.as_str()), ("2", "focus"));
+    }
 
     #[test]
     fn scope_nesting_builds_tree() {

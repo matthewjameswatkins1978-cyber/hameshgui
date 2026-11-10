@@ -167,6 +167,15 @@ struct HameshWindowApp {
     /// from hamesh-gallery. Same intents as the headless drill.
     use_gallery: bool,
     gallery: Option<hamesh_gallery::Gallery>,
+    /// Tasks mode (`--tasks`): the 036 second composition (task queue +
+    /// status filter + detail inspector) from hamesh-tasks. Same shared
+    /// `Hit` router as the headless drill.
+    use_tasks: bool,
+    tasks: Option<hamesh_tasks::Tasks>,
+    /// Sheet mode (`--sheet`): the 036 design-system sheet over the same
+    /// shared `Hit` router and `Key` vocabulary as gallery and tasks.
+    use_sheet: bool,
+    sheet: Option<hamesh_sheet::Sheet>,
     shift_held: bool,
     m3_smoke_done: bool,
     /// M4 live loop: background Pi worker link. `None` unless `--pi`.
@@ -208,6 +217,10 @@ impl HameshWindowApp {
             use_blocks_pi: false,
             use_gallery: false,
             gallery: None,
+            use_tasks: false,
+            tasks: None,
+            use_sheet: false,
+            sheet: None,
             shift_held: false,
             m3_smoke_done: false,
             pi: None,
@@ -475,7 +488,7 @@ impl HameshWindowApp {
 
     /// Gallery keyboard: map the winit event onto the shared intent core.
     fn gallery_key(&mut self, event: &winit::event::KeyEvent, event_loop: &ActiveEventLoop) {
-        use hamesh_gallery::GKey;
+        use hamesh_widgets::Key;
         let Some(g) = self.gallery.as_mut() else {
             return;
         };
@@ -483,35 +496,35 @@ impl HameshWindowApp {
             self.dump_inspection();
             return;
         }
-        let mut keys: Vec<GKey> = Vec::new();
+        let mut keys: Vec<Key> = Vec::new();
         if let Some(text) = event.text.as_ref() {
             for c in text.chars() {
                 // Tab arrives as text too; the physical key wins below.
                 if c != '\r' && c != '\n' && c != '\t' {
-                    keys.push(GKey::Char(c));
+                    keys.push(Key::Char(c));
                 }
             }
         }
         match event.physical_key {
-            PhysicalKey::Code(KeyCode::ArrowUp) => keys.push(GKey::Up),
-            PhysicalKey::Code(KeyCode::ArrowDown) => keys.push(GKey::Down),
-            PhysicalKey::Code(KeyCode::PageUp) => keys.push(GKey::PageUp),
-            PhysicalKey::Code(KeyCode::PageDown) => keys.push(GKey::PageDown),
-            PhysicalKey::Code(KeyCode::Home) => keys.push(GKey::Home),
-            PhysicalKey::Code(KeyCode::End) => keys.push(GKey::End),
+            PhysicalKey::Code(KeyCode::ArrowUp) => keys.push(Key::Up),
+            PhysicalKey::Code(KeyCode::ArrowDown) => keys.push(Key::Down),
+            PhysicalKey::Code(KeyCode::PageUp) => keys.push(Key::PageUp),
+            PhysicalKey::Code(KeyCode::PageDown) => keys.push(Key::PageDown),
+            PhysicalKey::Code(KeyCode::Home) => keys.push(Key::Home),
+            PhysicalKey::Code(KeyCode::End) => keys.push(Key::End),
             PhysicalKey::Code(KeyCode::Enter) | PhysicalKey::Code(KeyCode::NumpadEnter) => {
-                keys.push(GKey::Enter)
+                keys.push(Key::Enter)
             }
-            PhysicalKey::Code(KeyCode::Backspace) => keys.push(GKey::Backspace),
-            PhysicalKey::Code(KeyCode::Tab) => keys.push(GKey::Tab),
-            PhysicalKey::Code(KeyCode::Escape) => keys.push(GKey::Escape),
+            PhysicalKey::Code(KeyCode::Backspace) => keys.push(Key::Backspace),
+            PhysicalKey::Code(KeyCode::Tab) => keys.push(Key::Tab),
+            PhysicalKey::Code(KeyCode::Escape) => keys.push(Key::Escape),
             _ => {}
         }
         if keys.is_empty() {
             return;
         }
         // Escape with a closed popup quits; otherwise the popup owns it.
-        let escape_quits = keys.len() == 1 && matches!(keys[0], GKey::Escape) && !g.fonts.is_open();
+        let escape_quits = keys.len() == 1 && matches!(keys[0], Key::Escape) && !g.fonts.is_open();
         let names: Vec<String> = g.layer_rows.iter().map(|r| r.label.clone()).collect();
         let mut notes = Vec::new();
         for k in keys {
@@ -525,6 +538,189 @@ impl HameshWindowApp {
         if escape_quits {
             event_loop.exit();
         }
+    }
+
+    /// Swap the M1 demo tree for the 036 tasks tree (called once, on open).
+    fn enter_tasks(&mut self) {
+        self.tasks = Some(hamesh_tasks::Tasks::new());
+        self.refresh_tasks();
+        self.trace.record(
+            "tasks.enter",
+            "task queue + filter + inspector live; shared Hit router as the drill",
+            self.app.revision,
+            None,
+        );
+    }
+
+    /// Recompose the tasks tree from widget state after any intent.
+    fn refresh_tasks(&mut self) {
+        if let Some(t) = self.tasks.as_mut() {
+            let (app, _) = hamesh_tasks::refresh(t, self.size.0 as f32, self.size.1 as f32);
+            self.app = app;
+            self.scene_rev += 1;
+        }
+    }
+
+    /// Tasks mouse: the shared press path, then trace.
+    fn tasks_click(&mut self) {
+        let (_, scene) = self.layout_and_scene();
+        let note = match self.tasks.as_mut() {
+            Some(t) => hamesh_tasks::press(t, &self.app, &scene, self.cursor.0, self.cursor.1),
+            None => "tasks not entered".to_string(),
+        };
+        self.refresh_tasks();
+        self.trace
+            .record("tasks.click", &note, self.app.revision, None);
+        println!("TASKS click: {note}");
+    }
+
+    /// Tasks keyboard: map the winit event onto the shared intent core.
+    /// Shift+Tab walks focus back (three zones: list, filter, actions).
+    fn tasks_key(&mut self, event: &winit::event::KeyEvent, event_loop: &ActiveEventLoop) {
+        use hamesh_widgets::Key;
+        let Some(t) = self.tasks.as_mut() else {
+            return;
+        };
+        if event.physical_key == PhysicalKey::Code(KeyCode::F12) {
+            self.dump_inspection();
+            return;
+        }
+        let mut keys: Vec<Key> = Vec::new();
+        if let Some(text) = event.text.as_ref() {
+            for c in text.chars() {
+                if c != '\r' && c != '\n' && c != '\t' {
+                    keys.push(Key::Char(c));
+                }
+            }
+        }
+        match event.physical_key {
+            PhysicalKey::Code(KeyCode::ArrowUp) => keys.push(Key::Up),
+            PhysicalKey::Code(KeyCode::ArrowDown) => keys.push(Key::Down),
+            PhysicalKey::Code(KeyCode::PageUp) => keys.push(Key::PageUp),
+            PhysicalKey::Code(KeyCode::PageDown) => keys.push(Key::PageDown),
+            PhysicalKey::Code(KeyCode::Home) => keys.push(Key::Home),
+            PhysicalKey::Code(KeyCode::End) => keys.push(Key::End),
+            PhysicalKey::Code(KeyCode::Enter) | PhysicalKey::Code(KeyCode::NumpadEnter) => {
+                keys.push(Key::Enter)
+            }
+            PhysicalKey::Code(KeyCode::Backspace) => keys.push(Key::Backspace),
+            PhysicalKey::Code(KeyCode::Tab) => keys.push(if self.shift_held {
+                Key::ShiftTab
+            } else {
+                Key::Tab
+            }),
+            PhysicalKey::Code(KeyCode::Escape) => keys.push(Key::Escape),
+            _ => {}
+        }
+        if keys.is_empty() {
+            return;
+        }
+        let escape_quits = keys.len() == 1 && matches!(keys[0], Key::Escape) && !t.filter.is_open();
+        let mut notes = Vec::new();
+        for k in keys {
+            notes.push(hamesh_tasks::key(t, k));
+        }
+        let note = notes.join(" | ");
+        self.refresh_tasks();
+        self.trace
+            .record("tasks.key", &note, self.app.revision, None);
+        println!("TASKS key: {note}");
+        if escape_quits {
+            event_loop.exit();
+        }
+    }
+
+    /// Swap the M1 demo tree for the 036 design-system sheet (called once, on open).
+    fn enter_sheet(&mut self) {
+        self.sheet = Some(hamesh_sheet::Sheet::new());
+        self.refresh_sheet();
+        self.trace.record(
+            "sheet.enter",
+            "design-system sheet live; same Hit/Key core as the headless drill",
+            self.app.revision,
+            None,
+        );
+    }
+
+    /// Recompose the sheet from widget state after any intent.
+    fn refresh_sheet(&mut self) {
+        if let Some(t) = self.sheet.as_mut() {
+            let (app, _) = hamesh_sheet::refresh(t, self.size.0 as f32, self.size.1 as f32);
+            self.app = app;
+            self.scene_rev += 1;
+        }
+    }
+
+    /// Sheet mouse: the shared press path, then trace.
+    fn sheet_click(&mut self) {
+        let (_, scene) = self.layout_and_scene();
+        let note = match self.sheet.as_mut() {
+            Some(t) => hamesh_sheet::press(t, &self.app, &scene, self.cursor.0, self.cursor.1),
+            None => "sheet not entered".to_string(),
+        };
+        self.refresh_sheet();
+        self.trace
+            .record("sheet.click", &note, self.app.revision, None);
+        println!("SHEET click: {note}");
+    }
+
+    /// Sheet keyboard: map the winit event onto the shared intent core.
+    fn sheet_key(&mut self, event: &winit::event::KeyEvent, event_loop: &ActiveEventLoop) {
+        use hamesh_widgets::Key;
+        let Some(t) = self.sheet.as_mut() else {
+            return;
+        };
+        if event.physical_key == PhysicalKey::Code(KeyCode::F12) {
+            self.dump_inspection();
+            return;
+        }
+        let mut keys: Vec<Key> = Vec::new();
+        if let Some(text) = event.text.as_ref() {
+            for c in text.chars() {
+                if c != '\r' && c != '\n' && c != '\t' {
+                    keys.push(Key::Char(c));
+                }
+            }
+        }
+        match event.physical_key {
+            PhysicalKey::Code(KeyCode::ArrowUp) => keys.push(Key::Up),
+            PhysicalKey::Code(KeyCode::ArrowDown) => keys.push(Key::Down),
+            PhysicalKey::Code(KeyCode::ArrowLeft) => keys.push(Key::Left),
+            PhysicalKey::Code(KeyCode::ArrowRight) => keys.push(Key::Right),
+            PhysicalKey::Code(KeyCode::PageUp) => keys.push(Key::PageUp),
+            PhysicalKey::Code(KeyCode::PageDown) => keys.push(Key::PageDown),
+            PhysicalKey::Code(KeyCode::Home) => keys.push(Key::Home),
+            PhysicalKey::Code(KeyCode::End) => keys.push(Key::End),
+            PhysicalKey::Code(KeyCode::Enter) | PhysicalKey::Code(KeyCode::NumpadEnter) => {
+                keys.push(Key::Enter)
+            }
+            PhysicalKey::Code(KeyCode::Backspace) => keys.push(Key::Backspace),
+            PhysicalKey::Code(KeyCode::Tab) => keys.push(if self.shift_held {
+                Key::ShiftTab
+            } else {
+                Key::Tab
+            }),
+            PhysicalKey::Code(KeyCode::Escape) => keys.push(Key::Escape),
+            _ => {}
+        }
+        if keys.is_empty() {
+            return;
+        }
+        // The sheet has no popup to own Escape: it quits like the
+        // gallery and tasks demos do when theirs is dismissed.
+        if keys.len() == 1 && matches!(keys[0], Key::Escape) {
+            event_loop.exit();
+            return;
+        }
+        let mut notes = Vec::new();
+        for k in keys {
+            notes.push(hamesh_sheet::key(t, k));
+        }
+        let note = notes.join(" | ");
+        self.refresh_sheet();
+        self.trace
+            .record("sheet.key", &note, self.app.revision, None);
+        println!("SHEET key: {note}");
     }
 
     /// M3 keyboard: map the winit event onto the shared `handle_key` core.
@@ -1288,6 +1484,14 @@ impl ApplicationHandler<UserEvent> for HameshWindowApp {
             self.enter_gallery();
             println!("GALLERY open: ListView + Picker workspace — click, wheel, type, Tab, F12 dumps Eye evidence, Esc quits");
         }
+        if self.use_tasks {
+            self.enter_tasks();
+            println!("TASKS open: task queue + filter + inspector — click, wheel, type, Tab, F12 dumps Eye evidence, Esc quits");
+        }
+        if self.use_sheet {
+            self.enter_sheet();
+            println!("SHEET open: design-system sheet — click, wheel, type, Tab, F12 dumps Eye evidence, Esc quits");
+        }
         if self.use_m3 {
             self.enter_m3();
             self.refresh_feed();
@@ -1406,6 +1610,12 @@ impl ApplicationHandler<UserEvent> for HameshWindowApp {
                 if self.use_gallery {
                     self.refresh_gallery();
                 }
+                if self.use_tasks {
+                    self.refresh_tasks();
+                }
+                if self.use_sheet {
+                    self.refresh_sheet();
+                }
                 if let Some(gpu) = self.gpu.as_mut() {
                     gpu.resize(self.size.0, self.size.1);
                 }
@@ -1434,11 +1644,39 @@ impl ApplicationHandler<UserEvent> for HameshWindowApp {
                         self.refresh_gallery();
                     }
                 }
+                if self.use_tasks {
+                    let (_, scene) = self.layout_and_scene();
+                    let changed = match self.tasks.as_mut() {
+                        Some(t) => {
+                            hamesh_tasks::hover(t, &scene, self.cursor.0, self.cursor.1, &self.app)
+                        }
+                        None => false,
+                    };
+                    if changed {
+                        self.refresh_tasks();
+                    }
+                }
+                if self.use_sheet {
+                    let (_, scene) = self.layout_and_scene();
+                    let changed = match self.sheet.as_mut() {
+                        Some(t) => {
+                            hamesh_sheet::hover(t, &scene, self.cursor.0, self.cursor.1, &self.app)
+                        }
+                        None => false,
+                    };
+                    if changed {
+                        self.refresh_sheet();
+                    }
+                }
             }
             WindowEvent::MouseInput { state, button, .. } => {
                 if state == ElementState::Pressed && button == MouseButton::Left {
                     if self.use_gallery {
                         self.gallery_click();
+                    } else if self.use_tasks {
+                        self.tasks_click();
+                    } else if self.use_sheet {
+                        self.sheet_click();
                     } else if self.use_m3 {
                         self.m3_click();
                     } else {
@@ -1469,6 +1707,14 @@ impl ApplicationHandler<UserEvent> for HameshWindowApp {
                 }
                 if self.use_gallery {
                     self.gallery_key(&event, event_loop);
+                    return;
+                }
+                if self.use_tasks {
+                    self.tasks_key(&event, event_loop);
+                    return;
+                }
+                if self.use_sheet {
+                    self.sheet_key(&event, event_loop);
                     return;
                 }
                 if self.use_m3 && event.physical_key != PhysicalKey::Code(KeyCode::Escape) {
@@ -1557,6 +1803,48 @@ impl ApplicationHandler<UserEvent> for HameshWindowApp {
                         self.refresh_gallery();
                         self.trace.record(
                             "gallery.wheel",
+                            &format!("dy={dy}"),
+                            self.app.revision,
+                            None,
+                        );
+                    }
+                } else if self.use_tasks {
+                    let dy = match delta {
+                        winit::event::MouseScrollDelta::LineDelta(_, y) => y * 60.0,
+                        winit::event::MouseScrollDelta::PixelDelta(p) => p.y as f32,
+                    };
+                    let (layout, _) = self.layout_and_scene();
+                    let scrolled = match self.tasks.as_mut() {
+                        Some(t) => {
+                            hamesh_tasks::wheel(t, &layout, self.cursor.0, self.cursor.1, dy)
+                        }
+                        None => false,
+                    };
+                    if scrolled {
+                        self.refresh_tasks();
+                        self.trace.record(
+                            "tasks.wheel",
+                            &format!("dy={dy}"),
+                            self.app.revision,
+                            None,
+                        );
+                    }
+                } else if self.use_sheet {
+                    let dy = match delta {
+                        winit::event::MouseScrollDelta::LineDelta(_, y) => y * 60.0,
+                        winit::event::MouseScrollDelta::PixelDelta(p) => p.y as f32,
+                    };
+                    let (layout, _) = self.layout_and_scene();
+                    let scrolled = match self.sheet.as_mut() {
+                        Some(t) => {
+                            hamesh_sheet::wheel(t, &layout, self.cursor.0, self.cursor.1, dy)
+                        }
+                        None => false,
+                    };
+                    if scrolled {
+                        self.refresh_sheet();
+                        self.trace.record(
+                            "sheet.wheel",
                             &format!("dy={dy}"),
                             self.app.revision,
                             None,
@@ -1682,6 +1970,8 @@ fn main() {
     // Eye, Hand); only the composition differs.
     app.use_blocks_pi = std::env::args().any(|a| a == "--blocks-pi");
     app.use_gallery = std::env::args().any(|a| a == "--gallery");
+    app.use_tasks = std::env::args().any(|a| a == "--tasks");
+    app.use_sheet = std::env::args().any(|a| a == "--sheet");
     if app.use_gallery {
         println!("GALLERY mode: ListView + Picker workspace from hamesh-gallery");
     }

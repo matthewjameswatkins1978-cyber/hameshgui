@@ -11,6 +11,7 @@ members = [
   "crates/hamesh-theme",
   "crates/hamesh-blocks",
   "crates/hamesh-gallery",
+  "crates/hamesh-sheet",
   "crates/hamesh-pi",
   "crates/hamesh-widgets",
   "crates/hamesh-window",
@@ -21,6 +22,8 @@ members = [
   "apps/hamesh-blocks-drill",
   "apps/hamesh-033-lab",
   "apps/hamesh-035-lab",
+  "apps/hamesh-036-lab",
+  "crates/hamesh-tasks",
   "apps/hamesh-mcp",
   "apps/hamesh-mcp-drill",
 ]
