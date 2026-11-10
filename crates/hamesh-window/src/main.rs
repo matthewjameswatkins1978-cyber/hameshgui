@@ -144,9 +144,14 @@ struct HameshWindowApp {
     app: App,
     trace: Trace,
     scene_rev: u64,
+    /// Most recently painted scene; static windows do not need fresh frames.
+    presented_rev: u64,
     window: Option<Arc<Window>>,
     context: Option<softbuffer::Context<Arc<Window>>>,
     surface: Option<softbuffer::Surface<Arc<Window>, Arc<Window>>>,
+    /// CPU presentation resources survive unchanged frames and resizes.
+    cpu_surface_dims: Option<(u32, u32)>,
+    cpu_pixels: Vec<u32>,
     gpu: Option<gpu::GpuState>,
     use_gpu: bool,
     proxy: Option<EventLoopProxy<UserEvent>>,
@@ -216,9 +221,12 @@ impl HameshWindowApp {
             app,
             trace: Trace::new(256),
             scene_rev: 1,
+            presented_rev: 0,
             window: None,
             context: None,
             surface: None,
+            cpu_surface_dims: None,
+            cpu_pixels: Vec::new(),
             gpu: None,
             use_gpu: false,
             proxy: None,
@@ -312,23 +320,17 @@ impl HameshWindowApp {
         }
         if self.use_gpu {
             self.paint_gpu();
-            if let Some(window) = &self.window {
-                window.request_redraw();
-            }
             return;
         }
-        // Render the scene BEFORE borrowing the surface (borrow discipline).
+        // Rasterize only on a requested redraw. Keep the conversion storage
+        // across frames; moving an unchanged window must not allocate or
+        // rebuild another scene on a busy self-triggered redraw loop.
         let (_layout, scene) = self.layout_and_scene();
         let frame = hamesh_render::render(&scene);
-        let Some(window) = &self.window else { return };
-        let Some(surface) = &mut self.surface else {
-            return;
-        };
         let src = frame.pixmap.data();
-        // tiny-skia stores premultiplied RGBA; softbuffer wants 0RGB u32.
-        let mut dst = vec![0u32; (w as usize) * (h as usize)];
+        self.cpu_pixels.resize((w as usize) * (h as usize), 0);
         let (pixels, _remainder) = src.as_chunks::<4>();
-        for (pixel, chunk) in dst.iter_mut().zip(pixels) {
+        for (pixel, chunk) in self.cpu_pixels.iter_mut().zip(pixels) {
             let (r, g, b, a) = (chunk[0], chunk[1], chunk[2], chunk[3]);
             let (r, g, b) = if a == 0 {
                 (0, 0, 0)
@@ -344,17 +346,23 @@ impl HameshWindowApp {
             };
             *pixel = (r << 16) | (g << 8) | b;
         }
+        let Some(surface) = self.surface.as_mut() else {
+            return;
+        };
         if let (Some(ww), Some(hh)) = (NonZeroU32::new(w), NonZeroU32::new(h)) {
-            if surface.resize(ww, hh).is_ok() {
-                if let Ok(mut buffer) = surface.buffer_mut() {
-                    buffer.copy_from_slice(&dst);
-                    if buffer.present().is_ok() {
-                        self.frames += 1;
-                    }
+            if self.cpu_surface_dims != Some((w, h)) {
+                if surface.resize(ww, hh).is_err() {
+                    return;
+                }
+                self.cpu_surface_dims = Some((w, h));
+            }
+            if let Ok(mut buffer) = surface.buffer_mut() {
+                buffer.copy_from_slice(&self.cpu_pixels);
+                if buffer.present().is_ok() {
+                    self.frames += 1;
                 }
             }
         }
-        window.request_redraw();
     }
 
     fn paint_gpu(&mut self) {
@@ -2557,6 +2565,8 @@ impl ApplicationHandler<UserEvent> for HameshWindowApp {
             .with_inner_size(winit::dpi::LogicalSize::new(800.0, 600.0));
         let window = Arc::new(event_loop.create_window(attrs).expect("create window"));
         self.window = Some(Arc::clone(&window));
+        self.presented_rev = 0;
+        self.cpu_surface_dims = None;
         if self.use_gpu {
             match gpu::GpuState::new(Arc::clone(&window), 800, 600) {
                 Ok(state) => {
@@ -3039,7 +3049,10 @@ impl ApplicationHandler<UserEvent> for HameshWindowApp {
                     }
                 }
             }
-            WindowEvent::RedrawRequested => self.paint(),
+            WindowEvent::RedrawRequested => {
+                self.paint();
+                self.presented_rev = self.scene_rev;
+            }
             _ => {}
         }
     }
@@ -3110,8 +3123,13 @@ impl ApplicationHandler<UserEvent> for HameshWindowApp {
                 return;
             }
         }
-        if let Some(window) = &self.window {
-            window.request_redraw();
+        // Keep the Poll-driven channel/timer service for this first slice,
+        // but paint only when the UI changed. A later slice can replace Poll
+        // with event-loop wakes once Pi worker notifications are wired.
+        if self.scene_rev != self.presented_rev {
+            if let Some(window) = &self.window {
+                window.request_redraw();
+            }
         }
     }
 }
