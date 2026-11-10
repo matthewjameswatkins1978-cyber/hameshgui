@@ -251,9 +251,9 @@ pub fn build(app: &App, layout: &LayoutOutput, scene_revision: u64) -> Scene {
                 &font_spec,
             );
             let oy = hamesh_text::run_oy(l.rect.h, text.is_empty(), lay.height());
-            let advance = hamesh_text::trim_box(&text, wrap_w, font_size, line_height, &font_spec)
-                .map(|t| t.advance)
-                .unwrap_or(lay.width());
+            let trim_info =
+                hamesh_text::trim_box(&text, wrap_w, font_size, line_height, &font_spec);
+            let advance = trim_info.as_ref().map(|t| t.advance).unwrap_or(lay.width());
             let halign = if avail_lines <= 1 {
                 hamesh_text::parse_halign(c.props.get("halign").map(|s| s.as_str()))
             } else {
@@ -271,8 +271,7 @@ pub fn build(app: &App, layout: &LayoutOutput, scene_revision: u64) -> Scene {
             };
             let tx = hamesh_text::align_origin_x(eff_align, pad, l.rect.w, advance);
             // Optical vertical shift from the final trim (None-safe).
-            let ty = match hamesh_text::trim_box(&text, wrap_w, font_size, line_height, &font_spec)
-            {
+            let ty = match &trim_info {
                 Some(t) => {
                     let (y0, y1) = (t.top + oy, t.bottom + oy);
                     oy + (l.rect.h / 2.0 - (y0 + y1) / 2.0)
@@ -282,20 +281,19 @@ pub fn build(app: &App, layout: &LayoutOutput, scene_revision: u64) -> Scene {
             let shift = ty - oy;
             let ink = hamesh_text::ink_box(&text, wrap_w, font_size, line_height, &font_spec)
                 .map(|b| [b.x0 + tx, b.y0 + oy + shift, b.x1 + tx, b.y1 + oy + shift]);
-            let (trim, metrics, baseline) =
-                match hamesh_text::trim_box(&text, wrap_w, font_size, line_height, &font_spec) {
-                    Some(t) => (
-                        Some([
-                            tx,
-                            t.top + oy + shift,
-                            tx + t.advance,
-                            t.bottom + oy + shift,
-                        ]),
-                        Some([t.ascent, t.descent, t.cap, t.line_height]),
-                        Some(t.baseline + oy + shift),
-                    ),
-                    None => (None, None, None),
-                };
+            let (trim, metrics, baseline) = match &trim_info {
+                Some(t) => (
+                    Some([
+                        tx,
+                        t.top + oy + shift,
+                        tx + t.advance,
+                        t.bottom + oy + shift,
+                    ]),
+                    Some([t.ascent, t.descent, t.cap, t.line_height]),
+                    Some(t.baseline + oy + shift),
+                ),
+                None => (None, None, None),
+            };
             // Content box (node-local): what padding declared.
             let content = [
                 pad,
