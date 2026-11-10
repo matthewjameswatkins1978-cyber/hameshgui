@@ -67,6 +67,11 @@ impl Gallery {
         }
     }
 
+    /// Focused zone name for the Eye: layers or picker.
+    pub fn focused_zone(&self) -> &str {
+        ["layers", "picker"][self.focus]
+    }
+
     fn narrow(&self, width: f32) -> bool {
         width < 1000.0
     }
@@ -592,6 +597,15 @@ mod tests {
             note.contains("dismissed"),
             "the note says what happened: {note}"
         );
+    }
+
+    #[test]
+    fn focused_zone_names_the_zone() {
+        let g = Gallery::new();
+        assert_eq!(g.focused_zone(), "layers");
+        let mut g2 = Gallery::new();
+        g2.focus = 1;
+        assert_eq!(g2.focused_zone(), "picker");
     }
 
     #[test]

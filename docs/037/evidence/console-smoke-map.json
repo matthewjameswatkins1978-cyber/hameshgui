@@ -1,0 +1,263 @@
+{
+  "app_revision": 15,
+  "scene_revision": 16,
+  "viewport_w": 800.0,
+  "viewport_h": 600.0,
+  "nodes": [
+    {
+      "id": "consoleapp",
+      "role": "Window",
+      "name": "root",
+      "parent": null,
+      "rect": {
+        "x": 0.0,
+        "y": 0.0,
+        "w": 800.0,
+        "h": 600.0
+      },
+      "visible": true,
+      "clipped": false,
+      "overflow": false,
+      "enabled": true,
+      "z": 0
+    },
+    {
+      "id": "console-header",
+      "role": "Panel",
+      "name": "console-header",
+      "parent": "consoleapp",
+      "rect": {
+        "x": 12.0,
+        "y": 12.0,
+        "w": 776.0,
+        "h": 58.0
+      },
+      "visible": true,
+      "clipped": false,
+      "overflow": false,
+      "enabled": true,
+      "z": 1
+    },
+    {
+      "id": "feed",
+      "role": "List",
+      "name": "feed",
+      "parent": "consoleapp",
+      "rect": {
+        "x": 12.0,
+        "y": 78.0,
+        "w": 776.0,
+        "h": 394.0
+      },
+      "visible": true,
+      "clipped": false,
+      "overflow": false,
+      "enabled": true,
+      "z": 1
+    },
+    {
+      "id": "composer",
+      "role": "TextInput",
+      "name": "composer",
+      "parent": "consoleapp",
+      "rect": {
+        "x": 12.0,
+        "y": 480.0,
+        "w": 776.0,
+        "h": 40.0
+      },
+      "visible": true,
+      "clipped": false,
+      "overflow": false,
+      "enabled": true,
+      "z": 1
+    },
+    {
+      "id": "console-actions",
+      "role": "Panel",
+      "name": "console-actions",
+      "parent": "consoleapp",
+      "rect": {
+        "x": 12.0,
+        "y": 528.0,
+        "w": 776.0,
+        "h": 60.0
+      },
+      "visible": true,
+      "clipped": false,
+      "overflow": false,
+      "enabled": true,
+      "z": 1
+    },
+    {
+      "id": "console-title",
+      "role": "Text",
+      "name": "console-title",
+      "parent": "console-header",
+      "rect": {
+        "x": 24.0,
+        "y": 24.0,
+        "w": 119.0,
+        "h": 34.0
+      },
+      "visible": true,
+      "clipped": false,
+      "overflow": false,
+      "enabled": true,
+      "z": 2
+    },
+    {
+      "id": "console-hspace",
+      "role": "Panel",
+      "name": "spacer",
+      "parent": "console-header",
+      "rect": {
+        "x": 151.0,
+        "y": 24.0,
+        "w": 54.0,
+        "h": 34.0
+      },
+      "visible": true,
+      "clipped": false,
+      "overflow": false,
+      "enabled": true,
+      "z": 2
+    },
+    {
+      "id": "console-status",
+      "role": "Status",
+      "name": "console-status",
+      "parent": "console-header",
+      "rect": {
+        "x": 213.0,
+        "y": 24.0,
+        "w": 53.0,
+        "h": 34.0
+      },
+      "visible": true,
+      "clipped": false,
+      "overflow": false,
+      "enabled": true,
+      "z": 2
+    },
+    {
+      "id": "console-model",
+      "role": "Text",
+      "name": "console-model",
+      "parent": "console-header",
+      "rect": {
+        "x": 274.0,
+        "y": 24.0,
+        "w": 163.0,
+        "h": 34.0
+      },
+      "visible": true,
+      "clipped": false,
+      "overflow": false,
+      "enabled": true,
+      "z": 2
+    },
+    {
+      "id": "console-session",
+      "role": "Text",
+      "name": "console-session",
+      "parent": "console-header",
+      "rect": {
+        "x": 445.0,
+        "y": 24.0,
+        "w": 242.0,
+        "h": 34.0
+      },
+      "visible": true,
+      "clipped": false,
+      "overflow": false,
+      "enabled": true,
+      "z": 2
+    },
+    {
+      "id": "console-count",
+      "role": "Text",
+      "name": "console-count",
+      "parent": "console-header",
+      "rect": {
+        "x": 695.0,
+        "y": 24.0,
+        "w": 81.0,
+        "h": 34.0
+      },
+      "visible": true,
+      "clipped": false,
+      "overflow": false,
+      "enabled": true,
+      "z": 2
+    },
+    {
+      "id": "msg_0",
+      "role": "ListItem",
+      "name": "message 0",
+      "parent": "feed",
+      "rect": {
+        "x": 24.0,
+        "y": 90.0,
+        "w": 752.0,
+        "h": 54.0
+      },
+      "visible": true,
+      "clipped": false,
+      "overflow": false,
+      "enabled": true,
+      "z": 2
+    },
+    {
+      "id": "msg_1",
+      "role": "ListItem",
+      "name": "message 1",
+      "parent": "feed",
+      "rect": {
+        "x": 24.0,
+        "y": 152.0,
+        "w": 752.0,
+        "h": 54.0
+      },
+      "visible": true,
+      "clipped": false,
+      "overflow": false,
+      "enabled": true,
+      "z": 2
+    },
+    {
+      "id": "console-aspacer",
+      "role": "Panel",
+      "name": "spacer",
+      "parent": "console-actions",
+      "rect": {
+        "x": 24.0,
+        "y": 540.0,
+        "w": 658.0,
+        "h": 36.0
+      },
+      "visible": true,
+      "clipped": false,
+      "overflow": false,
+      "enabled": true,
+      "z": 2
+    },
+    {
+      "id": "console-abort",
+      "role": "Button",
+      "name": "Abort run",
+      "parent": "console-actions",
+      "rect": {
+        "x": 690.0,
+        "y": 540.0,
+        "w": 86.0,
+        "h": 36.0
+      },
+      "visible": true,
+      "clipped": false,
+      "overflow": false,
+      "enabled": false,
+      "z": 2
+    }
+  ]
+}

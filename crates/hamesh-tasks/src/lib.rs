@@ -95,6 +95,11 @@ impl Tasks {
         self.sel
     }
 
+    /// Focused zone name for the Eye: list, filter or actions.
+    pub fn focused_zone(&self) -> &str {
+        ["list", "filter", "actions"][self.focus]
+    }
+
     /// Re-derive the list cursor from the stored item after the query
     /// changes. A filtered-out item keeps its identity with no row.
     fn resync_selection(&mut self) {
@@ -723,6 +728,16 @@ mod tests {
         let note = key(&mut t, Key::Enter);
         assert!(note.contains("task 2 done"), "{note}");
         assert!(t.tasks[2].done);
+    }
+
+    #[test]
+    fn focused_zone_names_the_zone() {
+        let mut t = Tasks::new();
+        assert_eq!(t.focused_zone(), "list");
+        t.focus = 1;
+        assert_eq!(t.focused_zone(), "filter");
+        t.focus = 2;
+        assert_eq!(t.focused_zone(), "actions");
     }
 
     #[test]

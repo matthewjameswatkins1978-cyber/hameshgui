@@ -1,0 +1,107 @@
+[
+  {
+    "seq": 1,
+    "kind": "console.enter",
+    "detail": "Pi session console live; same intents as the M3 drill",
+    "app_revision": 15,
+    "frame_ref": null
+  },
+  {
+    "seq": 2,
+    "kind": "pi.worker",
+    "detail": "background pi worker spawned (--pi)",
+    "app_revision": 15,
+    "frame_ref": null
+  },
+  {
+    "seq": 3,
+    "kind": "inspect.serve",
+    "detail": "127.0.0.1:54656 (dev token)",
+    "app_revision": 15,
+    "frame_ref": null
+  },
+  {
+    "seq": 4,
+    "kind": "window.open",
+    "detail": "800x600 physical",
+    "app_revision": 15,
+    "frame_ref": null
+  },
+  {
+    "seq": 5,
+    "kind": "window.resize",
+    "detail": "1904x984",
+    "app_revision": 15,
+    "frame_ref": null
+  },
+  {
+    "seq": 6,
+    "kind": "window.resize",
+    "detail": "800x600",
+    "app_revision": 15,
+    "frame_ref": null
+  },
+  {
+    "seq": 7,
+    "kind": "window.resize",
+    "detail": "800x600",
+    "app_revision": 15,
+    "frame_ref": null
+  },
+  {
+    "seq": 8,
+    "kind": "console.smoke_focus",
+    "detail": "success=true hit=Some(\"composer\")",
+    "app_revision": 15,
+    "frame_ref": null
+  },
+  {
+    "seq": 9,
+    "kind": "console.pi_queued",
+    "detail": "submitted \"Reply with only this exact token and nothing else: HAMESH-SMOKE-OK\" to worker",
+    "app_revision": 15,
+    "frame_ref": null
+  },
+  {
+    "seq": 10,
+    "kind": "console.key",
+    "detail": "-> submitted \"Reply with only this exact token and nothing else: HAMESH-SMOKE-OK\"",
+    "app_revision": 15,
+    "frame_ref": null
+  },
+  {
+    "seq": 11,
+    "kind": "console.smoke_keys",
+    "detail": "applied keys -> submitted \"Reply with only this exact token and nothing else: HAMESH-SMOKE-OK\"",
+    "app_revision": 15,
+    "frame_ref": null
+  },
+  {
+    "seq": 12,
+    "kind": "console.smoke_script",
+    "detail": "typed + submitted + scrolled; messages=1 composer=\"\" focus=feed",
+    "app_revision": 15,
+    "frame_ref": null
+  },
+  {
+    "seq": 13,
+    "kind": "console.pi_done",
+    "detail": "aborted=false chars=15 messages=2",
+    "app_revision": 15,
+    "frame_ref": null
+  },
+  {
+    "seq": 14,
+    "kind": "console.pi_assert",
+    "detail": "PASS",
+    "app_revision": 15,
+    "frame_ref": null
+  },
+  {
+    "seq": 15,
+    "kind": "eye.dump",
+    "detail": "app_rev=15 scene_rev=16 frames=2343 -> target/hamesh-window-map.json + target/hamesh-window.png",
+    "app_revision": 15,
+    "frame_ref": "target/hamesh-window.png"
+  }
+]
