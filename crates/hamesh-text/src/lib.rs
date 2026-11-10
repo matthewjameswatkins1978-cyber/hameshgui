@@ -111,7 +111,13 @@ pub fn font_generation() -> u64 {
 /// (`assets/fonts` at the workspace root). Tests and apps resolve
 /// it from here so every crate shares one path.
 pub fn bundled_fonts_dir() -> std::path::PathBuf {
-    std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../assets/fonts")
+    let manifest_path =
+        std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../assets/fonts");
+    if manifest_path.exists() {
+        manifest_path
+    } else {
+        std::path::PathBuf::from("assets/fonts")
+    }
 }
 
 /// Register additional fonts (e.g. [`bundled_fonts_dir`]) with this
