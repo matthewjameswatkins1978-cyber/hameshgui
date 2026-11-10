@@ -529,14 +529,28 @@ impl PiClient {
             .to_string())
     }
 
-    /// Send a prompt, collect streamed text, resolve at `agent_settled`.
-    /// `progress` receives each delta live (feed the conversation view).
-    /// `idle_timeout` bounds the whole wait, not each delta.
+    /// Send a prompt and collect streamed text until settlement.
+    /// The original API retains its non-cancellable behaviour.
     pub fn prompt_and_wait(
         &mut self,
         message: &str,
         progress: &mut dyn FnMut(&str),
         idle_timeout: Duration,
+    ) -> Result<(String, bool), PiError> {
+        let mut never_abort = || false;
+        self.prompt_and_wait_with_abort(message, progress, idle_timeout, &mut never_abort)
+    }
+
+    /// Like prompt_and_wait, but poll for a cancellation request while the
+    /// model is working, including periods with no text deltas. The caller
+    /// can drain a control channel in `abort_requested`; returning true
+    /// sends precisely one Pi abort command before settlement.
+    pub fn prompt_and_wait_with_abort(
+        &mut self,
+        message: &str,
+        progress: &mut dyn FnMut(&str),
+        idle_timeout: Duration,
+        abort_requested: &mut dyn FnMut() -> bool,
     ) -> Result<(String, bool), PiError> {
         let deadline = Instant::now() + idle_timeout;
         let disposition = self.send_prompt(message, idle_timeout)?;
@@ -544,19 +558,30 @@ impl PiClient {
             return Ok((String::new(), false));
         }
         let mut text = String::new();
+        let mut abort_sent = false;
         loop {
+            // Always poll controls, even after abort, so the caller can
+            // defer other queued jobs until the current run has settled.
+            let wants_abort = abort_requested();
+            if wants_abort && !abort_sent {
+                self.abort(Duration::from_secs(10))?;
+                abort_sent = true;
+            }
             let left = deadline.saturating_duration_since(Instant::now());
             if left.is_zero() {
                 return Err(PiError::Timeout("prompt_and_wait settled".to_string()));
             }
-            match self.next_event(left)? {
-                PiEvent::TextDelta(d) => {
+            // The reader thread keeps receiving events; a short bounded
+            // wait makes abort responsive when the model is silent.
+            match self.next_event(left.min(Duration::from_millis(50))) {
+                Ok(PiEvent::TextDelta(d)) => {
                     text.push_str(&d);
                     progress(&d);
                 }
-                PiEvent::Settled { aborted } => return Ok((text, aborted)),
-                PiEvent::TransportClosed => return Err(PiError::Closed),
-                PiEvent::Raw(_) => {}
+                Ok(PiEvent::Settled { aborted }) => return Ok((text, aborted)),
+                Ok(PiEvent::TransportClosed) => return Err(PiError::Closed),
+                Ok(PiEvent::Raw(_)) | Err(PiError::Timeout(_)) => {}
+                Err(e) => return Err(e),
             }
         }
     }
