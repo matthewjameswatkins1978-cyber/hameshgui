@@ -1270,7 +1270,17 @@ fn pi_worker(jobs: std::sync::mpsc::Receiver<PiJob>, events: std::sync::mpsc::Se
         let _ = events.send(PiEvt::Failed(format!("handshake: {e}")));
         return;
     }
-    while let Ok(job) = jobs.recv() {
+    // Commands arriving during a run must not be lost. Abort is handled
+    // immediately by the active request; other commands wait their turn.
+    let mut deferred = std::collections::VecDeque::<PiJob>::new();
+    loop {
+        let job = match deferred.pop_front() {
+            Some(job) => job,
+            None => match jobs.recv() {
+                Ok(job) => job,
+                Err(_) => break,
+            },
+        };
         match job {
             PiJob::Abort => {
                 let _ = client.abort(std::time::Duration::from_secs(10));
@@ -1285,12 +1295,22 @@ fn pi_worker(jobs: std::sync::mpsc::Receiver<PiJob>, events: std::sync::mpsc::Se
             },
             PiJob::Prompt(text) => {
                 let _ = events.send(PiEvt::Started);
-                let r = client.prompt_and_wait(
+                let r = client.prompt_and_wait_with_abort(
                     &text,
                     &mut |d: &str| {
                         let _ = events.send(PiEvt::Delta(d.to_string()));
                     },
                     std::time::Duration::from_secs(180),
+                    &mut || {
+                        let mut abort = false;
+                        while let Ok(next) = jobs.try_recv() {
+                            match next {
+                                PiJob::Abort => abort = true,
+                                other => deferred.push_back(other),
+                            }
+                        }
+                        abort
+                    },
                 );
                 match r {
                     Ok((text, aborted)) => {
