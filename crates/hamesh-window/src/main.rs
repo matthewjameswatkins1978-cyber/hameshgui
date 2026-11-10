@@ -25,7 +25,7 @@ mod pi_panel;
 
 use std::num::NonZeroU32;
 use std::sync::Arc;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 use winit::application::ApplicationHandler;
 use winit::event::{ElementState, Ime, MouseButton, WindowEvent};
 use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop, EventLoopProxy};
@@ -144,9 +144,16 @@ struct HameshWindowApp {
     app: App,
     trace: Trace,
     scene_rev: u64,
+    /// Most recently painted scene; static windows do not need fresh frames.
+    presented_rev: u64,
     window: Option<Arc<Window>>,
     context: Option<softbuffer::Context<Arc<Window>>>,
     surface: Option<softbuffer::Surface<Arc<Window>, Arc<Window>>>,
+    /// CPU presentation resources survive unchanged frames and resizes.
+    cpu_surface_dims: Option<(u32, u32)>,
+    cpu_pixels: Vec<u32>,
+    /// Cached scene avoids re-shaping and re-layout when content is unchanged.
+    last_scene: Option<(u64, (u32, u32), hamesh_scene::Scene)>,
     gpu: Option<gpu::GpuState>,
     use_gpu: bool,
     proxy: Option<EventLoopProxy<UserEvent>>,
@@ -216,9 +223,13 @@ impl HameshWindowApp {
             app,
             trace: Trace::new(256),
             scene_rev: 1,
+            presented_rev: 0,
             window: None,
             context: None,
             surface: None,
+            cpu_surface_dims: None,
+            cpu_pixels: Vec::new(),
+            last_scene: None,
             gpu: None,
             use_gpu: false,
             proxy: None,
@@ -258,6 +269,19 @@ impl HameshWindowApp {
         let layout = hamesh_layout::compute(&self.app, self.size.0 as f32, self.size.1 as f32);
         let scene = hamesh_scene::build(&self.app, &layout, self.scene_rev);
         (layout, scene)
+    }
+
+    fn get_or_build_scene(&mut self) -> hamesh_scene::Scene {
+        let key = (self.scene_rev, self.size);
+        if let Some((rev, size, scene)) = &self.last_scene {
+            if *rev == key.0 && *size == key.1 {
+                return scene.clone();
+            }
+        }
+        let layout = hamesh_layout::compute(&self.app, self.size.0 as f32, self.size.1 as f32);
+        let scene = hamesh_scene::build(&self.app, &layout, self.scene_rev);
+        self.last_scene = Some((key.0, key.1, scene.clone()));
+        scene
     }
 
     /// Feed width for layout: viewport minus chrome. Kept in one place so
@@ -312,53 +336,66 @@ impl HameshWindowApp {
         }
         if self.use_gpu {
             self.paint_gpu();
-            if let Some(window) = &self.window {
-                window.request_redraw();
-            }
             return;
         }
-        // Render the scene BEFORE borrowing the surface (borrow discipline).
-        let (_layout, scene) = self.layout_and_scene();
-        let frame = hamesh_render::render(&scene);
-        let Some(window) = &self.window else { return };
-        let Some(surface) = &mut self.surface else {
+        if self.surface.is_none() {
+            return;
+        }
+        let (Some(ww), Some(hh)) = (NonZeroU32::new(w), NonZeroU32::new(h)) else {
             return;
         };
-        let src = frame.pixmap.data();
-        // tiny-skia stores premultiplied RGBA; softbuffer wants 0RGB u32.
-        let mut dst = vec![0u32; (w as usize) * (h as usize)];
-        let (pixels, _remainder) = src.as_chunks::<4>();
-        for (pixel, chunk) in dst.iter_mut().zip(pixels) {
-            let (r, g, b, a) = (chunk[0], chunk[1], chunk[2], chunk[3]);
-            let (r, g, b) = if a == 0 {
-                (0, 0, 0)
-            } else if a == 255 {
-                (r as u32, g as u32, b as u32)
-            } else {
-                let a = a as u32;
-                (
-                    (r as u32) * 255 / a,
-                    (g as u32) * 255 / a,
-                    (b as u32) * 255 / a,
-                )
-            };
-            *pixel = (r << 16) | (g << 8) | b;
-        }
-        if let (Some(ww), Some(hh)) = (NonZeroU32::new(w), NonZeroU32::new(h)) {
-            if surface.resize(ww, hh).is_ok() {
-                if let Ok(mut buffer) = surface.buffer_mut() {
-                    buffer.copy_from_slice(&dst);
-                    if buffer.present().is_ok() {
-                        self.frames += 1;
-                    }
+
+        let dims_changed = self.cpu_surface_dims != Some((w, h));
+        let scene_changed = self.scene_rev != self.presented_rev;
+
+        // If neither dimensions nor scene changed, and we have pixel data,
+        // reuse the converted presentation buffer rather than re-rasterizing.
+        if dims_changed || scene_changed || self.cpu_pixels.is_empty() {
+            let scene = self.get_or_build_scene();
+            let frame = hamesh_render::render(&scene);
+            let src = frame.pixmap.data();
+            self.cpu_pixels.resize((w as usize) * (h as usize), 0);
+            let (pixels, _remainder) = src.as_chunks::<4>();
+            for (pixel, chunk) in self.cpu_pixels.iter_mut().zip(pixels) {
+                let (r, g, b, a) = (chunk[0], chunk[1], chunk[2], chunk[3]);
+                let (r, g, b) = if a == 0 {
+                    (0, 0, 0)
+                } else if a == 255 {
+                    (r as u32, g as u32, b as u32)
+                } else {
+                    let a = a as u32;
+                    (
+                        (r as u32) * 255 / a,
+                        (g as u32) * 255 / a,
+                        (b as u32) * 255 / a,
+                    )
+                };
+                *pixel = (r << 16) | (g << 8) | b;
+            }
+            if dims_changed {
+                let Some(surface) = self.surface.as_mut() else {
+                    return;
+                };
+                if surface.resize(ww, hh).is_err() {
+                    return;
                 }
+                self.cpu_surface_dims = Some((w, h));
             }
         }
-        window.request_redraw();
+
+        let Some(surface) = self.surface.as_mut() else {
+            return;
+        };
+        if let Ok(mut buffer) = surface.buffer_mut() {
+            buffer.copy_from_slice(&self.cpu_pixels);
+            if buffer.present().is_ok() {
+                self.frames += 1;
+            }
+        }
     }
 
     fn paint_gpu(&mut self) {
-        let (_layout, scene) = self.layout_and_scene();
+        let scene = self.get_or_build_scene();
         let Some(gpu) = self.gpu.as_mut() else {
             self.trace.record(
                 "gpu.unavailable",
@@ -370,15 +407,17 @@ impl HameshWindowApp {
         };
         match gpu.paint(&scene) {
             Ok(nodes) => {
-                self.frames += 1;
-                if self.frames == 1 {
-                    self.trace.record(
-                        "gpu.first_frame",
-                        &format!("presented {nodes} vello nodes"),
-                        self.app.revision,
-                        None,
-                    );
-                    println!("GPU first frame: {nodes} nodes presented");
+                if nodes > 0 {
+                    self.frames += 1;
+                    if self.frames == 1 {
+                        self.trace.record(
+                            "gpu.first_frame",
+                            &format!("presented {nodes} vello nodes"),
+                            self.app.revision,
+                            None,
+                        );
+                        println!("GPU first frame: {nodes} nodes presented");
+                    }
                 }
             }
             Err(e) => {
@@ -2577,6 +2616,8 @@ impl ApplicationHandler<UserEvent> for HameshWindowApp {
             .with_inner_size(winit::dpi::LogicalSize::new(800.0, 600.0));
         let window = Arc::new(event_loop.create_window(attrs).expect("create window"));
         self.window = Some(Arc::clone(&window));
+        self.presented_rev = 0;
+        self.cpu_surface_dims = None;
         if self.use_gpu {
             match gpu::GpuState::new(Arc::clone(&window), 800, 600) {
                 Ok(state) => {
@@ -2713,7 +2754,11 @@ impl ApplicationHandler<UserEvent> for HameshWindowApp {
                 event_loop.exit();
             }
             WindowEvent::Resized(size) => {
-                self.size = (size.width.max(1), size.height.max(1));
+                let new_size = (size.width.max(1), size.height.max(1));
+                if self.size == new_size {
+                    return;
+                }
+                self.size = new_size;
                 self.scene_rev += 1;
                 if self.use_gallery {
                     self.refresh_gallery();
@@ -2739,11 +2784,27 @@ impl ApplicationHandler<UserEvent> for HameshWindowApp {
                     self.app.revision,
                     None,
                 );
+                if let Some(window) = &self.window {
+                    window.request_redraw();
+                }
+            }
+            WindowEvent::ScaleFactorChanged { .. } => {
+                self.scene_rev += 1;
+                if let Some(window) = &self.window {
+                    window.request_redraw();
+                }
+            }
+            WindowEvent::Occluded(occluded) => {
+                if !occluded {
+                    if let Some(window) = &self.window {
+                        window.request_redraw();
+                    }
+                }
             }
             WindowEvent::CursorMoved { position, .. } => {
                 self.cursor = (position.x as f32, position.y as f32);
                 if self.use_gallery {
-                    let (_, scene) = self.layout_and_scene();
+                    let scene = self.get_or_build_scene();
                     let changed = match self.gallery.as_mut() {
                         Some(g) => hamesh_gallery::hover(
                             g,
@@ -2759,7 +2820,7 @@ impl ApplicationHandler<UserEvent> for HameshWindowApp {
                     }
                 }
                 if self.use_tasks {
-                    let (_, scene) = self.layout_and_scene();
+                    let scene = self.get_or_build_scene();
                     let changed = match self.tasks.as_mut() {
                         Some(t) => {
                             hamesh_tasks::hover(t, &scene, self.cursor.0, self.cursor.1, &self.app)
@@ -2771,7 +2832,7 @@ impl ApplicationHandler<UserEvent> for HameshWindowApp {
                     }
                 }
                 if self.use_sheet {
-                    let (_, scene) = self.layout_and_scene();
+                    let scene = self.get_or_build_scene();
                     let changed = match self.sheet.as_mut() {
                         Some(t) => {
                             hamesh_sheet::hover(t, &scene, self.cursor.0, self.cursor.1, &self.app)
@@ -3059,7 +3120,15 @@ impl ApplicationHandler<UserEvent> for HameshWindowApp {
                     }
                 }
             }
-            WindowEvent::RedrawRequested => self.paint(),
+            WindowEvent::RedrawRequested => {
+                let before = self.frames;
+                self.paint();
+                // A failed present is not evidence of a visible frame.
+                // Try again at the next wake rather than losing the update.
+                if self.frames > before {
+                    self.presented_rev = self.scene_rev;
+                }
+            }
             _ => {}
         }
     }
@@ -3107,7 +3176,7 @@ impl ApplicationHandler<UserEvent> for HameshWindowApp {
         }
         if let Some(deadline) = self.smoke_deadline {
             if Instant::now() >= deadline {
-                // Fire once: with ControlFlow::Poll the loop can re-enter
+                // Fire once: a timer or external event can re-enter
                 // about_to_wait before event_loop.exit() takes effect,
                 // which used to double-dump inspection, snapshot, trace
                 // and verdict lines.
@@ -3130,9 +3199,17 @@ impl ApplicationHandler<UserEvent> for HameshWindowApp {
                 return;
             }
         }
-        if let Some(window) = &self.window {
-            window.request_redraw();
+        // Poll Pi channels and pending deadlines at a bounded 16 ms cadence.
+        // Window/inspector events still wake immediately; unlike Poll this
+        // does not spin the UI thread while the window is unchanged.
+        if self.scene_rev != self.presented_rev {
+            if let Some(window) = &self.window {
+                window.request_redraw();
+            }
         }
+        event_loop.set_control_flow(ControlFlow::WaitUntil(
+            Instant::now() + Duration::from_millis(16),
+        ));
     }
 }
 
@@ -3149,7 +3226,9 @@ fn main() {
     let event_loop = EventLoop::<UserEvent>::with_user_event()
         .build()
         .expect("event loop");
-    event_loop.set_control_flow(ControlFlow::Poll);
+    event_loop.set_control_flow(ControlFlow::WaitUntil(
+        Instant::now() + Duration::from_millis(16),
+    ));
     let mut app = HameshWindowApp::new();
     app.use_gpu = std::env::args().any(|a| a == "--gpu");
     if app.use_gpu {
