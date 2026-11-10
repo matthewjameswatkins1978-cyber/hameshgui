@@ -118,6 +118,114 @@ fn connect_fake() -> (PiClient, std::thread::JoinHandle<()>) {
 }
 
 #[test]
+fn abort_interrupts_a_silent_in_flight_prompt() {
+    // The fake accepts a prompt but sends no deltas or settlement until
+    // an abort arrives. A serial worker that processes Abort only AFTER
+    // prompt_and_wait would deadlock here.
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let addr = listener.local_addr().unwrap();
+    let server = std::thread::spawn(move || {
+        let (stream, _) = listener.accept().unwrap();
+        let mut reader = BufReader::new(stream.try_clone().unwrap());
+        let mut writer = stream;
+        let mut line = String::new();
+
+        reader.read_line(&mut line).unwrap();
+        let prompt: serde_json::Value = serde_json::from_str(&line).unwrap();
+        assert_eq!(prompt["type"], "prompt");
+        respond(
+            &mut writer,
+            prompt["id"].as_str().unwrap(),
+            "prompt",
+            "{\"disposition\":\"queued\"}",
+        );
+
+        line.clear();
+        reader.read_line(&mut line).unwrap();
+        let abort: serde_json::Value = serde_json::from_str(&line).unwrap();
+        assert_eq!(abort["type"], "abort");
+        respond(&mut writer, abort["id"].as_str().unwrap(), "abort", "{}");
+        event(&mut writer, "{\"type\":\"agent_settled\",\"aborted\":true}");
+    });
+
+    let mut client = PiClient::connect(TcpTransport::connect(&addr).unwrap());
+    let mut polls = 0;
+    let (text, aborted) = client
+        .prompt_and_wait_with_abort(
+            "wait until cancelled",
+            &mut |_| panic!("unexpected text delta"),
+            Duration::from_secs(3),
+            &mut || {
+                polls += 1;
+                polls >= 2
+            },
+        )
+        .expect("cancel a prompt even when the model produces no text");
+    assert!(aborted);
+    assert!(text.is_empty());
+    assert!(polls >= 2);
+    drop(client);
+    server.join().expect("fake abort server");
+}
+
+#[test]
+fn abort_during_tool_activity_settles_cleanly() {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let addr = listener.local_addr().unwrap();
+    let server = std::thread::spawn(move || {
+        let (stream, _) = listener.accept().unwrap();
+        let mut reader = BufReader::new(stream.try_clone().unwrap());
+        let mut writer = stream;
+        let mut line = String::new();
+
+        reader.read_line(&mut line).unwrap();
+        let prompt: serde_json::Value = serde_json::from_str(&line).unwrap();
+        assert_eq!(prompt["type"], "prompt");
+        respond(
+            &mut writer,
+            prompt["id"].as_str().unwrap(),
+            "prompt",
+            "{\"disposition\":\"queued\"}",
+        );
+
+        event(
+            &mut writer,
+            "{\"type\":\"message_update\",\"assistantMessageEvent\":{\"type\":\"toolcall_start\",\"id\":\"c1\",\"toolName\":\"bash\"}}",
+        );
+
+        line.clear();
+        reader.read_line(&mut line).unwrap();
+        let abort: serde_json::Value = serde_json::from_str(&line).unwrap();
+        assert_eq!(abort["type"], "abort");
+        respond(&mut writer, abort["id"].as_str().unwrap(), "abort", "{}");
+        event(&mut writer, "{\"type\":\"agent_settled\",\"aborted\":true}");
+    });
+
+    let mut client = PiClient::connect(TcpTransport::connect(&addr).unwrap());
+    let saw_tool = std::sync::atomic::AtomicBool::new(false);
+    let mut tool_notes = Vec::new();
+    let (text, aborted) = client
+        .prompt_and_wait_with_abort(
+            "run a long tool",
+            &mut |p| match p {
+                hamesh_pi::PiProgress::Delta(_) => panic!("unexpected text delta"),
+                hamesh_pi::PiProgress::ToolNote(n) => {
+                    tool_notes.push(n);
+                    saw_tool.store(true, std::sync::atomic::Ordering::SeqCst);
+                }
+            },
+            Duration::from_secs(3),
+            &mut || saw_tool.load(std::sync::atomic::Ordering::SeqCst),
+        )
+        .expect("cancel a prompt during active tool operation");
+    assert!(aborted);
+    assert!(text.is_empty());
+    assert_eq!(tool_notes, vec!["tool bash …"]);
+    drop(client);
+    server.join().expect("fake tool abort server");
+}
+
+#[test]
 fn full_session_against_fake() {
     let (mut client, handle) = connect_fake();
     let state = client.get_state(TIMEOUT).expect("get_state");
