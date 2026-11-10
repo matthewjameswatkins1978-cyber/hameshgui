@@ -103,7 +103,6 @@ fn connect_fake() -> (PiClient, std::thread::JoinHandle<()>) {
     panic!("fake Pi unreachable: {:?}", last);
 }
 
-
 #[test]
 fn abort_interrupts_a_silent_in_flight_prompt() {
     // The fake accepts a prompt but sends no deltas or settlement until
