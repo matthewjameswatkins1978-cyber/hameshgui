@@ -679,8 +679,11 @@ impl LayoutCache {
                 height: Dimension::length(viewport_h),
             };
             trees[0]
-                .set_style(root_node, root_style)
+                .set_style(root_node, root_style.clone())
                 .expect("root size");
+            if let Some(snap) = snapshots.get_mut(&app.root.0) {
+                snap.style = root_style;
+            }
         }
 
         for root_id in &tree_roots {
@@ -741,15 +744,6 @@ impl LayoutCache {
         // Incremental path: topology is intact.
         let vp_changed = self.viewport != (viewport_w, viewport_h);
         if vp_changed {
-            let root_node = self.node_of[&app.root.0].1;
-            let mut root_style = self.trees[0].style(root_node).expect("root style").clone();
-            root_style.size = Size {
-                width: Dimension::length(viewport_w),
-                height: Dimension::length(viewport_h),
-            };
-            self.trees[0]
-                .set_style(root_node, root_style)
-                .expect("root size");
             self.viewport = (viewport_w, viewport_h);
         }
 
@@ -764,11 +758,19 @@ impl LayoutCache {
             let (tree_idx, node) = self.node_of[id];
             let snap = self.snapshots.get_mut(id).unwrap();
 
-            let new_style = child_style(comp);
+            let mut new_style = child_style(comp);
+            if id == &app.root.0 {
+                new_style.size = Size {
+                    width: Dimension::length(viewport_w),
+                    height: Dimension::length(viewport_h),
+                };
+            }
+
             if new_style != snap.style {
                 self.trees[tree_idx]
                     .set_style(node, new_style.clone())
                     .expect("set_style");
+                let _ = self.trees[tree_idx].mark_dirty(node);
                 snap.style = new_style;
             }
 
@@ -1659,5 +1661,151 @@ mod tests {
         let inc = cache.compute(&app, 800.0, 600.0);
         let full = compute_full(&app, 800.0, 600.0);
         assert_eq!(inc, full, "topology removal matches full rebuild");
+    }
+
+    #[test]
+    fn differential_cross_app_and_root_style_isolation() {
+        let mut cache = LayoutCache::new();
+
+        // 1. Two applications sharing component IDs and topology but different root styles & content
+        let mut app_a = App::new("root");
+        app_a
+            .get_mut("root")
+            .unwrap()
+            .props
+            .insert("layout".into(), "column".into());
+        app_a
+            .get_mut("root")
+            .unwrap()
+            .props
+            .insert("pad".into(), "12".into());
+        app_a.add(
+            "root",
+            Component::new("header", Role::Header, "Header")
+                .with_prop("h", "50")
+                .with_prop("text", "App A Title"),
+        );
+        app_a.add(
+            "root",
+            Component::new("body", Role::Panel, "Body")
+                .with_prop("h", "200")
+                .with_prop("text", "App A Body Content"),
+        );
+
+        let mut app_b = App::new("root");
+        app_b
+            .get_mut("root")
+            .unwrap()
+            .props
+            .insert("layout".into(), "row".into());
+        app_b
+            .get_mut("root")
+            .unwrap()
+            .props
+            .insert("pad".into(), "32".into());
+        app_b.add(
+            "root",
+            Component::new("header", Role::Header, "Header")
+                .with_prop("h", "100")
+                .with_prop("text", "App B Sidebar Title"),
+        );
+        app_b.add(
+            "root",
+            Component::new("body", Role::Panel, "Body")
+                .with_prop("h", "300")
+                .with_prop("text", "App B Main Panel"),
+        );
+
+        // 2. Alternating A -> B -> A -> B -> A -> B repeatedly
+        for turn in 0..6 {
+            let (app, name) = if turn % 2 == 0 {
+                (&app_a, "App A")
+            } else {
+                (&app_b, "App B")
+            };
+            let inc = cache.compute(app, 800.0, 600.0);
+            let full = compute_full(app, 800.0, 600.0);
+            assert_eq!(
+                inc, full,
+                "Turn {turn} ({name}): incremental layout must match compute_full"
+            );
+        }
+
+        // 3. Root padding and flex-direction changes within one application
+        for (layout, pad) in [
+            ("column", "0"),
+            ("row", "16"),
+            ("column", "24"),
+            ("row", "8"),
+        ] {
+            app_a
+                .get_mut("root")
+                .unwrap()
+                .props
+                .insert("layout".into(), layout.into());
+            app_a
+                .get_mut("root")
+                .unwrap()
+                .props
+                .insert("pad".into(), pad.into());
+            let inc = cache.compute(&app_a, 800.0, 600.0);
+            let full = compute_full(&app_a, 800.0, 600.0);
+            assert_eq!(
+                inc, full,
+                "Root mutation ({layout}, pad {pad}) must match compute_full"
+            );
+        }
+
+        // 4. Root style changes combined with viewport resizing
+        for (w, h, layout, pad) in [
+            (1024.0, 768.0, "row", "10"),
+            (1920.0, 1080.0, "column", "40"),
+            (800.0, 600.0, "row", "20"),
+        ] {
+            app_a
+                .get_mut("root")
+                .unwrap()
+                .props
+                .insert("layout".into(), layout.into());
+            app_a
+                .get_mut("root")
+                .unwrap()
+                .props
+                .insert("pad".into(), pad.into());
+            let inc = cache.compute(&app_a, w, h);
+            let full = compute_full(&app_a, w, h);
+            assert_eq!(
+                inc, full,
+                "Combined resize ({w}x{h}) + root mutation ({layout}, pad {pad}) must match compute_full"
+            );
+        }
+
+        // 5. Structural mutations immediately before and after application switching
+        // Add component to App A
+        app_a.add(
+            "root",
+            Component::new("footer", Role::Status, "Footer")
+                .with_prop("h", "30")
+                .with_prop("text", "App A Footer"),
+        );
+        let inc_a = cache.compute(&app_a, 800.0, 600.0);
+        let full_a = compute_full(&app_a, 800.0, 600.0);
+        assert_eq!(inc_a, full_a, "App A with structural addition");
+
+        // Switch to App B (structural mismatch against cached A)
+        let inc_b = cache.compute(&app_b, 800.0, 600.0);
+        let full_b = compute_full(&app_b, 800.0, 600.0);
+        assert_eq!(inc_b, full_b, "Switch to App B after App A expansion");
+
+        // Remove from App A and switch back
+        app_a.components.remove("footer");
+        app_a
+            .get_mut("root")
+            .unwrap()
+            .children
+            .retain(|c| c.0 != "footer");
+        let inc_a2 = cache.compute(&app_a, 800.0, 600.0);
+        let full_a2 = compute_full(&app_a, 800.0, 600.0);
+        assert_eq!(inc_a2, full_a2, "Switch back to App A after retraction");
     }
 }

@@ -1,0 +1,29 @@
+version: terrorbat/v1
+id: test-probe
+claim:
+  text: A test probe claim.
+requires:
+  - process.spawn
+  - git.inspect
+  - fs.write
+attack:
+  setup:
+    - adapter: fs
+      action: write
+      path: test_hello.txt
+      text: "hello"
+  run:
+    - adapter: command
+      action: run
+      program: pwsh
+      args: [-Command, "Get-Content test_hello.txt"]
+oracle:
+  type: exit_code
+  step: run:0
+  not_equals: 0
+evidence:
+  capture:
+    - stdout
+    - stderr
+timeout:
+  run: 60s
