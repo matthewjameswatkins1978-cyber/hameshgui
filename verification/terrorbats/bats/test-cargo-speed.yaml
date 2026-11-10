@@ -1,0 +1,26 @@
+version: terrorbat/v1
+id: test-cargo-speed
+claim:
+  text: Cargo can build an integration test using cached target directory.
+requires:
+  - process.spawn
+  - git.inspect
+  - fs.write
+attack:
+  run:
+    - adapter: command
+      action: run
+      program: cargo
+      args: [test, --test, bench_changing, --, --nocapture, test_pi_streaming_changing_content]
+      env:
+        CARGO_TARGET_DIR: D:/Projects/hameshgui/target
+oracle:
+  type: exit_code
+  step: run:0
+  not_equals: 0
+evidence:
+  capture:
+    - stdout
+    - stderr
+timeout:
+  run: 120s

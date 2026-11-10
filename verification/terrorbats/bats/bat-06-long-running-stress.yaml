@@ -1,0 +1,31 @@
+version: terrorbat/v1
+id: bat-06-long-running-stress
+claim:
+  text: Repeated updates do not cause unbounded memory growth or unacceptable performance degradation.
+requires:
+  - process.spawn
+  - git.inspect
+  - fs.write
+attack:
+  setup:
+    - adapter: fs
+      action: write
+      path: crates/hamesh-window/tests/adversarial_040.rs
+      from: ../probes/adversarial_040.rs
+  run:
+    - adapter: command
+      action: run
+      program: cargo
+      args: [test, --test, adversarial_040, --, --nocapture, test_bat_06_long_running_stress]
+      env:
+        CARGO_TARGET_DIR: D:/Projects/hameshgui/target
+oracle:
+  type: exit_code
+  step: run:0
+  not_equals: 0
+evidence:
+  capture:
+    - stdout
+    - stderr
+timeout:
+  run: 120s

@@ -1,0 +1,13 @@
+version: terrorbat-pack/v1
+id: hamesh-040-adversarial
+description: Adversarial verification campaign falsifying Hamesh 040 performance and correctness claims.
+bats:
+  - path: ../bats/bat-01-cross-app.yaml
+  - path: ../bats/bat-02-stale-geometry.yaml
+  - path: ../bats/bat-03-text-corruption.yaml
+  - path: ../bats/bat-04-cache-invalidation.yaml
+  - path: ../bats/bat-05-structural-mutation.yaml
+  - path: ../bats/bat-06-long-running-stress.yaml
+  - path: ../bats/bat-07-eye-and-hand-integrity.yaml
+  - path: ../bats/bat-08-performance-claim-falsification.yaml
+  - path: ../bats/bat-09-interruption-and-recovery.yaml

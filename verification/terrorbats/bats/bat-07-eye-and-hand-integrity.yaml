@@ -1,0 +1,31 @@
+version: terrorbat/v1
+id: bat-07-eye-and-hand-integrity
+claim:
+  text: The AI inspection and interaction interfaces describe and manipulate what is actually displayed.
+requires:
+  - process.spawn
+  - git.inspect
+  - fs.write
+attack:
+  setup:
+    - adapter: fs
+      action: write
+      path: crates/hamesh-window/tests/adversarial_040.rs
+      from: ../probes/adversarial_040.rs
+  run:
+    - adapter: command
+      action: run
+      program: cargo
+      args: [test, --test, adversarial_040, --, --nocapture, test_bat_07_eye_and_hand_integrity]
+      env:
+        CARGO_TARGET_DIR: D:/Projects/hameshgui/target
+oracle:
+  type: exit_code
+  step: run:0
+  not_equals: 0
+evidence:
+  capture:
+    - stdout
+    - stderr
+timeout:
+  run: 60s
