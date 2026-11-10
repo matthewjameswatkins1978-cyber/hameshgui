@@ -1,6 +1,7 @@
 # Follow-on packet 038-A — Type-op parity for driver-composed apps
 
-**Status:** proposed (awaits milestone review alongside PR #7 / PR #8).
+**Status:** implemented (038 slice 5, branch `hamesh/038-agent-x`; see
+`docs/038/slice-5-type-parity.md`). Sheet keeps `NO_M3`: it has no text sink.
 
 ## Objective
 

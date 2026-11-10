@@ -68,7 +68,15 @@ fn fake_pi_server(listener: TcpListener) {
                 event(&mut writer, "{\"type\":\"future_event_kind\",\"x\":1}");
                 event(
                     &mut writer,
+                    "{\"type\":\"message_update\",\"assistantMessageEvent\":{\"type\":\"toolcall_start\",\"id\":\"c1\",\"toolName\":\"read\"}}",
+                );
+                event(
+                    &mut writer,
                     "{\"type\":\"message_update\",\"assistantMessageEvent\":{\"type\":\"text_delta\",\"delta\":\"Hello \"}}",
+                );
+                event(
+                    &mut writer,
+                    "{\"type\":\"tool_execution_end\",\"toolCallId\":\"c1\",\"toolName\":\"read\",\"isError\":false,\"durationMs\":12}",
                 );
                 event(
                     &mut writer,
@@ -80,6 +88,12 @@ fn fake_pi_server(listener: TcpListener) {
                 // terms; the client treats EOF as TransportClosed.
                 break;
             }
+            Some("get_messages") => respond(
+                &mut writer,
+                &id,
+                "get_messages",
+                "{\"messages\":[{\"role\":\"system\",\"content\":\"boilerplate\"},{\"role\":\"user\",\"content\":\"hello\"},{\"role\":\"assistant\",\"content\":[{\"type\":\"text\",\"text\":\"hi there\"},{\"type\":\"toolCall\",\"name\":\"read\"}]},{\"role\":\"toolResult\",\"content\":\"done\"},{\"role\":\"mystery\",\"content\":\"kept verbatim\"},{\"role\":\"assistant\"}]}",
+            ),
             _ => respond(&mut writer, &id, "unknown", "{\"success_ignored\":true}"),
         }
     }
@@ -155,6 +169,63 @@ fn abort_interrupts_a_silent_in_flight_prompt() {
 }
 
 #[test]
+fn abort_during_tool_activity_settles_cleanly() {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let addr = listener.local_addr().unwrap();
+    let server = std::thread::spawn(move || {
+        let (stream, _) = listener.accept().unwrap();
+        let mut reader = BufReader::new(stream.try_clone().unwrap());
+        let mut writer = stream;
+        let mut line = String::new();
+
+        reader.read_line(&mut line).unwrap();
+        let prompt: serde_json::Value = serde_json::from_str(&line).unwrap();
+        assert_eq!(prompt["type"], "prompt");
+        respond(
+            &mut writer,
+            prompt["id"].as_str().unwrap(),
+            "prompt",
+            "{\"disposition\":\"queued\"}",
+        );
+
+        event(
+            &mut writer,
+            "{\"type\":\"message_update\",\"assistantMessageEvent\":{\"type\":\"toolcall_start\",\"id\":\"c1\",\"toolName\":\"bash\"}}",
+        );
+
+        line.clear();
+        reader.read_line(&mut line).unwrap();
+        let abort: serde_json::Value = serde_json::from_str(&line).unwrap();
+        assert_eq!(abort["type"], "abort");
+        respond(&mut writer, abort["id"].as_str().unwrap(), "abort", "{}");
+        event(&mut writer, "{\"type\":\"agent_settled\",\"aborted\":true}");
+    });
+
+    let mut client = PiClient::connect(TcpTransport::connect(&addr).unwrap());
+    let saw_tool = std::sync::atomic::AtomicBool::new(false);
+    let mut tool_notes = Vec::new();
+    let (text, aborted) = client
+        .prompt_and_wait_with_abort(
+            "run a long tool",
+            &mut |p| match p {
+                hamesh_pi::PiProgress::Delta(_) => panic!("unexpected text delta"),
+                hamesh_pi::PiProgress::ToolNote(n) => {
+                    tool_notes.push(n);
+                    saw_tool.store(true, std::sync::atomic::Ordering::SeqCst);
+                }
+            },
+            Duration::from_secs(3),
+            &mut || saw_tool.load(std::sync::atomic::Ordering::SeqCst),
+        )
+        .expect("cancel a prompt during active tool operation");
+    assert!(aborted);
+    assert!(text.is_empty());
+    assert_eq!(tool_notes, vec!["tool bash …"]);
+    drop(client);
+    server.join().expect("fake tool abort server");
+}
+
+#[test]
 fn full_session_against_fake() {
     let (mut client, handle) = connect_fake();
     let state = client.get_state(TIMEOUT).expect("get_state");
@@ -167,12 +238,22 @@ fn full_session_against_fake() {
     assert_eq!(models[0].id, "m");
 
     let mut streamed = String::new();
+    let mut tools = Vec::new();
     let (text, aborted) = client
-        .prompt_and_wait("say hi", &mut |d: &str| streamed.push_str(d), TIMEOUT)
+        .prompt_and_wait(
+            "say hi",
+            &mut |p| match p {
+                hamesh_pi::PiProgress::Delta(d) => streamed.push_str(&d),
+                hamesh_pi::PiProgress::ToolNote(n) => tools.push(n),
+            },
+            TIMEOUT,
+        )
         .expect("prompt_and_wait");
     assert_eq!(text, "Hello world");
     assert_eq!(streamed, "Hello world");
     assert!(!aborted);
+    // Tool activity arrives in wire order between the deltas.
+    assert_eq!(tools, vec!["tool read …", "tool read done (12ms)"]);
 
     // The fake's malformed line + unknown event were tolerated.
     assert!(client.malformed_lines() >= 1, "malformed line not counted");
@@ -185,11 +266,42 @@ fn unknown_command_surfaces_command_error() {
     let (mut client, handle) = connect_fake();
     // The fake answers unknown commands with success:true + junk data.
     // A success:false answer must surface as a Command error instead:
-    // emulate by asking for an unknown shape through get_messages, which
-    // the fake answers with success:true (no error) — so assert the
-    // plumbing instead: malformed JSON response path.
-    let v = client.get_messages(TIMEOUT).expect("get_messages");
-    assert!(v.get("success_ignored").is_some());
+    // emulate through run_bash, which the fake answers with success:true
+    // (no error) — so assert the plumbing instead: malformed JSON path.
+    let v = client.run_bash("true", TIMEOUT).expect("run_bash plumbing");
+    assert!(v.output.is_empty());
+    drop(client);
+    handle.join().expect("fake server thread");
+}
+
+#[test]
+fn history_parses_tolerantly() {
+    use hamesh_pi::HistoryMessage;
+    let (mut client, handle) = connect_fake();
+    let h = client.get_history(TIMEOUT).expect("get_history");
+    // system boilerplate dropped, assistant mapped to agent, toolCall
+    // noted, unknown role kept verbatim, content-less assistant skipped.
+    assert_eq!(
+        h,
+        vec![
+            HistoryMessage {
+                role: "user".to_string(),
+                text: "hello".to_string()
+            },
+            HistoryMessage {
+                role: "agent".to_string(),
+                text: "hi there\n[tool call: read]".to_string()
+            },
+            HistoryMessage {
+                role: "tool".to_string(),
+                text: "done".to_string()
+            },
+            HistoryMessage {
+                role: "mystery".to_string(),
+                text: "kept verbatim".to_string()
+            },
+        ]
+    );
     drop(client);
     handle.join().expect("fake server thread");
 }

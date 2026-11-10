@@ -36,7 +36,11 @@ pub enum Record {
     TextDelta(String),
     /// `{type:"agent_settled", aborted?}`
     Settled { aborted: bool },
-    /// Anything else (session events, tool activity, future types).
+    /// Tool activity worth showing while a run is live (announced calls,
+    /// starts, completions). Summarized at classification time; the raw
+    /// record stays available as `Event` for future consumers.
+    ToolNote(String),
+    /// Anything else (session events, future types).
     Event {
         etype: String,
         value: serde_json::Value,
@@ -61,18 +65,57 @@ pub fn decode(line: &str) -> Result<Record, String> {
             value: v,
         }),
         "message_update" => {
-            let delta = v
-                .get("assistantMessageEvent")
-                .and_then(|e| {
-                    if e.get("type").and_then(|t| t.as_str()) == Some("text_delta") {
-                        e.get("delta").and_then(|d| d.as_str())
-                    } else {
-                        None
+            let ev = v.get("assistantMessageEvent");
+            let kind = ev.and_then(|e| e.get("type")).and_then(|t| t.as_str());
+            match kind {
+                Some("toolcall_start") => {
+                    let name = ev
+                        .and_then(|e| e.get("toolName"))
+                        .and_then(|n| n.as_str())
+                        .unwrap_or("?");
+                    Ok(Record::ToolNote(format!("tool {name} …")))
+                }
+                _ => {
+                    let delta = match kind {
+                        Some("text_delta") => ev
+                            .and_then(|e| e.get("delta"))
+                            .and_then(|d| d.as_str())
+                            .unwrap_or(""),
+                        _ => "",
                     }
-                })
-                .unwrap_or("")
-                .to_string();
-            Ok(Record::TextDelta(delta))
+                    .to_string();
+                    Ok(Record::TextDelta(delta))
+                }
+            }
+        }
+        "tool_execution_start" => {
+            let name = v.get("toolName").and_then(|n| n.as_str()).unwrap_or("?");
+            let args = v.get("args").and_then(|a| a.as_str()).unwrap_or("");
+            let head: String = args.chars().take(120).collect();
+            let more = if args.chars().count() > 120 {
+                "…"
+            } else {
+                ""
+            };
+            let what = if head.is_empty() {
+                "started".to_string()
+            } else {
+                format!("{head}{more}")
+            };
+            Ok(Record::ToolNote(format!("tool {name} {what}")))
+        }
+        "tool_execution_end" => {
+            let name = v.get("toolName").and_then(|n| n.as_str()).unwrap_or("?");
+            let failed = v.get("isError").and_then(|b| b.as_bool()).unwrap_or(false);
+            let ms = v
+                .get("durationMs")
+                .and_then(|d| d.as_i64())
+                .map(|d| format!(" ({d}ms)"))
+                .unwrap_or_default();
+            Ok(Record::ToolNote(format!(
+                "tool {name} {}{ms}",
+                if failed { "failed" } else { "done" }
+            )))
         }
         "agent_settled" => Ok(Record::Settled {
             aborted: v.get("aborted").and_then(|a| a.as_bool()).unwrap_or(false),

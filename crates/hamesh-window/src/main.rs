@@ -192,6 +192,9 @@ struct HameshWindowApp {
     /// M4 live loop: background Pi worker link. `None` unless `--pi`.
     /// Never blocks the UI thread; drains between frames.
     pi: Option<PiLink>,
+    /// Last session config used for a worker spawn (flags or attach):
+    /// attach requests with empty dir/cwd fall back to these.
+    pi_session: Option<SessionCfg>,
     use_pi: bool,
     cursor: (f32, f32),
     size: (u32, u32),
@@ -241,6 +244,7 @@ impl HameshWindowApp {
             console_smoke_done: false,
             editor_smoke_done: false,
             pi: None,
+            pi_session: None,
             use_pi: false,
             cursor: (0.0, 0.0),
             size: (800, 600),
@@ -655,6 +659,46 @@ impl HameshWindowApp {
         }
     }
 
+    /// Spawn (or respawn) the background Pi worker. Records the session
+    /// for later attach defaults; dropping the old link retires its
+    /// worker (channel close ends its loop, client drop kills the child).
+    fn spawn_pi_link(&mut self, session: Option<SessionCfg>) {
+        let (job_tx, job_rx) = std::sync::mpsc::channel::<PiJob>();
+        let (evt_tx, evt_rx) = std::sync::mpsc::channel::<PiEvt>();
+        let for_worker = session.clone();
+        std::thread::spawn(move || pi_worker(job_rx, evt_tx, for_worker));
+        self.pi = Some(PiLink {
+            job_tx,
+            evt_rx,
+            live_index: None,
+            follow: false,
+        });
+        self.pi_session = session.clone();
+        self.trace.record(
+            "pi.worker",
+            "background pi worker spawned (--pi)",
+            self.app.revision,
+            None,
+        );
+        match session {
+            Some(s) => {
+                self.trace.record(
+                    "pi.session",
+                    &format!("attach sid={} dir={} cwd={}", s.id, s.dir, s.cwd),
+                    self.app.revision,
+                    None,
+                );
+                println!(
+                    "PI session mode: attach sid={} (persistent, history restores)",
+                    s.id
+                );
+            }
+            None => {
+                println!("PI live mode: composer submits to a background pi worker");
+            }
+        }
+    }
+
     /// Translate the driver's abort intent into a worker cancel — but
     /// only while a run is actually live. Pointer click, keyboard Enter
     /// and inspector key all share this gate.
@@ -680,6 +724,10 @@ impl HameshWindowApp {
         };
         let note = if note == "abort requested" {
             self.console_abort()
+        } else if note == "attach requested" {
+            self.console_attach()
+        } else if note == "new session requested" {
+            self.console_new()
         } else {
             note
         };
@@ -687,6 +735,115 @@ impl HameshWindowApp {
         self.trace
             .record("console.click", &note, self.app.revision, None);
         println!("CONSOLE click: {note}");
+    }
+
+    /// Translate the driver's attach intent into a worker respawn on a
+    /// (possibly different) persistent session. Refused while a run is
+    /// live — abort first. The feed clears and history restores through
+    /// the same History event as launch attach.
+    fn console_attach(&mut self) -> String {
+        if self.pi.as_ref().is_some_and(|l| l.live_index.is_some()) {
+            return "attach refused: run live, abort first".to_string();
+        }
+        let req = match self.console.as_mut().and_then(|c| c.pending_attach.take()) {
+            Some(r) => r,
+            None => return "attach refused: no request".to_string(),
+        };
+        let fallback = self.pi_session.clone().unwrap_or(SessionCfg {
+            id: String::new(),
+            dir: String::new(),
+            cwd: String::new(),
+        });
+        let dir = if req.dir.is_empty() {
+            fallback.dir
+        } else {
+            req.dir
+        };
+        let cwd = if req.cwd.is_empty() {
+            fallback.cwd
+        } else {
+            req.cwd
+        };
+        if req.id.is_empty() || dir.is_empty() || cwd.is_empty() {
+            return "usage: /attach <id> [dir] [cwd] (dir/cwd fall back to the current session)"
+                .to_string();
+        }
+        // Retire the old worker first: dropping its link ends its loop
+        // and kills its child, so two workers never share a session.
+        self.pi = None;
+        if let Some(c) = self.console.as_mut() {
+            c.widgets.feed.messages.clear();
+            c.widgets.feed.scroll_px = 0.0;
+        }
+        self.spawn_pi_link(Some(SessionCfg {
+            id: req.id.clone(),
+            dir,
+            cwd,
+        }));
+        // Ask the fresh worker who it is right away: without this the
+        // strip keeps showing the session we just left.
+        if let Some(link) = self.pi.as_ref() {
+            let _ = link.job_tx.send(PiJob::GetState);
+        }
+        self.refresh_console();
+        format!("attached sid={} (history restoring)", req.id)
+    }
+
+    /// Translate the driver's new-session intent into a worker respawn
+    /// on a freshly minted session id. Same gate and same retire-first
+    /// discipline as attach: two workers never share a session.
+    fn console_new(&mut self) -> String {
+        if self.pi.as_ref().is_some_and(|l| l.live_index.is_some()) {
+            return "new session refused: run live, abort first".to_string();
+        }
+        let req = match self.console.as_mut().and_then(|c| c.pending_new.take()) {
+            Some(r) => r,
+            None => return "new session refused: no request".to_string(),
+        };
+        let fallback = self.pi_session.clone().unwrap_or(SessionCfg {
+            id: String::new(),
+            dir: String::new(),
+            cwd: String::new(),
+        });
+        let dir = if req.dir.is_empty() {
+            fallback.dir
+        } else {
+            req.dir
+        };
+        let cwd = if req.cwd.is_empty() {
+            fallback.cwd
+        } else {
+            req.cwd
+        };
+        if dir.is_empty() || cwd.is_empty() {
+            return "usage: /new [dir] [cwd] (dir/cwd fall back to the current session)"
+                .to_string();
+        }
+        let secs = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0);
+        let id = format!("ax-{secs}");
+        // Retire the old worker first: dropping its link ends its loop
+        // and kills its child before the new one starts.
+        self.pi = None;
+        if let Some(c) = self.console.as_mut() {
+            c.widgets.feed.messages.clear();
+            c.widgets.feed.scroll_px = 0.0;
+            // The previous session's identity must never linger on the
+            // strip while the fresh worker handshakes.
+            c.set_status("—", "—", 0, false);
+        }
+        self.spawn_pi_link(Some(SessionCfg {
+            id: id.clone(),
+            dir,
+            cwd,
+        }));
+        if let Some(link) = self.pi.as_ref() {
+            let _ = link.job_tx.send(PiJob::GetState);
+        }
+        self.refresh_console();
+        format!("new session sid={id} (fresh, no history)")
     }
 
     /// Console keyboard: map the winit event onto the shared key core,
@@ -773,6 +930,17 @@ impl HameshWindowApp {
         // pointer press; translate it through the shared abort gate.
         if last == "abort requested" {
             last = self.console_abort();
+            self.refresh_console();
+        }
+        // Same for Attach: the slash-command submit and the Attach
+        // button converge here with pointer and inspector key paths.
+        if last == "attach requested" {
+            last = self.console_attach();
+            self.refresh_console();
+        }
+        // And New: the `/new` submit and the New button converge here.
+        if last == "new session requested" {
+            last = self.console_new();
             self.refresh_console();
         }
         let submitted: Option<String> = match (had_enter, before) {
@@ -1245,6 +1413,27 @@ enum PiEvt {
     Done { text: String, aborted: bool },
     Failed(String),
     State(hamesh_pi::EngineState),
+    History(Vec<hamesh_pi::HistoryMessage>),
+    ToolNote(String),
+}
+
+/// Persistent-session launch config, all from CLI flags. `None` means
+/// the existing ephemeral worker (`--pi` alone).
+#[derive(Clone, Debug)]
+struct SessionCfg {
+    id: String,
+    dir: String,
+    cwd: String,
+}
+
+fn session_cfg() -> Option<SessionCfg> {
+    let arg =
+        |name: &str| std::env::args().find_map(|a| a.strip_prefix(name).map(|s| s.to_string()));
+    Some(SessionCfg {
+        id: arg("--session-id=")?,
+        dir: arg("--session-dir=")?,
+        cwd: arg("--session-cwd=")?,
+    })
 }
 
 /// Link to the background Pi worker. `live_index` is the feed slot
@@ -1257,9 +1446,19 @@ struct PiLink {
 }
 
 /// Run `pi --mode rpc` off-thread: prompt, stream deltas, report done.
-/// Never touches UI state; everything crosses on channels.
-fn pi_worker(jobs: std::sync::mpsc::Receiver<PiJob>, events: std::sync::mpsc::Sender<PiEvt>) {
-    let mut client = match hamesh_pi::PiClient::spawn_ephemeral("pi", None) {
+/// With a session config, attaches to a persistent Pi session and ships
+/// its restored history first. Never touches UI state; everything
+/// crosses on channels.
+fn pi_worker(
+    jobs: std::sync::mpsc::Receiver<PiJob>,
+    events: std::sync::mpsc::Sender<PiEvt>,
+    session: Option<SessionCfg>,
+) {
+    let client = match &session {
+        Some(s) => hamesh_pi::PiClient::spawn_session("pi", Some(&s.cwd), &s.dir, &s.id),
+        None => hamesh_pi::PiClient::spawn_ephemeral("pi", None),
+    };
+    let mut client = match client {
         Ok(c) => c,
         Err(e) => {
             let _ = events.send(PiEvt::Failed(format!("spawn: {e}")));
@@ -1269,6 +1468,17 @@ fn pi_worker(jobs: std::sync::mpsc::Receiver<PiJob>, events: std::sync::mpsc::Se
     if let Err(e) = client.get_state(std::time::Duration::from_secs(20)) {
         let _ = events.send(PiEvt::Failed(format!("handshake: {e}")));
         return;
+    }
+    if session.is_some() {
+        match client.get_history(std::time::Duration::from_secs(30)) {
+            Ok(h) => {
+                let _ = events.send(PiEvt::History(h));
+            }
+            Err(e) => {
+                let _ = events.send(PiEvt::Failed(format!("history: {e}")));
+                return;
+            }
+        }
     }
     // Commands arriving during a run must not be lost. Abort is handled
     // immediately by the active request; other commands wait their turn.
@@ -1297,8 +1507,11 @@ fn pi_worker(jobs: std::sync::mpsc::Receiver<PiJob>, events: std::sync::mpsc::Se
                 let _ = events.send(PiEvt::Started);
                 let r = client.prompt_and_wait_with_abort(
                     &text,
-                    &mut |d: &str| {
-                        let _ = events.send(PiEvt::Delta(d.to_string()));
+                    &mut |p| {
+                        let _ = events.send(match p {
+                            hamesh_pi::PiProgress::Delta(d) => PiEvt::Delta(d),
+                            hamesh_pi::PiProgress::ToolNote(n) => PiEvt::ToolNote(n),
+                        });
                     },
                     std::time::Duration::from_secs(180),
                     &mut || {
@@ -1341,6 +1554,8 @@ impl HameshWindowApp {
             Done { text: String, aborted: bool },
             Failed(String),
             State(hamesh_pi::EngineState),
+            History(Vec<hamesh_pi::HistoryMessage>),
+            ToolNote(String),
         }
         let mut acts = Vec::new();
         if let Some(link) = self.pi.as_mut() {
@@ -1351,6 +1566,8 @@ impl HameshWindowApp {
                     PiEvt::Done { text, aborted } => acts.push(Act::Done { text, aborted }),
                     PiEvt::Failed(e) => acts.push(Act::Failed(e)),
                     PiEvt::State(st) => acts.push(Act::State(st)),
+                    PiEvt::History(h) => acts.push(Act::History(h)),
+                    PiEvt::ToolNote(n) => acts.push(Act::ToolNote(n)),
                 }
             }
         }
@@ -1374,6 +1591,9 @@ impl HameshWindowApp {
                             link.live_index = Some(i);
                             link.follow = true;
                         }
+                        // A run that starts is proof the engine is
+                        // talking again: clear any stale headline.
+                        c.set_error(None);
                         changed = true;
                     }
                 }
@@ -1415,6 +1635,9 @@ impl HameshWindowApp {
                         }
                         let vp = c.widgets.feed_viewport.max(200.0);
                         c.widgets.feed.scroll_to_bottom(vp);
+                        // A run that finishes is success: drop any stale
+                        // headline rather than leaving it beside new work.
+                        c.set_error(None);
                         self.trace.record(
                             "console.pi_done",
                             &format!(
@@ -1445,6 +1668,10 @@ impl HameshWindowApp {
                             link.live_index = None;
                         }
                         c.widgets.feed.push("system", &format!("Pi error: {e}"));
+                        // The feed keeps the detail; the strip carries
+                        // the bounded headline until the engine works
+                        // again, so a failure cannot pass unseen.
+                        c.set_error(Some(&e));
                         let vp = c.widgets.feed_viewport.max(200.0);
                         c.widgets.feed.scroll_to_bottom(vp);
                         changed = true;
@@ -1460,6 +1687,39 @@ impl HameshWindowApp {
                             messages,
                             streaming,
                         );
+                        // A worker that answers GetState is healthy: the
+                        // headline's cause is gone, so clear it. A failure
+                        // sets it again in its own arm.
+                        c.set_error(None);
+                        changed = true;
+                    }
+                }
+                Act::ToolNote(n) => {
+                    if let Some(c) = self.console.as_mut() {
+                        c.widgets.feed.push("tool", &n);
+                        let vp = c.widgets.feed_viewport.max(200.0);
+                        c.widgets.feed.scroll_to_bottom(vp);
+                        self.trace
+                            .record("console.tool", &n, self.app.revision, None);
+                        changed = true;
+                    }
+                }
+                Act::History(h) => {
+                    if let Some(c) = self.console.as_mut() {
+                        for m in &h {
+                            c.widgets.feed.push(&m.role, &m.text);
+                        }
+                        let vp = c.widgets.feed_viewport.max(200.0);
+                        c.widgets.feed.scroll_to_bottom(vp);
+                        self.trace.record(
+                            "console.history",
+                            &format!("restored {} messages", h.len()),
+                            self.app.revision,
+                            None,
+                        );
+                        if let Some(link) = self.pi.as_ref() {
+                            let _ = link.job_tx.send(PiJob::GetState);
+                        }
                         changed = true;
                     }
                 }
@@ -2135,10 +2395,56 @@ impl HameshWindowApp {
                         "notes": r.notes,
                         "mechanism": format!("{:?}", r.mechanism),
                     })))
+                } else if self.use_tasks && self.tasks.is_some() {
+                    // Tasks types into its filter through the driver's
+                    // own route: same narrowing a human's keys produce.
+                    let note = {
+                        let Some(t) = self.tasks.as_mut() else {
+                            return;
+                        };
+                        t.type_text(&text)
+                    };
+                    self.refresh_tasks();
+                    self.trace.record(
+                        "ext.type",
+                        &format!("id={id} tasks: {note}"),
+                        self.app.revision,
+                        None,
+                    );
+                    Some(self.stamped(serde_json::json!({
+                        "success": true,
+                        "hit": id,
+                        "notes": [note],
+                        "focused": self.tasks.as_ref().map(|t| t.focused_zone()),
+                        "mechanism": "HumanEquivalent",
+                    })))
+                } else if self.use_gallery && self.gallery.is_some() {
+                    // Gallery types into its picker field; labels stay
+                    // inside the driver, no caller argument.
+                    let note = {
+                        let Some(g) = self.gallery.as_mut() else {
+                            return;
+                        };
+                        g.type_text(&text)
+                    };
+                    self.refresh_gallery();
+                    self.trace.record(
+                        "ext.type",
+                        &format!("id={id} gallery: {note}"),
+                        self.app.revision,
+                        None,
+                    );
+                    Some(self.stamped(serde_json::json!({
+                        "success": true,
+                        "hit": id,
+                        "notes": [note],
+                        "focused": self.gallery.as_ref().map(|g| g.focused_zone()),
+                        "mechanism": "HumanEquivalent",
+                    })))
                 } else if self.widgets.is_none() {
                     Some(self.err(
                         "NO_M3",
-                        "typing needs an interactive mode (m3, console or editor)".to_string(),
+                        "typing needs an interactive mode (m3, console, editor, tasks or gallery); sheet has no text field".to_string(),
                     ))
                 } else {
                     let layout =
@@ -2338,47 +2644,8 @@ impl ApplicationHandler<UserEvent> for HameshWindowApp {
             self.enter_editor(file);
             println!("EDITOR open: file editor — click, type, Tab, F12 dumps Eye evidence, Esc cancels/quits");
         }
-        if self.use_editor {
-            let file =
-                std::env::args().find_map(|a| a.strip_prefix("--file=").map(|s| s.to_string()));
-            self.enter_editor(file);
-            println!("EDITOR open: file editor — click, type, Tab, F12 dumps Eye evidence, Esc cancels/quits");
-        }
         if self.use_pi && self.pi.is_none() {
-            let (job_tx, job_rx) = std::sync::mpsc::channel::<PiJob>();
-            let (evt_tx, evt_rx) = std::sync::mpsc::channel::<PiEvt>();
-            std::thread::spawn(move || pi_worker(job_rx, evt_tx));
-            self.pi = Some(PiLink {
-                job_tx,
-                evt_rx,
-                live_index: None,
-                follow: false,
-            });
-            self.trace.record(
-                "pi.worker",
-                "background pi worker spawned (--pi)",
-                self.app.revision,
-                None,
-            );
-            println!("PI live mode: composer submits to a background pi worker");
-        }
-        if self.use_pi && self.pi.is_none() {
-            let (job_tx, job_rx) = std::sync::mpsc::channel::<PiJob>();
-            let (evt_tx, evt_rx) = std::sync::mpsc::channel::<PiEvt>();
-            std::thread::spawn(move || pi_worker(job_rx, evt_tx));
-            self.pi = Some(PiLink {
-                job_tx,
-                evt_rx,
-                live_index: None,
-                follow: false,
-            });
-            self.trace.record(
-                "pi.worker",
-                "background pi worker spawned (--pi)",
-                self.app.revision,
-                None,
-            );
-            println!("PI live mode: composer submits to a background pi worker");
+            self.spawn_pi_link(session_cfg());
         }
         if self.use_inspect && !self.inspect_serving {
             if let Some(proxy) = self.proxy.clone() {

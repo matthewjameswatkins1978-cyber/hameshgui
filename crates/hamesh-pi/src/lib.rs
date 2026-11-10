@@ -35,8 +35,19 @@ pub enum PiEvent {
     Settled { aborted: bool },
     /// Transport died; no more records will arrive.
     TransportClosed,
+    /// Tool activity worth showing while a run is live.
+    ToolNote(String),
     /// Anything else, preserved verbatim for forward compatibility.
     Raw(serde_json::Value),
+}
+
+/// Live run progress for `prompt_and_wait` consumers: streamed text
+/// and tool-activity notes share one callback so the UI thread sees a
+/// single ordered stream, exactly as the wire delivered it.
+#[derive(Clone, Debug)]
+pub enum PiProgress {
+    Delta(String),
+    ToolNote(String),
 }
 
 /// Failure modes. Timeouts and transport death are explicit — a hung Pi
@@ -113,6 +124,91 @@ pub struct ModelOption {
     pub provider: String,
     pub id: String,
     pub name: String,
+}
+
+/// One restored conversation message: a feed role (`user`, `agent`,
+/// `tool`, `system`) plus displayable text.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct HistoryMessage {
+    pub role: String,
+    pub text: String,
+}
+
+/// Extract plain text from a message `content` that may be a string or
+/// an array of typed blocks (`text`, `toolCall`, `image`, ...). Mirrors
+/// Agent X's history extraction; unknown blocks are noted, never fatal.
+fn content_text(content: &serde_json::Value) -> String {
+    if let Some(s) = content.as_str() {
+        return s.to_string();
+    }
+    let mut text = String::new();
+    let mut notes = Vec::new();
+    for block in content.as_array().cloned().unwrap_or_default() {
+        let kind = block.get("type").and_then(|t| t.as_str()).unwrap_or("");
+        match kind {
+            "text" => {
+                if let Some(s) = block.get("text").and_then(|t| t.as_str()) {
+                    text.push_str(s);
+                }
+            }
+            "toolCall" => notes.push(format!(
+                "[tool call: {}]",
+                block.get("name").and_then(|n| n.as_str()).unwrap_or("?")
+            )),
+            "image" => notes.push("[image]".to_string()),
+            _ => {}
+        }
+    }
+    for note in notes {
+        if !text.is_empty() {
+            text.push('\n');
+        }
+        text.push_str(&note);
+    }
+    text
+}
+
+fn history_message(m: &serde_json::Value) -> Option<HistoryMessage> {
+    let role = m.get("role")?.as_str()?;
+    match role {
+        "system" => None,
+        "user" => Some(HistoryMessage {
+            role: "user".to_string(),
+            text: content_text(m.get("content").unwrap_or(&serde_json::Value::Null)),
+        }),
+        "assistant" => {
+            let text = content_text(m.get("content").unwrap_or(&serde_json::Value::Null));
+            if text.is_empty() {
+                None
+            } else {
+                Some(HistoryMessage {
+                    role: "agent".to_string(),
+                    text,
+                })
+            }
+        }
+        "toolResult" | "bashExecution" => Some(HistoryMessage {
+            role: "tool".to_string(),
+            text: content_text(m.get("content").unwrap_or(&serde_json::Value::Null)),
+        }),
+        "custom" if m.get("display").and_then(|d| d.as_bool()).unwrap_or(false) => {
+            Some(HistoryMessage {
+                role: "system".to_string(),
+                text: content_text(m.get("content").unwrap_or(&serde_json::Value::Null)),
+            })
+        }
+        "branchSummary" | "compactionSummary" => Some(HistoryMessage {
+            role: "system".to_string(),
+            text: format!(
+                "[context summary] {}",
+                m.get("summary").and_then(|s| s.as_str()).unwrap_or("")
+            ),
+        }),
+        _ => Some(HistoryMessage {
+            role: role.to_string(),
+            text: content_text(m.get("content").unwrap_or(&serde_json::Value::Null)),
+        }),
+    }
 }
 
 /// Outcome of a direct `bash` RPC command (no LLM run).
@@ -529,12 +625,14 @@ impl PiClient {
             .to_string())
     }
 
-    /// Send a prompt and collect streamed text until settlement.
-    /// The original API retains its non-cancellable behaviour.
+    /// Send a prompt, collect streamed text, resolve at `agent_settled`.
+    /// `progress` receives deltas and tool notes live in wire order
+    /// (feed the conversation view). `idle_timeout` bounds the whole
+    /// wait, not each delta.
     pub fn prompt_and_wait(
         &mut self,
         message: &str,
-        progress: &mut dyn FnMut(&str),
+        progress: &mut dyn FnMut(PiProgress),
         idle_timeout: Duration,
     ) -> Result<(String, bool), PiError> {
         let mut never_abort = || false;
@@ -548,7 +646,7 @@ impl PiClient {
     pub fn prompt_and_wait_with_abort(
         &mut self,
         message: &str,
-        progress: &mut dyn FnMut(&str),
+        progress: &mut dyn FnMut(PiProgress),
         idle_timeout: Duration,
         abort_requested: &mut dyn FnMut() -> bool,
     ) -> Result<(String, bool), PiError> {
@@ -576,7 +674,10 @@ impl PiClient {
             match self.next_event(left.min(Duration::from_millis(50))) {
                 Ok(PiEvent::TextDelta(d)) => {
                     text.push_str(&d);
-                    progress(&d);
+                    progress(PiProgress::Delta(d));
+                }
+                Ok(PiEvent::ToolNote(n)) => {
+                    progress(PiProgress::ToolNote(n));
                 }
                 Ok(PiEvent::Settled { aborted }) => return Ok((text, aborted)),
                 Ok(PiEvent::TransportClosed) => return Err(PiError::Closed),
@@ -593,6 +694,20 @@ impl PiClient {
 
     pub fn get_messages(&mut self, timeout: Duration) -> Result<serde_json::Value, PiError> {
         self.command("get_messages", &[], timeout)
+    }
+
+    /// Fetch restored conversation history as displayable (role, text)
+    /// pairs. Shape mirrors Agent X's `ParseHistory` tolerance: unknown
+    /// roles and content shapes are skipped or summarized, never fatal;
+    /// `system` boilerplate is dropped.
+    pub fn get_history(&mut self, timeout: Duration) -> Result<Vec<HistoryMessage>, PiError> {
+        let data = self.get_messages(timeout)?;
+        let empty = Vec::new();
+        let messages = data
+            .get("messages")
+            .and_then(|m| m.as_array())
+            .unwrap_or(&empty);
+        Ok(messages.iter().filter_map(history_message).collect())
     }
 
     pub fn run_bash(
@@ -682,6 +797,9 @@ fn reader_loop(
             }
             Record::Settled { aborted } => {
                 let _ = events.send(PiEvent::Settled { aborted });
+            }
+            Record::ToolNote(n) => {
+                let _ = events.send(PiEvent::ToolNote(n));
             }
             Record::Event { value, .. } => {
                 let _ = events.send(PiEvent::Raw(value));

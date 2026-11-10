@@ -40,9 +40,37 @@ impl Default for EngineStatus {
     }
 }
 
+/// A parsed `/attach` request, stashed for the host: the host
+/// translates it into a worker respawn (same pattern as the abort
+/// intent — the driver never touches a worker or a thread).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct AttachRequest {
+    pub id: String,
+    pub dir: String,
+    pub cwd: String,
+}
+
+/// A parsed `/new` request, stashed for the host: the host mints a
+/// fresh session id and respawns the worker (the attach pattern, with
+/// no id to restore). Empty `dir`/`cwd` mean "reuse the current ones".
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct NewRequest {
+    pub dir: String,
+    pub cwd: String,
+}
+
 pub struct Console {
     pub widgets: Widgets,
     pub status: EngineStatus,
+    /// Pending attach request from an `/attach` submit or the Attach
+    /// button prefill flow. The host takes it exactly once.
+    pub pending_attach: Option<AttachRequest>,
+    /// Pending new-session request from a `/new` submit or the New
+    /// button prefill flow. The host takes it exactly once.
+    pub pending_new: Option<NewRequest>,
+    /// Last engine failure, as a bounded headline. `None` means the
+    /// engine has nothing to complain about.
+    pub error: Option<String>,
 }
 
 impl Console {
@@ -56,6 +84,9 @@ impl Console {
         Self {
             widgets,
             status: EngineStatus::default(),
+            pending_attach: None,
+            pending_new: None,
+            error: None,
         }
     }
 
@@ -76,6 +107,24 @@ impl Console {
     pub fn abort_enabled(&self) -> bool {
         self.status.streaming
     }
+
+    /// Host-fed engine failure, shown as a bounded headline in the
+    /// strip with the badge turned to `Error`. The host sets it when a
+    /// worker action fails and clears it on the next success, so the
+    /// strip never keeps claiming an error the engine has moved past.
+    pub fn set_error(&mut self, error: Option<&str>) {
+        self.error = error.map(|e| {
+            let mut head: String = e.chars().take(ERROR_MAX_CHARS).collect();
+            if e.chars().count() > ERROR_MAX_CHARS {
+                head.push('…');
+            }
+            head
+        });
+    }
+
+    pub fn has_error(&self) -> bool {
+        self.error.is_some()
+    }
 }
 
 impl Default for Console {
@@ -83,6 +132,11 @@ impl Default for Console {
         Self::new()
     }
 }
+
+/// How much of an engine error the strip shows. The strip is a
+/// headline, not a log: the full text already arrives as a system
+/// message in the feed, and a long caption would crowd the buttons.
+const ERROR_MAX_CHARS: usize = 60;
 
 /// Feed viewport budget at this height: chrome (status strip, composer,
 /// abort row, gaps, padding) takes ~228px; the feed gets the rest.
@@ -109,7 +163,12 @@ pub fn compose(c: &mut Console, width: f32, height: f32) -> App {
             |s| {
                 b::title(s, "console-title", "Console");
                 b::spacer(s, "console-hspace");
-                let (badge_text, variant) = if c.status.streaming {
+                // An unresolved engine failure outranks the streaming
+                // badge: the operator needs to see that something broke,
+                // not only that a run is in flight.
+                let (badge_text, variant) = if c.has_error() {
+                    ("Error", b::Variant::Error)
+                } else if c.status.streaming {
                     ("Streaming", b::Variant::Success)
                 } else {
                     ("Idle", b::Variant::Neutral)
@@ -117,11 +176,12 @@ pub fn compose(c: &mut Console, width: f32, height: f32) -> App {
                 b::badge(s, "console-status", badge_text, variant);
                 b::caption(s, "console-model", &c.status.model);
                 b::caption(s, "console-session", &c.status.session);
-                b::caption(
-                    s,
-                    "console-count",
-                    &format!("{} messages", c.status.messages),
-                );
+                // One message is not "1 messages": the strip gets read.
+                let count = match c.status.messages {
+                    1 => "1 message".to_string(),
+                    n => format!("{n} messages"),
+                };
+                b::caption(s, "console-count", &count);
             },
         );
     }
@@ -145,7 +205,37 @@ pub fn compose(c: &mut Console, width: f32, height: f32) -> App {
                 ..Default::default()
             },
             |s| {
+                // An error takes the hint's slot: one line, bounded, so
+                // the buttons keep their room at 800px. The full text is
+                // already a system message in the feed.
+                match c.error.as_deref() {
+                    Some(err) => b::caption(s, "console-error", err),
+                    None => b::caption(s, "console-attach-hint", "/attach · /new"),
+                };
                 b::spacer(s, "console-aspacer");
+                let attach_focused = c
+                    .widgets
+                    .focus
+                    .focused()
+                    .is_some_and(|f| f == "console-attach");
+                b::button(
+                    s,
+                    "console-attach",
+                    "Attach",
+                    b::ButtonOpts::new(b::ButtonVariant::Ghost, "attach-hint")
+                        .focused(attach_focused),
+                );
+                let new_focused = c
+                    .widgets
+                    .focus
+                    .focused()
+                    .is_some_and(|f| f == "console-new");
+                b::button(
+                    s,
+                    "console-new",
+                    "New",
+                    b::ButtonOpts::new(b::ButtonVariant::Ghost, "new-session").focused(new_focused),
+                );
                 let state = if c.abort_enabled() {
                     b::ButtonState::Rest
                 } else {
@@ -195,6 +285,46 @@ pub fn refresh(c: &mut Console, w: f32, h: f32) -> (App, hamesh_layout::LayoutOu
 /// submit, feed scroll. The core has no Enter-on-button, so Enter on
 /// the focused Abort button maps to the same abort intent as a pointer
 /// press (same gate); everything else goes through the shared core.
+/// Parse an `/attach` submit into an [`AttachRequest`]. Missing
+/// dir/cwd fall back to the host's last session (`""` = unset);
+/// a bare `/attach` reports usage instead of stashing anything.
+fn parse_attach(text: &str) -> Result<AttachRequest, String> {
+    let mut parts = text.split_whitespace();
+    match (parts.next(), parts.next(), parts.next(), parts.next()) {
+        (Some("/attach"), Some(id), dir, cwd) if !id.is_empty() => Ok(AttachRequest {
+            id: id.to_string(),
+            dir: dir.unwrap_or_default().to_string(),
+            cwd: cwd.unwrap_or_default().to_string(),
+        }),
+        _ => Err("usage: /attach <id> [dir] [cwd]".to_string()),
+    }
+}
+
+/// Parse an `/new` submit into a [`NewRequest`]. Optional dir/cwd fall
+/// back to the host's current session (`""` = unset); a bare `/new`
+/// starts a fresh session in the same place, which is the common case.
+fn parse_new(text: &str) -> Result<NewRequest, String> {
+    let mut parts = text.split_whitespace();
+    match (parts.next(), parts.next(), parts.next(), parts.next()) {
+        (Some("/new"), dir, cwd, None) => Ok(NewRequest {
+            dir: dir.unwrap_or_default().to_string(),
+            cwd: cwd.unwrap_or_default().to_string(),
+        }),
+        _ => Err("usage: /new [dir] [cwd]".to_string()),
+    }
+}
+
+/// Prefill the composer with a slash-command prefix and hand over the
+/// composer: the one hand-over the Attach and New buttons share.
+fn prefill(c: &mut Console, prefix: &str) {
+    c.widgets.composer.text = prefix.to_string();
+    c.widgets.composer.caret = prefix.chars().count();
+    c.widgets.composer.preedit = None;
+    if let Some(pos) = c.widgets.focus.order.iter().position(|o| o == "composer") {
+        c.widgets.focus.current = pos;
+    }
+}
+
 pub fn key(c: &mut Console, app: &mut App, k: &Key) -> String {
     if matches!(k, Key::Enter) && c.widgets.focus.focused() == Some("console-abort") {
         return if c.abort_enabled() {
@@ -202,6 +332,43 @@ pub fn key(c: &mut Console, app: &mut App, k: &Key) -> String {
         } else {
             "abort-run disabled: nothing to abort".to_string()
         };
+    }
+    if matches!(k, Key::Enter) && c.widgets.focus.focused() == Some("console-attach") {
+        // Attach button: prefill the slash command and hand over the
+        // composer, pointer-press equivalent.
+        prefill(c, "/attach ");
+        return "attach: type /attach <id> [dir] [cwd]".to_string();
+    }
+    if matches!(k, Key::Enter) && c.widgets.focus.focused() == Some("console-new") {
+        // New button: the same hand-over, for a fresh session.
+        prefill(c, "/new ");
+        return "new: type /new [dir] [cwd]".to_string();
+    }
+    if matches!(k, Key::Enter) && c.widgets.focus.focused() == Some("composer") {
+        // Fold any preedit so the prefix test sees the real text.
+        c.widgets.composer.commit("");
+        if c.widgets.composer.text.starts_with("/attach")
+            || c.widgets.composer.text.starts_with("/new")
+        {
+            let text = std::mem::take(&mut c.widgets.composer.text);
+            c.widgets.composer.caret = 0;
+            if text.starts_with("/new") {
+                return match parse_new(&text) {
+                    Ok(req) => {
+                        c.pending_new = Some(req);
+                        "new session requested".to_string()
+                    }
+                    Err(usage) => usage,
+                };
+            }
+            return match parse_attach(&text) {
+                Ok(req) => {
+                    c.pending_attach = Some(req);
+                    "attach requested".to_string()
+                }
+                Err(usage) => usage,
+            };
+        }
     }
     let note = handle_key(app, &mut c.widgets, k);
     sync_feed_count(app, &c.widgets);
@@ -220,6 +387,17 @@ pub fn press(c: &mut Console, app: &App, scene: &hamesh_scene::Scene, x: f32, y:
                 } else {
                     "abort-run disabled: nothing to abort".to_string()
                 }
+            }
+            Hit::Action { command } if command == "attach-hint" => {
+                // Prefill the slash command and hand over the composer:
+                // pointer equivalent of Tab-to-Attach + Enter.
+                prefill(c, "/attach ");
+                "attach: type /attach <id> [dir] [cwd]".to_string()
+            }
+            Hit::Action { command } if command == "new-session" => {
+                // Pointer equivalent of Tab-to-New + Enter.
+                prefill(c, "/new ");
+                "new: type /new [dir] [cwd]".to_string()
             }
             Hit::Action { command } => format!("unknown command {command}"),
             Hit::ListRow { .. } => {
@@ -270,6 +448,9 @@ mod tests {
                 "console-count",
                 "feed",
                 "composer",
+                "console-attach-hint",
+                "console-attach",
+                "console-new",
                 "console-abort",
             ] {
                 assert!(app.get(id).is_some(), "missing {id} at {w}x{h}");
@@ -380,18 +561,27 @@ mod tests {
     fn tab_reaches_abort_and_enter_runs_the_shared_gate() {
         let mut c = Console::new();
         let (mut app, _) = refresh(&mut c, 800.0, 600.0);
-        // Idle: Abort is disabled, so Tab skips it (feed -> composer).
+        // Idle: Abort is disabled, so Tab skips it (feed -> composer
+        // -> attach -> new).
         assert_eq!(c.widgets.focus.focused(), Some("feed"));
         let _ = key(&mut c, &mut app, &Key::Tab);
         assert_eq!(c.widgets.focus.focused(), Some("composer"));
         let _ = key(&mut c, &mut app, &Key::Tab);
+        assert_eq!(c.widgets.focus.focused(), Some("console-attach"));
+        let _ = key(&mut c, &mut app, &Key::Tab);
+        assert_eq!(c.widgets.focus.focused(), Some("console-new"));
+        let _ = key(&mut c, &mut app, &Key::Tab);
         assert_eq!(c.widgets.focus.focused(), Some("feed"));
-        // Streaming: Abort enables and joins the Tab order; Enter
-        // raises the same intent as a pointer press, for the host to
-        // translate into a worker cancel.
+        // Streaming: Abort enables and joins the Tab order after Attach
+        // and New; Enter raises the same intent as a pointer press, for
+        // the host to translate into a worker cancel.
         c.set_status("m", "s", 1, true);
         let (mut app2, _) = refresh(&mut c, 800.0, 600.0);
         let _ = key(&mut c, &mut app2, &Key::Tab);
+        let _ = key(&mut c, &mut app2, &Key::Tab);
+        assert_eq!(c.widgets.focus.focused(), Some("console-attach"));
+        let _ = key(&mut c, &mut app2, &Key::Tab);
+        assert_eq!(c.widgets.focus.focused(), Some("console-new"));
         let _ = key(&mut c, &mut app2, &Key::Tab);
         assert_eq!(c.widgets.focus.focused(), Some("console-abort"));
         let note = key(&mut c, &mut app2, &Key::Enter);
@@ -401,5 +591,223 @@ mod tests {
         c.set_status("m", "s", 1, false);
         let note = key(&mut c, &mut app2, &Key::Enter);
         assert!(note.contains("disabled"), "{note}");
+    }
+
+    #[test]
+    fn attach_slash_command_parses_and_stashes() {
+        let mut c = Console::new();
+        let (mut app, _) = refresh(&mut c, 800.0, 600.0);
+        // Focus the composer, type the command, submit.
+        let _ = key(&mut c, &mut app, &Key::Tab);
+        for ch in "/attach ax-2 d:/x d:/x".chars() {
+            let _ = key(&mut c, &mut app, &Key::Char(ch));
+        }
+        let note = key(&mut c, &mut app, &Key::Enter);
+        assert_eq!(note, "attach requested");
+        assert_eq!(
+            c.pending_attach,
+            Some(AttachRequest {
+                id: "ax-2".to_string(),
+                dir: "d:/x".to_string(),
+                cwd: "d:/x".to_string(),
+            })
+        );
+        // Dir/cwd fall back to empty (host fills from last session).
+        let (mut app2, _) = refresh(&mut c, 800.0, 600.0);
+        for ch in "/attach ax-3".chars() {
+            let _ = key(&mut c, &mut app2, &Key::Char(ch));
+        }
+        let _ = key(&mut c, &mut app2, &Key::Enter);
+        // Normal prompts are untouched by the slash-command path.
+        let (mut app3, _) = refresh(&mut c, 800.0, 600.0);
+        for ch in "hello".chars() {
+            let _ = key(&mut c, &mut app3, &Key::Char(ch));
+        }
+        let note = key(&mut c, &mut app3, &Key::Enter);
+        assert!(note.contains("submitted"), "{note}");
+        assert!(c.pending_attach.is_some(), "attach stash survives");
+    }
+
+    /// Text of a caption/component id, or "" when the node is absent.
+    fn text_of(app: &App, id: &str) -> String {
+        app.get(id)
+            .and_then(|c| c.props.get("text").cloned())
+            .unwrap_or_default()
+    }
+
+    #[test]
+    fn error_state_paints_a_headline_and_turns_the_badge() {
+        let mut c = Console::new();
+        let (app, _layout, scene) = frame(&mut c, 800.0, 600.0);
+        assert!(app.get("console-error").is_none(), "no error, no node");
+        assert_eq!(text_of(&app, "console-status"), "Idle");
+
+        c.set_error(Some("boom"));
+        assert!(c.has_error());
+        let (app2, _layout2, scene2) = frame(&mut c, 800.0, 600.0);
+        assert_eq!(text_of(&app2, "console-error"), "boom");
+        assert!(app2.get("console-attach-hint").is_none(), "the hint yields");
+        let badge = app2.get("console-status").unwrap();
+        assert_eq!(badge.props.get("text").map(|s| s.as_str()), Some("Error"));
+        assert_eq!(
+            badge.props.get("variant").map(|s| s.as_str()),
+            Some("error")
+        );
+        for n in &scene2.nodes {
+            assert!(!n.clipped, "{} clipped while showing an error", n.id);
+        }
+        let _ = (scene, 800.0);
+
+        // Wider window: same story, still nothing clipped.
+        let (app3, _l3, scene3) = frame(&mut c, 1440.0, 900.0);
+        assert_eq!(text_of(&app3, "console-error"), "boom");
+        for n in &scene3.nodes {
+            assert!(!n.clipped, "{} clipped at 1440x900", n.id);
+        }
+
+        // Clearing removes the node and restores the hint.
+        c.set_error(None);
+        assert!(!c.has_error());
+        let (app4, _l4, scene4) = frame(&mut c, 800.0, 600.0);
+        assert!(app4.get("console-error").is_none());
+        assert_eq!(text_of(&app4, "console-attach-hint"), "/attach · /new");
+        assert_eq!(text_of(&app4, "console-status"), "Idle");
+        for n in &scene4.nodes {
+            assert!(!n.clipped, "{} clipped after clearing", n.id);
+        }
+    }
+
+    #[test]
+    fn long_errors_are_bounded_and_never_clip() {
+        let mut c = Console::new();
+        let long = "x".repeat(400);
+        c.set_error(Some(&long));
+        let head = c.error.clone().unwrap();
+        assert_eq!(head.chars().count(), 61, "60 chars plus the ellipsis");
+        assert!(head.ends_with('…'));
+        // Worst case reaches the tree as one bounded line: no node may
+        // be clipped at the narrowest supported window.
+        for (w, h) in [(800.0, 600.0), (1440.0, 900.0)] {
+            let (app, _layout, scene) = frame(&mut c, w, h);
+            assert_eq!(text_of(&app, "console-error").chars().count(), 61);
+            for n in &scene.nodes {
+                assert!(!n.clipped, "{} clipped at {w}x{h}", n.id);
+            }
+        }
+    }
+
+    #[test]
+    fn error_outranks_the_streaming_badge_until_cleared() {
+        let mut c = Console::new();
+        c.set_status("m", "s", 3, true);
+        let (app, _layout, _scene) = frame(&mut c, 800.0, 600.0);
+        assert_eq!(text_of(&app, "console-status"), "Streaming");
+        c.set_error(Some("state: timeout"));
+        let (app2, _layout2, _scene2) = frame(&mut c, 800.0, 600.0);
+        assert_eq!(text_of(&app2, "console-status"), "Error");
+        c.set_error(None);
+        let (app3, _layout3, _scene3) = frame(&mut c, 800.0, 600.0);
+        assert_eq!(
+            text_of(&app3, "console-status"),
+            "Streaming",
+            "clearing the error restores the run badge"
+        );
+    }
+
+    #[test]
+    fn new_command_parses_and_stashes() {
+        let mut c = Console::new();
+        let (mut app, _) = refresh(&mut c, 800.0, 600.0);
+        let _ = key(&mut c, &mut app, &Key::Tab); // composer
+        for ch in "/new".chars() {
+            let _ = key(&mut c, &mut app, &Key::Char(ch));
+        }
+        let note = key(&mut c, &mut app, &Key::Enter);
+        assert_eq!(note, "new session requested");
+        // A bare /new means "same place, fresh session": the host fills
+        // dir/cwd from the session it is on.
+        assert_eq!(
+            c.pending_new,
+            Some(NewRequest {
+                dir: String::new(),
+                cwd: String::new(),
+            })
+        );
+        assert!(c.pending_attach.is_none(), "the two commands stay distinct");
+        // Explicit dir/cwd win.
+        let (mut app2, _) = refresh(&mut c, 800.0, 600.0);
+        for ch in "/new d:/s d:/w".chars() {
+            let _ = key(&mut c, &mut app2, &Key::Char(ch));
+        }
+        let _ = key(&mut c, &mut app2, &Key::Enter);
+        assert_eq!(
+            c.pending_new,
+            Some(NewRequest {
+                dir: "d:/s".to_string(),
+                cwd: "d:/w".to_string(),
+            })
+        );
+        // Extra fields are refused, not guessed.
+        let (mut app3, _) = refresh(&mut c, 800.0, 600.0);
+        for ch in "/new a b c".chars() {
+            let _ = key(&mut c, &mut app3, &Key::Char(ch));
+        }
+        let note = key(&mut c, &mut app3, &Key::Enter);
+        assert!(note.contains("usage"), "{note}");
+        assert!(c.widgets.feed.messages.is_empty(), "nothing submitted");
+    }
+
+    #[test]
+    fn new_button_prefills_and_enters() {
+        let mut c = Console::new();
+        let (app, _layout, scene) = frame(&mut c, 800.0, 600.0);
+        let (x, y) = center_of(&scene, "console-new");
+        let note = press(&mut c, &app, &scene, x, y);
+        assert!(note.contains("/new"), "{note}");
+        assert_eq!(c.widgets.composer.text, "/new ");
+        assert_eq!(c.widgets.focus.focused(), Some("composer"));
+        // Keyboard equivalence: Tab to the button, Enter prefills.
+        let (mut app2, _, _scene2) = frame(&mut c, 800.0, 600.0);
+        let _ = key(&mut c, &mut app2, &Key::Tab); // composer -> attach
+        let _ = key(&mut c, &mut app2, &Key::Tab); // attach -> new
+        assert_eq!(c.widgets.focus.focused(), Some("console-new"));
+        let note = key(&mut c, &mut app2, &Key::Enter);
+        assert!(note.contains("/new"), "{note}");
+        assert_eq!(c.widgets.composer.text, "/new ");
+    }
+
+    #[test]
+    fn attach_bare_command_reports_usage() {
+        let mut c = Console::new();
+        let (mut app, _) = refresh(&mut c, 800.0, 600.0);
+        let _ = key(&mut c, &mut app, &Key::Tab);
+        for ch in "/attach".chars() {
+            let _ = key(&mut c, &mut app, &Key::Char(ch));
+        }
+        let note = key(&mut c, &mut app, &Key::Enter);
+        assert!(note.contains("usage"), "{note}");
+        assert!(c.pending_attach.is_none());
+        assert!(c.widgets.feed.messages.is_empty(), "nothing submitted");
+    }
+
+    #[test]
+    fn attach_button_prefills_and_enters() {
+        let mut c = Console::new();
+        let (app, _layout, scene) = frame(&mut c, 800.0, 600.0);
+        let (x, y) = center_of(&scene, "console-attach");
+        let note = press(&mut c, &app, &scene, x, y);
+        assert!(note.contains("/attach"), "{note}");
+        assert_eq!(c.widgets.composer.text, "/attach ");
+        assert_eq!(c.widgets.focus.focused(), Some("composer"));
+        // Same path through the keyboard: Tab to the button, Enter.
+        // (Press already put keyboard focus on the composer, so one
+        // Tab reaches Attach — the button the press just used.)
+        let (mut app2, _, scene2) = frame(&mut c, 800.0, 600.0);
+        let _ = key(&mut c, &mut app2, &Key::Tab);
+        assert_eq!(c.widgets.focus.focused(), Some("console-attach"));
+        let note = key(&mut c, &mut app2, &Key::Enter);
+        assert!(note.contains("/attach"), "{note}");
+        let _ = app;
+        let _ = scene2;
     }
 }
