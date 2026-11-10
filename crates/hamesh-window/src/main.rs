@@ -25,7 +25,7 @@ mod pi_panel;
 
 use std::num::NonZeroU32;
 use std::sync::Arc;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 use winit::application::ApplicationHandler;
 use winit::event::{ElementState, Ime, MouseButton, WindowEvent};
 use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop, EventLoopProxy};
@@ -3050,8 +3050,13 @@ impl ApplicationHandler<UserEvent> for HameshWindowApp {
                 }
             }
             WindowEvent::RedrawRequested => {
+                let before = self.frames;
                 self.paint();
-                self.presented_rev = self.scene_rev;
+                // A failed present is not evidence of a visible frame.
+                // Try again at the next wake rather than losing the update.
+                if self.frames > before {
+                    self.presented_rev = self.scene_rev;
+                }
             }
             _ => {}
         }
@@ -3100,7 +3105,7 @@ impl ApplicationHandler<UserEvent> for HameshWindowApp {
         }
         if let Some(deadline) = self.smoke_deadline {
             if Instant::now() >= deadline {
-                // Fire once: with ControlFlow::Poll the loop can re-enter
+                // Fire once: a timer or external event can re-enter
                 // about_to_wait before event_loop.exit() takes effect,
                 // which used to double-dump inspection, snapshot, trace
                 // and verdict lines.
@@ -3123,14 +3128,17 @@ impl ApplicationHandler<UserEvent> for HameshWindowApp {
                 return;
             }
         }
-        // Keep the Poll-driven channel/timer service for this first slice,
-        // but paint only when the UI changed. A later slice can replace Poll
-        // with event-loop wakes once Pi worker notifications are wired.
+        // Poll Pi channels and pending deadlines at a bounded 16 ms cadence.
+        // Window/inspector events still wake immediately; unlike Poll this
+        // does not spin the UI thread while the window is unchanged.
         if self.scene_rev != self.presented_rev {
             if let Some(window) = &self.window {
                 window.request_redraw();
             }
         }
+        event_loop.set_control_flow(ControlFlow::WaitUntil(
+            Instant::now() + Duration::from_millis(16),
+        ));
     }
 }
 
@@ -3147,7 +3155,9 @@ fn main() {
     let event_loop = EventLoop::<UserEvent>::with_user_event()
         .build()
         .expect("event loop");
-    event_loop.set_control_flow(ControlFlow::Poll);
+    event_loop.set_control_flow(ControlFlow::WaitUntil(
+        Instant::now() + Duration::from_millis(16),
+    ));
     let mut app = HameshWindowApp::new();
     app.use_gpu = std::env::args().any(|a| a == "--gpu");
     if app.use_gpu {
