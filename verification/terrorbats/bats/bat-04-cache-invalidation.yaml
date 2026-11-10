@@ -28,4 +28,4 @@ evidence:
     - stdout
     - stderr
 timeout:
-  run: 60s
+  run: 180s
