@@ -103,6 +103,58 @@ fn connect_fake() -> (PiClient, std::thread::JoinHandle<()>) {
     panic!("fake Pi unreachable: {:?}", last);
 }
 
+
+#[test]
+fn abort_interrupts_a_silent_in_flight_prompt() {
+    // The fake accepts a prompt but sends no deltas or settlement until
+    // an abort arrives. A serial worker that processes Abort only AFTER
+    // prompt_and_wait would deadlock here.
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let addr = listener.local_addr().unwrap();
+    let server = std::thread::spawn(move || {
+        let (stream, _) = listener.accept().unwrap();
+        let mut reader = BufReader::new(stream.try_clone().unwrap());
+        let mut writer = stream;
+        let mut line = String::new();
+
+        reader.read_line(&mut line).unwrap();
+        let prompt: serde_json::Value = serde_json::from_str(&line).unwrap();
+        assert_eq!(prompt["type"], "prompt");
+        respond(
+            &mut writer,
+            prompt["id"].as_str().unwrap(),
+            "prompt",
+            "{\"disposition\":\"queued\"}",
+        );
+
+        line.clear();
+        reader.read_line(&mut line).unwrap();
+        let abort: serde_json::Value = serde_json::from_str(&line).unwrap();
+        assert_eq!(abort["type"], "abort");
+        respond(&mut writer, abort["id"].as_str().unwrap(), "abort", "{}");
+        event(&mut writer, "{\"type\":\"agent_settled\",\"aborted\":true}");
+    });
+
+    let mut client = PiClient::connect(TcpTransport::connect(&addr).unwrap());
+    let mut polls = 0;
+    let (text, aborted) = client
+        .prompt_and_wait_with_abort(
+            "wait until cancelled",
+            &mut |_| panic!("unexpected text delta"),
+            Duration::from_secs(3),
+            &mut || {
+                polls += 1;
+                polls >= 2
+            },
+        )
+        .expect("cancel a prompt even when the model produces no text");
+    assert!(aborted);
+    assert!(text.is_empty());
+    assert!(polls >= 2);
+    drop(client);
+    server.join().expect("fake abort server");
+}
+
 #[test]
 fn full_session_against_fake() {
     let (mut client, handle) = connect_fake();
