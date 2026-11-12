@@ -87,11 +87,23 @@ impl WorkbenchApp {
                 self.status_message = "Executed: File -> New Document".to_string();
             }
             WorkbenchCommand::FileOpen => {
-                self.text_input_value = "Loaded: project_sample.txt".to_string();
-                self.status_message = "Executed: File -> Open File...".to_string();
+                if let Ok(content) = std::fs::read_to_string("workbench_demo.txt") {
+                    self.text_input_value = content;
+                    self.status_message = "File -> Open: Read text from workbench_demo.txt".to_string();
+                } else {
+                    self.text_input_value = "Loaded demo template (workbench_demo.txt not found on disk)".to_string();
+                    self.status_message = "Demo: No workbench_demo.txt found; loaded template into editor.".to_string();
+                }
             }
             WorkbenchCommand::FileSave => {
-                self.status_message = format!("Executed: File -> Saved {} bytes", self.text_input_value.len());
+                match std::fs::write("workbench_demo.txt", &self.text_input_value) {
+                    Ok(_) => {
+                        self.status_message = format!("File -> Save: Written {} bytes to workbench_demo.txt", self.text_input_value.len());
+                    }
+                    Err(e) => {
+                        self.status_message = format!("File -> Save failed: {}", e);
+                    }
+                }
             }
             WorkbenchCommand::FileExit => {
                 ctx.exit();
@@ -565,10 +577,10 @@ impl HameshApp for WorkbenchApp {
         let (x, y) = ctx.cursor;
         let (_, scene) = self.view(ctx.app, ctx.size, 1);
 
-        // Find clicked component by semantic ID and geometry
-        let clicked = scene.nodes.iter().rev().find(|n| n.rect.contains(x, y));
+        // Visibility-aware and clipping-aware hit test:
+        let hit_id = hamesh_scene::hit_test(ctx.app, &scene, x, y);
 
-        let Some(node) = clicked else {
+        let Some(ref comp_id_str) = hit_id else {
             if self.open_menu.is_some() {
                 self.open_menu = None;
                 self.rebuild_ui(ctx.app);
@@ -577,7 +589,7 @@ impl HameshApp for WorkbenchApp {
             return;
         };
 
-        let comp_id = node.id.as_str();
+        let comp_id = comp_id_str.as_str();
 
         // 1. Menu Bar Clicks
         if let Some(m) = comp_id.strip_prefix("menu_bar_btn_") {

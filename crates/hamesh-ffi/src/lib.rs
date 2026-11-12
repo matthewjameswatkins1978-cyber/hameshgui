@@ -7,16 +7,20 @@
 //! # Safety & Stability Guarantees
 //! - Versioned C ABI (Major: 0, Minor: 4, Patch: 2)
 //! - No Rust panics escape across the extern "C" boundary (`catch_unwind` guards)
-//! - Opaque pointer validation (null check + pointer validation)
-//! - Result codes for every mutating operation (duplicate ID, missing parent, invalid UTF-8)
-//! - Explicit ownership: client frees handles with `hamesh_app_destroy`
+//! - Explicit ownership: client creates handles with `hamesh_app_create` and must free them with `hamesh_app_destroy`
+//! - Pointer preconditions: Non-null pointers passed to C ABI functions must be valid, aligned pointers
+//!   previously returned by `hamesh_app_create` or valid null-terminated UTF-8 C strings.
+//!   Dereferencing arbitrary, unaligned or dangling foreign pointers is undefined behaviour in C.
+//! - Result codes for every mutating operation (`HameshStatus::Ok`, `NullPointer`, `InvalidUtf8`, `DuplicateId`, `ParentNotFound`, `InvalidRole`)
 //! - Thread-safe internal synchronisation via `Arc<Mutex<App>>`
-//! - Non-blocking event queueing from UI thread to foreign language callbacks
+//! - Deadlock-free event delivery: all internal locks are released before invoking foreign callbacks
+//! - Exactly-once event dispatch: events are dispatched synchronously to the registered callback, or queued for polling only when no callback is registered
 
 use std::collections::VecDeque;
 use std::ffi::{CStr, CString};
 use std::os::raw::{c_char, c_int, c_void};
 use std::panic::catch_unwind;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
 use hamesh_core::{App, Component, Role};
@@ -42,7 +46,7 @@ pub enum HameshStatus {
     Error = 8,
 }
 
-/// An event delivered from the UI thread to a foreign language callback.
+/// An event delivered from the UI thread to a foreign language callback or poll queue.
 #[derive(Debug, Clone)]
 pub struct QueuedEvent {
     pub comp_id: String,
@@ -56,10 +60,29 @@ pub struct HameshAppHandle {
     pub on_event: Option<extern "C" fn(*mut c_void, *const c_char, *const c_char, *const c_char)>,
     pub user_data: *mut c_void,
     pub event_queue: Arc<Mutex<VecDeque<QueuedEvent>>>,
+    pub focused_id: Arc<Mutex<Option<String>>>,
+    pub exit_requested: Arc<AtomicBool>,
 }
 
 unsafe impl Send for HameshAppHandle {}
 unsafe impl Sync for HameshAppHandle {}
+
+impl HameshAppHandle {
+    pub fn dispatch_event(&self, comp_id: &str, event_type: &str, payload: &str) {
+        if let Some(cb) = self.on_event {
+            let id_c = CString::new(comp_id).unwrap_or_default();
+            let type_c = CString::new(event_type).unwrap_or_default();
+            let payload_c = CString::new(payload).unwrap_or_default();
+            cb(self.user_data, id_c.as_ptr(), type_c.as_ptr(), payload_c.as_ptr());
+        } else if let Ok(mut q) = self.event_queue.lock() {
+            q.push_back(QueuedEvent {
+                comp_id: comp_id.to_string(),
+                event_type: event_type.to_string(),
+                payload: payload.to_string(),
+            });
+        }
+    }
+}
 
 /// Query the C ABI version.
 #[no_mangle]
@@ -87,6 +110,8 @@ pub unsafe extern "C" fn hamesh_app_create(root_id: *const c_char) -> *mut Hames
             on_event: None,
             user_data: std::ptr::null_mut(),
             event_queue: Arc::new(Mutex::new(VecDeque::new())),
+            focused_id: Arc::new(Mutex::new(None)),
+            exit_requested: Arc::new(AtomicBool::new(false)),
         });
         Box::into_raw(handle)
     });
@@ -123,14 +148,6 @@ pub unsafe extern "C" fn hamesh_app_get_revision(app: *mut HameshAppHandle) -> u
 }
 
 /// Add a component to the app tree.
-///
-/// Returns:
-/// - `HameshStatus::Ok` on success
-/// - `HameshStatus::NullPointer` if any argument is null
-/// - `HameshStatus::InvalidUtf8` if any string is not valid UTF-8
-/// - `HameshStatus::DuplicateId` if `comp_id` already exists in the tree
-/// - `HameshStatus::ParentNotFound` if `parent_id` is not present
-/// - `HameshStatus::InvalidRole` if `role_code` is outside 0..=9
 #[no_mangle]
 pub unsafe extern "C" fn hamesh_app_add_component(
     app: *mut HameshAppHandle,
@@ -177,12 +194,12 @@ pub unsafe extern "C" fn hamesh_app_add_component(
             Err(_) => return HameshStatus::Error,
         };
 
-        // Safety check 1: Duplicate Component ID (Prevents panic in App::add)
+        // Duplicate Component ID pre-check (Prevents panic in App::add)
         if guard.components.contains_key(id_str) {
             return HameshStatus::DuplicateId;
         }
 
-        // Safety check 2: Missing Parent ID
+        // Missing Parent ID pre-check
         if !guard.components.contains_key(parent_str) {
             return HameshStatus::ParentNotFound;
         }
@@ -196,6 +213,8 @@ pub unsafe extern "C" fn hamesh_app_add_component(
 }
 
 /// Set a string property on an existing component.
+///
+/// Note: Setting key "visible" also updates `component.visible` boolean directly.
 #[no_mangle]
 pub unsafe extern "C" fn hamesh_app_set_prop(
     app: *mut HameshAppHandle,
@@ -229,6 +248,9 @@ pub unsafe extern "C" fn hamesh_app_set_prop(
 
         if let Some(comp) = guard.get_mut(id_str) {
             comp.props.insert(key_str.to_string(), val_str.to_string());
+            if key_str == "visible" {
+                comp.visible = val_str == "true" || val_str == "1";
+            }
             guard.revision += 1;
             HameshStatus::Ok
         } else {
@@ -239,9 +261,67 @@ pub unsafe extern "C" fn hamesh_app_set_prop(
     result.unwrap_or(HameshStatus::PanicCaught)
 }
 
+/// Set visibility on an existing component.
+///
+/// When `visible` is 0 (false), the component and all its descendants are marked
+/// effectively invisible: they do not paint and are ignored by `hamesh_scene::hit_test`.
+#[no_mangle]
+pub unsafe extern "C" fn hamesh_app_set_visible(
+    app: *mut HameshAppHandle,
+    comp_id: *const c_char,
+    visible: c_int,
+) -> HameshStatus {
+    let result = catch_unwind(|| {
+        if app.is_null() || comp_id.is_null() {
+            return HameshStatus::NullPointer;
+        }
+
+        let id_str = match CStr::from_ptr(comp_id).to_str() {
+            Ok(s) => s,
+            Err(_) => return HameshStatus::InvalidUtf8,
+        };
+
+        let handle = &*app;
+        let mut guard = match handle.inner.lock() {
+            Ok(g) => g,
+            Err(_) => return HameshStatus::Error,
+        };
+
+        if let Some(comp) = guard.get_mut(id_str) {
+            comp.visible = visible != 0;
+            comp.props.insert("visible".to_string(), if comp.visible { "true".to_string() } else { "false".to_string() });
+            guard.revision += 1;
+            HameshStatus::Ok
+        } else {
+            HameshStatus::NotFound
+        }
+    });
+
+    result.unwrap_or(HameshStatus::PanicCaught)
+}
+
+/// Request graceful window shutdown through supported Hamesh shell operation.
+#[no_mangle]
+pub unsafe extern "C" fn hamesh_app_request_exit(app: *mut HameshAppHandle) -> HameshStatus {
+    let result = catch_unwind(|| {
+        if app.is_null() {
+            return HameshStatus::NullPointer;
+        }
+        let handle = &*app;
+        handle.exit_requested.store(true, Ordering::SeqCst);
+        HameshStatus::Ok
+    });
+
+    result.unwrap_or(HameshStatus::PanicCaught)
+}
+
 /// Register a foreign-language callback for UI events.
 ///
 /// Signature: `callback(user_data, comp_id, event_type, payload)`
+///
+/// Contract: Events are dispatched synchronously and exactly once to this callback
+/// after internal application locks have been released, guaranteeing safe reentrancy
+/// (`set_prop`, `set_visible`, `request_exit`).
 #[no_mangle]
 pub unsafe extern "C" fn hamesh_app_set_event_callback(
     app: *mut HameshAppHandle,
@@ -261,7 +341,7 @@ pub unsafe extern "C" fn hamesh_app_set_event_callback(
     result.unwrap_or(HameshStatus::PanicCaught)
 }
 
-/// Poll and dispatch queued events. Safe to call from UI or worker thread.
+/// Poll and dispatch queued events if no synchronous callback was registered.
 #[no_mangle]
 pub unsafe extern "C" fn hamesh_app_poll_events(app: *mut HameshAppHandle) -> c_int {
     let result = catch_unwind(|| {
@@ -289,32 +369,262 @@ pub unsafe extern "C" fn hamesh_app_poll_events(app: *mut HameshAppHandle) -> c_
     result.unwrap_or(0)
 }
 
+/// Set keyboard focus on a specific component by ID.
+#[no_mangle]
+pub unsafe extern "C" fn hamesh_app_set_focus(
+    app: *mut HameshAppHandle,
+    comp_id: *const c_char,
+) -> HameshStatus {
+    let result = catch_unwind(|| {
+        if app.is_null() || comp_id.is_null() {
+            return HameshStatus::NullPointer;
+        }
+        let id_str = match CStr::from_ptr(comp_id).to_str() {
+            Ok(s) => s,
+            Err(_) => return HameshStatus::InvalidUtf8,
+        };
+        let handle = &*app;
+        let guard = match handle.inner.lock() {
+            Ok(g) => g,
+            Err(_) => return HameshStatus::Error,
+        };
+        if !guard.components.contains_key(id_str) {
+            return HameshStatus::NotFound;
+        }
+        drop(guard);
+        if let Ok(mut f) = handle.focused_id.lock() {
+            *f = Some(id_str.to_string());
+        }
+        HameshStatus::Ok
+    });
+    result.unwrap_or(HameshStatus::PanicCaught)
+}
+
+
+/// Programmatically simulate a mouse click at (x, y) coordinates.
+///
+/// Uses Hamesh's visibility-aware and clipping-aware hit-testing.
+/// If a component is hit, dispatches a "click" event outside of locks.
+/// Returns `HameshStatus::Ok` if a visible component was hit, or `HameshStatus::NotFound` if not.
+#[no_mangle]
+pub unsafe extern "C" fn hamesh_app_simulate_click(
+    app: *mut HameshAppHandle,
+    x: f32,
+    y: f32,
+    width: u32,
+    height: u32,
+) -> HameshStatus {
+    let result = catch_unwind(|| {
+        if app.is_null() {
+            return HameshStatus::NullPointer;
+        }
+        let handle = &*app;
+        let mut hit_id_opt = None;
+        let mut is_text_input = false;
+
+        {
+            let guard = match handle.inner.lock() {
+                Ok(g) => g,
+                Err(_) => return HameshStatus::Error,
+            };
+            let w = if width > 0 { width as f32 } else { 800.0 };
+            let h = if height > 0 { height as f32 } else { 600.0 };
+            let layout = hamesh_layout::compute(&guard, w, h);
+            let scene = hamesh_scene::build(&guard, &layout, guard.revision);
+            if let Some(id) = hamesh_scene::hit_test(&guard, &scene, x, y) {
+                if let Some(comp) = guard.components.get(&id) {
+                    if comp.role == Role::TextInput {
+                        is_text_input = true;
+                    }
+                }
+                hit_id_opt = Some(id);
+            }
+        }
+
+        if let Some(ref hit_id) = hit_id_opt {
+            if is_text_input {
+                if let Ok(mut f) = handle.focused_id.lock() {
+                    *f = Some(hit_id.clone());
+                }
+            }
+            // Dispatched with ZERO locks held
+            handle.dispatch_event(hit_id, "click", "");
+            HameshStatus::Ok
+        } else {
+            HameshStatus::NotFound
+        }
+    });
+
+    result.unwrap_or(HameshStatus::PanicCaught)
+}
+
+/// Programmatically simulate a click on a component by ID.
+///
+/// Uses Hamesh's scene construction and visibility-aware, clipping-aware hit-testing.
+/// If the component is invisible, covered, or clipped away, returns `HameshStatus::NotFound`.
+/// If visible and hit-testable, dispatches "click" and returns `HameshStatus::Ok`.
+#[no_mangle]
+pub unsafe extern "C" fn hamesh_app_simulate_click_component(
+    app: *mut HameshAppHandle,
+    comp_id: *const c_char,
+    width: u32,
+    height: u32,
+) -> HameshStatus {
+    let result = catch_unwind(|| {
+        if app.is_null() || comp_id.is_null() {
+            return HameshStatus::NullPointer;
+        }
+        let id_str = match CStr::from_ptr(comp_id).to_str() {
+            Ok(s) => s,
+            Err(_) => return HameshStatus::InvalidUtf8,
+        };
+
+        let handle = &*app;
+        let mut hit_id_opt = None;
+        let mut is_text_input = false;
+
+        {
+            let guard = match handle.inner.lock() {
+                Ok(g) => g,
+                Err(_) => return HameshStatus::Error,
+            };
+            let w = if width > 0 { width as f32 } else { 860.0 };
+            let h = if height > 0 { height as f32 } else { 600.0 };
+            let layout = hamesh_layout::compute(&guard, w, h);
+            let scene = hamesh_scene::build(&guard, &layout, guard.revision);
+
+            // Find target node in scene
+            if let Some(node) = scene.nodes.iter().find(|n| n.id == id_str) {
+                // If effectively invisible, cannot receive clicks:
+                if !node.visible {
+                    return HameshStatus::NotFound;
+                }
+                let cx = node.rect.x + (node.rect.w / 2.0).max(1.0);
+                let cy = node.rect.y + (node.rect.h / 2.0).max(1.0);
+
+                if let Some(hit) = hamesh_scene::hit_test(&guard, &scene, cx, cy) {
+                    if hit == id_str {
+                        if let Some(comp) = guard.components.get(id_str) {
+                            if comp.role == Role::TextInput {
+                                is_text_input = true;
+                            }
+                        }
+                        hit_id_opt = Some(id_str.to_string());
+                    }
+                }
+            }
+        }
+
+        if let Some(ref hit_id) = hit_id_opt {
+            if is_text_input {
+                if let Ok(mut f) = handle.focused_id.lock() {
+                    *f = Some(hit_id.clone());
+                }
+            }
+            handle.dispatch_event(hit_id, "click", "");
+            HameshStatus::Ok
+        } else {
+            HameshStatus::NotFound
+        }
+    });
+
+    result.unwrap_or(HameshStatus::PanicCaught)
+}
+
+
+/// Programmatically simulate keyboard input into the currently focused component.
+///
+/// Actions supported:
+/// - "char:<string>": inserts text characters
+/// - "backspace": deletes preceding character
+/// - "space": inserts space
+/// - "enter": dispatches submit event
+#[no_mangle]
+pub unsafe extern "C" fn hamesh_app_simulate_key(
+    app: *mut HameshAppHandle,
+    key_action: *const c_char,
+) -> HameshStatus {
+    let result = catch_unwind(|| {
+        if app.is_null() || key_action.is_null() {
+            return HameshStatus::NullPointer;
+        }
+        let act_str = match CStr::from_ptr(key_action).to_str() {
+            Ok(s) => s,
+            Err(_) => return HameshStatus::InvalidUtf8,
+        };
+
+        let handle = &*app;
+        let focused_opt = handle.focused_id.lock().ok().and_then(|f| f.clone());
+        let Some(focused) = focused_opt else {
+            return HameshStatus::NotFound;
+        };
+
+        let mut event_to_dispatch: Option<(&'static str, String)> = None;
+        {
+            let mut guard = match handle.inner.lock() {
+                Ok(g) => g,
+                Err(_) => return HameshStatus::Error,
+            };
+
+            if let Some(comp) = guard.get_mut(&focused) {
+                let current_text = comp.props.entry("text".to_string()).or_default();
+                if act_str == "backspace" {
+                    current_text.pop();
+                    event_to_dispatch = Some(("change", current_text.clone()));
+                } else if act_str == "space" {
+                    current_text.push(' ');
+                    event_to_dispatch = Some(("change", current_text.clone()));
+                } else if act_str == "enter" {
+                    event_to_dispatch = Some(("submit", current_text.clone()));
+                } else if let Some(chars) = act_str.strip_prefix("char:") {
+                    current_text.push_str(chars);
+                    event_to_dispatch = Some(("change", current_text.clone()));
+                } else if let Some(text) = act_str.strip_prefix("text:") {
+                    current_text.push_str(text);
+                    event_to_dispatch = Some(("change", current_text.clone()));
+                }
+                if event_to_dispatch.is_some() {
+                    guard.revision += 1;
+                }
+            }
+            // Lock is explicitly released before callback dispatch!
+        }
+
+        if let Some((event_type, payload)) = event_to_dispatch {
+            handle.dispatch_event(&focused, event_type, &payload);
+        }
+
+        HameshStatus::Ok
+    });
+
+    result.unwrap_or(HameshStatus::PanicCaught)
+}
+
 /// A Shell bridge proxy that drives an external HameshAppHandle with focus and interactive editing.
 struct FfiBridgeApp {
     handle: Arc<Mutex<App>>,
     on_event: Option<extern "C" fn(*mut c_void, *const c_char, *const c_char, *const c_char)>,
     user_data: *mut c_void,
     event_queue: Arc<Mutex<VecDeque<QueuedEvent>>>,
-    focused_id: Option<String>,
+    focused_id: Arc<Mutex<Option<String>>>,
+    exit_requested: Arc<AtomicBool>,
 }
 
 unsafe impl Send for FfiBridgeApp {}
 
 impl FfiBridgeApp {
-    fn enqueue_event(&self, comp_id: &str, event_type: &str, payload: &str) {
-        if let Ok(mut q) = self.event_queue.lock() {
-            q.push_back(QueuedEvent {
-                comp_id: comp_id.to_string(),
-                event_type: event_type.to_string(),
-                payload: payload.to_string(),
-            });
-        }
-        // Direct synchronous callback invocation if registered
+    fn dispatch_event(&self, comp_id: &str, event_type: &str, payload: &str) {
         if let Some(cb) = self.on_event {
             let id_c = CString::new(comp_id).unwrap_or_default();
             let type_c = CString::new(event_type).unwrap_or_default();
             let payload_c = CString::new(payload).unwrap_or_default();
             cb(self.user_data, id_c.as_ptr(), type_c.as_ptr(), payload_c.as_ptr());
+        } else if let Ok(mut q) = self.event_queue.lock() {
+            q.push_back(QueuedEvent {
+                comp_id: comp_id.to_string(),
+                event_type: event_type.to_string(),
+                payload: payload.to_string(),
+            });
         }
     }
 }
@@ -327,28 +637,42 @@ impl HameshApp for FfiBridgeApp {
         ctx.request_redraw();
     }
 
-    fn on_mouse_click(&mut self, ctx: &mut ShellContext, _button: winit::event::MouseButton, state: ElementState) {
-        if state != ElementState::Pressed {
+    fn on_mouse_click(&mut self, ctx: &mut ShellContext, button: winit::event::MouseButton, state: ElementState) {
+        if state != ElementState::Pressed || button != winit::event::MouseButton::Left {
             return;
         }
+
+        if self.exit_requested.load(Ordering::SeqCst) {
+            ctx.exit();
+            return;
+        }
+
         let (x, y) = ctx.cursor;
         let (_, scene) = self.view(ctx.app, ctx.size, 1);
-        if let Some(node) = scene.nodes.iter().rev().find(|n| n.rect.contains(x, y)) {
-            let clicked_id = node.id.clone();
-            let role = &node.role;
 
-            if role == "TextInput" {
-                self.focused_id = Some(clicked_id.clone());
+        // Visibility-aware and clipping-aware hit test:
+        if let Some(clicked_id) = hamesh_scene::hit_test(ctx.app, &scene, x, y) {
+            if let Some(comp) = ctx.app.components.get(&clicked_id) {
+                if comp.role == Role::TextInput {
+                    if let Ok(mut f) = self.focused_id.lock() {
+                        *f = Some(clicked_id.clone());
+                    }
+                }
             }
 
-            self.enqueue_event(&clicked_id, "click", "");
+            // Phase 1: Dispatch event with ZERO internal locks held!
+            self.dispatch_event(&clicked_id, "click", "");
 
-            // Sync mutations back from handle
+            // Phase 2: Sync any mutations performed during foreign callback back to ShellContext
             if let Ok(guard) = self.handle.lock() {
                 if guard.revision != ctx.app.revision {
                     *ctx.app = guard.clone();
                     ctx.request_redraw();
                 }
+            }
+
+            if self.exit_requested.load(Ordering::SeqCst) {
+                ctx.exit();
             }
         }
     }
@@ -358,49 +682,73 @@ impl HameshApp for FfiBridgeApp {
             return;
         }
 
-        let Some(ref focused) = self.focused_id else {
+        if self.exit_requested.load(Ordering::SeqCst) {
+            ctx.exit();
+            return;
+        }
+
+        let focused_opt = self.focused_id.lock().ok().and_then(|f| f.clone());
+        let Some(focused) = focused_opt else {
             return;
         };
 
-        let mut changed_text = None;
-        if let Ok(mut guard) = self.handle.lock() {
-            if let Some(comp) = guard.get_mut(focused) {
-                let current_text = comp.props.entry("text".to_string()).or_default();
-                match key {
-                    Key::Named(NamedKey::Backspace) => {
-                        current_text.pop();
-                        changed_text = Some(current_text.clone());
+        // Phase 1: State Mutation under lock
+        let mut event_to_dispatch: Option<(&'static str, String)> = None;
+        {
+            if let Ok(mut guard) = self.handle.lock() {
+                if let Some(comp) = guard.get_mut(&focused) {
+                    let current_text = comp.props.entry("text".to_string()).or_default();
+                    match key {
+                        Key::Named(NamedKey::Backspace) => {
+                            current_text.pop();
+                            event_to_dispatch = Some(("change", current_text.clone()));
+                        }
+                        Key::Named(NamedKey::Space) => {
+                            current_text.push(' ');
+                            event_to_dispatch = Some(("change", current_text.clone()));
+                        }
+                        Key::Character(s) => {
+                            current_text.push_str(s.as_str());
+                            event_to_dispatch = Some(("change", current_text.clone()));
+                        }
+                        Key::Named(NamedKey::Enter) => {
+                            let text_val = current_text.clone();
+                            event_to_dispatch = Some(("submit", text_val));
+                        }
+                        _ => {}
                     }
-                    Key::Named(NamedKey::Space) => {
-                        current_text.push(' ');
-                        changed_text = Some(current_text.clone());
+                    if event_to_dispatch.is_some() {
+                        guard.revision += 1;
                     }
-                    Key::Character(s) => {
-                        current_text.push_str(s.as_str());
-                        changed_text = Some(current_text.clone());
-                    }
-                    Key::Named(NamedKey::Enter) => {
-                        let text_val = current_text.clone();
-                        self.enqueue_event(focused, "submit", &text_val);
-                    }
-                    _ => {}
                 }
             }
-            if let Some(ref text) = changed_text {
-                guard.revision += 1;
-                self.enqueue_event(focused, "change", text);
-            }
+            // LOCK IS EXPLICITLY DROPPED HERE BEFORE DISPATCH
         }
 
-        if changed_text.is_some() {
-            if let Ok(guard) = self.handle.lock() {
+        // Phase 2: Callback Dispatch (ZERO locks held!)
+        if let Some((event_type, payload)) = event_to_dispatch {
+            self.dispatch_event(&focused, event_type, &payload);
+        }
+
+        // Phase 3: Sync & Redraw
+        if let Ok(guard) = self.handle.lock() {
+            if guard.revision != ctx.app.revision {
                 *ctx.app = guard.clone();
                 ctx.request_redraw();
             }
         }
+
+        if self.exit_requested.load(Ordering::SeqCst) {
+            ctx.exit();
+        }
     }
 
     fn on_idle(&mut self, ctx: &mut ShellContext) {
+        if self.exit_requested.load(Ordering::SeqCst) {
+            ctx.exit();
+            return;
+        }
+
         // Poll for mutations made by foreign language threads:
         if let Ok(guard) = self.handle.lock() {
             if guard.revision != ctx.app.revision {
@@ -436,7 +784,8 @@ pub unsafe extern "C" fn hamesh_run(
             on_event: handle.on_event,
             user_data: handle.user_data,
             event_queue: Arc::clone(&handle.event_queue),
-            focused_id: None,
+            focused_id: Arc::clone(&handle.focused_id),
+            exit_requested: Arc::clone(&handle.exit_requested),
         };
 
         let config = ShellConfig {
