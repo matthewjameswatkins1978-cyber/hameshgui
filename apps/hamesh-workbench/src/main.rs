@@ -1,5 +1,6 @@
 //! Hamesh Workbench: Native demonstration of reusable desktop menus,
-//! interactive controls, split panels, frame diagnostics, and live visual profiles.
+//! semantic command routing, keyboard focus traversal, split panels, frame diagnostics,
+//! and live visual profiles.
 
 use hamesh_core::{App, Component, Role};
 use hamesh_shell::{HameshApp, Shell, ShellConfig, ShellContext};
@@ -19,10 +20,28 @@ pub enum ActiveTab {
     Diagnostics,
 }
 
+/// Commands executed either via Menu Bar, Context Menus, or Keyboard Shortcuts.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum WorkbenchCommand {
+    FileNew,
+    FileOpen,
+    FileSave,
+    FileExit,
+    ViewProfileClassic,
+    ViewProfileModern,
+    ViewToggleStatus,
+    ToolsRunDiagnostics,
+    ToolsResetFields,
+    HelpAbout,
+}
+
 pub struct WorkbenchApp {
     profile: VisualProfile,
     active_tab: ActiveTab,
     open_menu: Option<&'static str>,
+    menu_selected_idx: usize,
+    focused_id: Option<String>,
+    focus_ring: Vec<String>,
     checkbox_checked: bool,
     text_input_value: String,
     selected_list_item: usize,
@@ -30,6 +49,7 @@ pub struct WorkbenchApp {
     frame_count: u64,
     left_panel_width: f32,
     dragging_splitter: bool,
+    show_status_bar: bool,
 }
 
 impl WorkbenchApp {
@@ -38,14 +58,74 @@ impl WorkbenchApp {
             profile: VisualProfile::ModernStudio,
             active_tab: ActiveTab::Controls,
             open_menu: None,
+            menu_selected_idx: 0,
+            focused_id: Some("sample_text_input".to_string()),
+            focus_ring: vec![
+                "sample_text_input".to_string(),
+                "checkbox_container".to_string(),
+                "profile_btn_classic".to_string(),
+                "profile_btn_modern".to_string(),
+                "list_row_0".to_string(),
+                "list_row_1".to_string(),
+                "list_row_2".to_string(),
+            ],
             checkbox_checked: true,
             text_input_value: "Hamesh Workbench v0.1".to_string(),
             selected_list_item: 0,
-            status_message: "Ready. Select commands from menus or press Tab/Space/Enter.".to_string(),
+            status_message: "Ready. Use mouse or Alt+F/E/V/T/H or Tab for focus.".to_string(),
             frame_count: 0,
             left_panel_width: 240.0,
             dragging_splitter: false,
+            show_status_bar: true,
         }
+    }
+
+    fn execute_command(&mut self, cmd: WorkbenchCommand, ctx: &mut ShellContext) {
+        match cmd {
+            WorkbenchCommand::FileNew => {
+                self.text_input_value = "Untitled Document".to_string();
+                self.status_message = "Executed: File -> New Document".to_string();
+            }
+            WorkbenchCommand::FileOpen => {
+                self.text_input_value = "Loaded: project_sample.txt".to_string();
+                self.status_message = "Executed: File -> Open File...".to_string();
+            }
+            WorkbenchCommand::FileSave => {
+                self.status_message = format!("Executed: File -> Saved {} bytes", self.text_input_value.len());
+            }
+            WorkbenchCommand::FileExit => {
+                ctx.exit();
+                return;
+            }
+            WorkbenchCommand::ViewProfileClassic => {
+                self.profile = VisualProfile::ClassicDesktop;
+                self.status_message = "Switched to Classic Desktop profile [90s square boundaries].".to_string();
+            }
+            WorkbenchCommand::ViewProfileModern => {
+                self.profile = VisualProfile::ModernStudio;
+                self.status_message = "Switched to Modern Studio profile [2026 refined spacing].".to_string();
+            }
+            WorkbenchCommand::ViewToggleStatus => {
+                self.show_status_bar = !self.show_status_bar;
+                self.status_message = format!("Status bar visible: {}", self.show_status_bar);
+            }
+            WorkbenchCommand::ToolsRunDiagnostics => {
+                self.active_tab = ActiveTab::Diagnostics;
+                self.status_message = "Executed: Tools -> Run Diagnostics Battery".to_string();
+            }
+            WorkbenchCommand::ToolsResetFields => {
+                self.text_input_value.clear();
+                self.checkbox_checked = false;
+                self.selected_list_item = 0;
+                self.status_message = "Executed: Tools -> Reset Form Fields".to_string();
+            }
+            WorkbenchCommand::HelpAbout => {
+                self.status_message = "Hamesh Workbench v0.1 — Universal Native GUI Architecture".to_string();
+            }
+        }
+        self.open_menu = None;
+        self.rebuild_ui(ctx.app);
+        ctx.request_redraw();
     }
 
     fn rebuild_ui(&mut self, app: &mut App) {
@@ -92,7 +172,7 @@ impl WorkbenchApp {
             let text_color = if is_open { "bg" } else { "text" };
             app.add(
                 "menu_bar",
-                Component::new(&format!("menu_item_{m}"), Role::Button, m)
+                Component::new(&format!("menu_bar_btn_{m}"), Role::Button, m)
                     .with_prop("layout", "row")
                     .with_prop("h", "22")
                     .with_prop("pad", "6")
@@ -105,24 +185,24 @@ impl WorkbenchApp {
 
         // 2b. Dropdown Menu Overlay (if a menu is open)
         if let Some(menu_name) = self.open_menu {
-            let dropdown_items: &[(&str, &str, bool)] = match menu_name {
+            let dropdown_items: &[(&str, &str, bool, Option<WorkbenchCommand>)] = match menu_name {
                 "File" => &[
-                    ("file_new", "New Workbench Item", true),
-                    ("file_open", "Open File...", true),
-                    ("file_save", "Save Changes", true),
-                    ("file_exit", "Exit Application", true),
+                    ("menu_file_new", "New Document (Ctrl+N)", true, Some(WorkbenchCommand::FileNew)),
+                    ("menu_file_open", "Open File... (Ctrl+O)", true, Some(WorkbenchCommand::FileOpen)),
+                    ("menu_file_save", "Save Changes (Ctrl+S)", true, Some(WorkbenchCommand::FileSave)),
+                    ("menu_file_exit", "Exit Application", true, Some(WorkbenchCommand::FileExit)),
                 ],
                 "View" => &[
-                    ("view_classic", "Switch to Classic Desktop Profile", true),
-                    ("view_modern", "Switch to Modern Studio Profile", true),
-                    ("view_toggle_status", "Toggle Status Bar", true),
+                    ("menu_view_classic", "Classic Desktop Profile", true, Some(WorkbenchCommand::ViewProfileClassic)),
+                    ("menu_view_modern", "Modern Studio Profile", true, Some(WorkbenchCommand::ViewProfileModern)),
+                    ("menu_view_toggle_status", "Toggle Status Bar", true, Some(WorkbenchCommand::ViewToggleStatus)),
                 ],
                 "Tools" => &[
-                    ("tools_diag", "Run Diagnostics Battery", true),
-                    ("tools_reset", "Reset Form Fields", true),
+                    ("menu_tools_diag", "Run Diagnostics Battery", true, Some(WorkbenchCommand::ToolsRunDiagnostics)),
+                    ("menu_tools_reset", "Reset Form Fields", true, Some(WorkbenchCommand::ToolsResetFields)),
                 ],
                 _ => &[
-                    ("item_info", "No actions in this category", false),
+                    ("menu_item_disabled", "No actions in category (Disabled)", false, None),
                 ],
             };
 
@@ -139,7 +219,7 @@ impl WorkbenchApp {
                 "workbench_root",
                 Component::new("dropdown_overlay", Role::Overlay, "Menu Dropdown")
                     .with_prop("layout", "column")
-                    .with_prop("w", "240")
+                    .with_prop("w", "250")
                     .with_prop("surface", "raised")
                     .with_prop("border", "1")
                     .with_prop("radius", radius)
@@ -150,9 +230,17 @@ impl WorkbenchApp {
                     .with_prop("z", "100"),
             );
 
-            for (id, label, enabled) in dropdown_items {
-                let text_color = if *enabled { "text" } else { "muted" };
-                let surface = "raised";
+            for (idx, (id, label, enabled, _)) in dropdown_items.iter().enumerate() {
+                let is_hovered = self.menu_selected_idx == idx;
+                let text_color = if !*enabled {
+                    "muted"
+                } else if is_hovered {
+                    "bg"
+                } else {
+                    "text"
+                };
+                let surface = if is_hovered && *enabled { "accent" } else { "raised" };
+
                 app.add(
                     "dropdown_overlay",
                     Component::new(id, Role::Button, label)
@@ -179,9 +267,9 @@ impl WorkbenchApp {
         );
 
         let tabs = [
-            (ActiveTab::Controls, "tab_controls", "Controls & Inputs"),
-            (ActiveTab::Layout, "tab_layout", "Resizable Split Panels"),
-            (ActiveTab::Diagnostics, "tab_diag", "Frame Diagnostics"),
+            (ActiveTab::Controls, "tab_btn_controls", "Controls & Inputs"),
+            (ActiveTab::Layout, "tab_btn_layout", "Resizable Split Panels"),
+            (ActiveTab::Diagnostics, "tab_btn_diag", "Frame Diagnostics"),
         ];
 
         for (t, id, label) in tabs {
@@ -204,7 +292,7 @@ impl WorkbenchApp {
             );
         }
 
-        // 4. Main Content Area (Split panels or Tab content)
+        // 4. Main Content Area
         app.add(
             "workbench_root",
             Component::new("main_stage", Role::Panel, "Main Stage")
@@ -222,7 +310,7 @@ impl WorkbenchApp {
                     "main_stage",
                     Component::new("controls_left", Role::Panel, "Controls Left")
                         .with_prop("layout", "column")
-                        .with_prop("w", "320")
+                        .with_prop("w", "340")
                         .with_prop("pad", "12")
                         .with_prop("gap", "10")
                         .with_prop("surface", card_bg)
@@ -239,6 +327,7 @@ impl WorkbenchApp {
                 );
 
                 // Profile toggle buttons
+                let is_focused_classic = self.focused_id.as_deref() == Some("profile_btn_classic");
                 app.add(
                     "controls_left",
                     Component::new("profile_btn_classic", Role::Button, "Classic Desktop")
@@ -246,10 +335,12 @@ impl WorkbenchApp {
                         .with_prop("pad", "8")
                         .with_prop("surface", if is_classic { "accent" } else { "surface" })
                         .with_prop("color", if is_classic { "bg" } else { "text" })
+                        .with_prop("border", if is_focused_classic { "2" } else { "0" })
                         .with_prop("radius", radius)
                         .with_prop("text", "Classic Desktop (Square, Compact)"),
                 );
 
+                let is_focused_modern = self.focused_id.as_deref() == Some("profile_btn_modern");
                 app.add(
                     "controls_left",
                     Component::new("profile_btn_modern", Role::Button, "Modern Studio")
@@ -257,10 +348,12 @@ impl WorkbenchApp {
                         .with_prop("pad", "8")
                         .with_prop("surface", if !is_classic { "accent" } else { "surface" })
                         .with_prop("color", if !is_classic { "bg" } else { "text" })
+                        .with_prop("border", if is_focused_modern { "2" } else { "0" })
                         .with_prop("radius", radius)
                         .with_prop("text", "Modern Studio (Refined Spacing)"),
                 );
 
+                let is_focused_chk = self.focused_id.as_deref() == Some("checkbox_container");
                 app.add(
                     "controls_left",
                     Component::new("checkbox_container", Role::Button, "Checkbox")
@@ -269,24 +362,28 @@ impl WorkbenchApp {
                         .with_prop("gap", "8")
                         .with_prop("pad", "4")
                         .with_prop("surface", "surface")
+                        .with_prop("border", if is_focused_chk { "2" } else { "0" })
                         .with_prop("radius", radius)
-                        .with_prop("text", if self.checkbox_checked { "[X] Option Enabled" } else { "[ ] Option Disabled" }),
+                        .with_prop("text", if self.checkbox_checked { "[X] Option Enabled (Space to toggle)" } else { "[ ] Option Disabled (Space to toggle)" }),
                 );
 
                 app.add(
                     "controls_left",
                     Component::new("text_field_label", Role::Text, "Input Field Label")
                         .with_prop("h", "16")
-                        .with_prop("text", "Text Field Input:"),
+                        .with_prop("text", "Text Field Input (Tab focuses, type to edit):"),
                 );
 
+                let is_focused_input = self.focused_id.as_deref() == Some("sample_text_input");
+                let border_color = if is_focused_input { "accent" } else { "border" };
                 app.add(
                     "controls_left",
                     Component::new("sample_text_input", Role::TextInput, "Sample Input")
                         .with_prop("h", "32")
                         .with_prop("pad", "6")
                         .with_prop("surface", "window")
-                        .with_prop("border", "1")
+                        .with_prop("border", if is_focused_input { "2" } else { "1" })
+                        .with_prop("color", border_color)
                         .with_prop("radius", radius)
                         .with_prop("text", &self.text_input_value),
                 );
@@ -309,7 +406,7 @@ impl WorkbenchApp {
                     Component::new("list_heading", Role::Text, "Selectable Item List")
                         .with_prop("h", "20")
                         .with_prop("font_vars", "wght 700")
-                        .with_prop("text", "Selectable Desktop Records (click to select)"),
+                        .with_prop("text", "Selectable Desktop Records (Click or Up/Down arrows)"),
                 );
 
                 let list_items = [
@@ -322,6 +419,7 @@ impl WorkbenchApp {
 
                 for (idx, item) in list_items.iter().enumerate() {
                     let is_sel = self.selected_list_item == idx;
+                    let is_focused = self.focused_id.as_deref() == Some(&format!("list_row_{idx}"));
                     let row_surface = if is_sel { "accent" } else { "surface" };
                     let row_color = if is_sel { "bg" } else { "text" };
 
@@ -332,13 +430,13 @@ impl WorkbenchApp {
                             .with_prop("pad", "8")
                             .with_prop("surface", row_surface)
                             .with_prop("color", row_color)
+                            .with_prop("border", if is_focused { "2" } else { "0" })
                             .with_prop("radius", radius)
                             .with_prop("text", item),
                     );
                 }
             }
             ActiveTab::Layout => {
-                // Resizable Panels demonstration
                 let left_w = format!("{:.0}", self.left_panel_width);
                 app.add(
                     "main_stage",
@@ -349,10 +447,9 @@ impl WorkbenchApp {
                         .with_prop("surface", card_bg)
                         .with_prop("border", border_size)
                         .with_prop("radius", radius)
-                        .with_prop("text", "Left Panel (Resizable via Splitter)"),
+                        .with_prop("text", "Left Panel (Drag splitter to resize)"),
                 );
 
-                // Splitter handle
                 app.add(
                     "main_stage",
                     Component::new("splitter_handle", Role::Button, "Splitter Handle")
@@ -370,11 +467,10 @@ impl WorkbenchApp {
                         .with_prop("surface", card_bg)
                         .with_prop("border", border_size)
                         .with_prop("radius", radius)
-                        .with_prop("text", "Right Panel (Flex Fill Content)"),
+                        .with_prop("text", "Right Panel (Flex Fill Content Area)"),
                 );
             }
             ActiveTab::Diagnostics => {
-                // Diagnostics view
                 app.add(
                     "main_stage",
                     Component::new("diag_panel", Role::Panel, "Diagnostics")
@@ -396,8 +492,8 @@ impl WorkbenchApp {
                 );
 
                 let diag_info = format!(
-                    "Frames Painted: {} | Current App Revision: {} | Active Profile: {:?}",
-                    self.frame_count, app.revision, self.profile
+                    "Frames Painted: {} | Current App Revision: {} | Active Profile: {:?} | Focus: {:?}",
+                    self.frame_count, app.revision, self.profile, self.focused_id
                 );
 
                 app.add(
@@ -406,47 +502,43 @@ impl WorkbenchApp {
                         .with_prop("h", "20")
                         .with_prop("text", &diag_info),
                 );
-
-                app.add(
-                    "diag_panel",
-                    Component::new("diag_desc", Role::Text, "Description")
-                        .with_prop("text", "All metrics derive from the live engine state. Eye/Hand inspection TCP server is active."),
-                );
             }
         }
 
         // 5. Status Bar
-        app.add(
-            "workbench_root",
-            Component::new("status_bar", Role::Status, "Status Bar")
-                .with_prop("layout", "row")
-                .with_prop("h", "24")
-                .with_prop("surface", "header")
-                .with_prop("border", "1")
-                .with_prop("pad", "4")
-                .with_prop("gap", "12"),
-        );
+        if self.show_status_bar {
+            app.add(
+                "workbench_root",
+                Component::new("status_bar", Role::Status, "Status Bar")
+                    .with_prop("layout", "row")
+                    .with_prop("h", "24")
+                    .with_prop("surface", "header")
+                    .with_prop("border", "1")
+                    .with_prop("pad", "4")
+                    .with_prop("gap", "12"),
+            );
 
-        app.add(
-            "status_bar",
-            Component::new("status_text", Role::Text, "Status Message")
-                .with_prop("flex_grow", "1")
-                .with_prop("color", "text_dim")
-                .with_prop("text", &self.status_message),
-        );
+            app.add(
+                "status_bar",
+                Component::new("status_text", Role::Text, "Status Message")
+                    .with_prop("flex_grow", "1")
+                    .with_prop("color", "text_dim")
+                    .with_prop("text", &self.status_message),
+            );
 
-        let profile_tag = match self.profile {
-            VisualProfile::ClassicDesktop => "Profile: Classic Desktop [90s]",
-            VisualProfile::ModernStudio => "Profile: Modern Studio [2026]",
-        };
+            let profile_tag = match self.profile {
+                VisualProfile::ClassicDesktop => "Profile: Classic Desktop [90s]",
+                VisualProfile::ModernStudio => "Profile: Modern Studio [2026]",
+            };
 
-        app.add(
-            "status_bar",
-            Component::new("status_profile_tag", Role::Text, "Profile Indicator")
-                .with_prop("w", "200")
-                .with_prop("color", "accent")
-                .with_prop("text", profile_tag),
-        );
+            app.add(
+                "status_bar",
+                Component::new("status_profile_tag", Role::Text, "Profile Indicator")
+                    .with_prop("w", "200")
+                    .with_prop("color", "accent")
+                    .with_prop("text", profile_tag),
+            );
+        }
     }
 }
 
@@ -471,134 +563,173 @@ impl HameshApp for WorkbenchApp {
         }
 
         let (x, y) = ctx.cursor;
+        let (_, scene) = self.view(ctx.app, ctx.size, 1);
 
-        // 1. Menu bar clicks
-        if y >= 0.0 && y <= 32.0 {
-            let menus = [
-                ("File", 4.0..40.0),
-                ("Edit", 44.0..80.0),
-                ("View", 84.0..122.0),
-                ("Tools", 126.0..168.0),
-                ("Help", 170.0..210.0),
-            ];
+        // Find clicked component by semantic ID and geometry
+        let clicked = scene.nodes.iter().rev().find(|n| n.rect.contains(x, y));
 
-            for (m, range) in menus {
-                if range.contains(&x) {
-                    if self.open_menu == Some(m) {
-                        self.open_menu = None;
-                    } else {
-                        self.open_menu = Some(m);
-                        self.status_message = format!("Menu '{m}' opened.");
-                    }
-                    self.rebuild_ui(ctx.app);
-                    ctx.request_redraw();
-                    return;
-                }
-            }
-        }
-
-        // 2. Dropdown menu clicks
-        if let Some(menu) = self.open_menu {
-            if y > 32.0 && y <= 160.0 && x <= 260.0 {
-                match menu {
-                    "View" => {
-                        if y <= 60.0 {
-                            self.profile = VisualProfile::ClassicDesktop;
-                            self.status_message = "Switched to Classic Desktop visual profile.".to_string();
-                        } else if y <= 86.0 {
-                            self.profile = VisualProfile::ModernStudio;
-                            self.status_message = "Switched to Modern Studio visual profile.".to_string();
-                        }
-                    }
-                    "File" => {
-                        if y > 110.0 {
-                            ctx.exit();
-                            return;
-                        } else {
-                            self.status_message = format!("Executed {menu} action.");
-                        }
-                    }
-                    _ => {
-                        self.status_message = format!("Menu item clicked in {menu}.");
-                    }
-                }
+        let Some(node) = clicked else {
+            if self.open_menu.is_some() {
                 self.open_menu = None;
                 self.rebuild_ui(ctx.app);
                 ctx.request_redraw();
-                return;
+            }
+            return;
+        };
+
+        let comp_id = node.id.as_str();
+
+        // 1. Menu Bar Clicks
+        if let Some(m) = comp_id.strip_prefix("menu_bar_btn_") {
+            if self.open_menu == Some(match m {
+                "File" => "File",
+                "Edit" => "Edit",
+                "View" => "View",
+                "Tools" => "Tools",
+                "Help" => "Help",
+                _ => "",
+            }) {
+                self.open_menu = None;
             } else {
-                // Click outside menu closes it
-                self.open_menu = None;
-                self.rebuild_ui(ctx.app);
-                ctx.request_redraw();
-            }
-        }
-
-        // 3. Tab bar clicks
-        if y > 30.0 && y <= 66.0 {
-            if (4.0..140.0).contains(&x) {
-                self.active_tab = ActiveTab::Controls;
-                self.status_message = "Switched to Controls & Inputs tab.".to_string();
-            } else if (144.0..280.0).contains(&x) {
-                self.active_tab = ActiveTab::Layout;
-                self.status_message = "Switched to Resizable Panels tab.".to_string();
-            } else if (284.0..420.0).contains(&x) {
-                self.active_tab = ActiveTab::Diagnostics;
-                self.status_message = "Switched to Diagnostics tab.".to_string();
+                self.open_menu = Some(match m {
+                    "File" => "File",
+                    "Edit" => "Edit",
+                    "View" => "View",
+                    "Tools" => "Tools",
+                    _ => "Help",
+                });
+                self.menu_selected_idx = 0;
+                self.status_message = format!("Menu '{m}' opened.");
             }
             self.rebuild_ui(ctx.app);
             ctx.request_redraw();
             return;
         }
 
-        // 4. Tab-specific clicks
-        match self.active_tab {
-            ActiveTab::Controls => {
-                // Profile buttons in Controls tab
-                if (20.0..320.0).contains(&x) {
-                    if (100.0..132.0).contains(&y) {
-                        self.profile = VisualProfile::ClassicDesktop;
-                        self.status_message = "Profile: Classic Desktop selected.".to_string();
-                        self.rebuild_ui(ctx.app);
-                        ctx.request_redraw();
-                    } else if (136.0..168.0).contains(&y) {
-                        self.profile = VisualProfile::ModernStudio;
-                        self.status_message = "Profile: Modern Studio selected.".to_string();
-                        self.rebuild_ui(ctx.app);
-                        ctx.request_redraw();
-                    } else if (172.0..202.0).contains(&y) {
-                        self.checkbox_checked = !self.checkbox_checked;
-                        self.status_message = format!("Checkbox toggled: {}", self.checkbox_checked);
-                        self.rebuild_ui(ctx.app);
-                        ctx.request_redraw();
-                    }
-                }
+        // 2. Dropdown Menu Item Clicks (Semantic ID routing)
+        match comp_id {
+            "menu_file_new" => {
+                self.execute_command(WorkbenchCommand::FileNew, ctx);
+                return;
+            }
+            "menu_file_open" => {
+                self.execute_command(WorkbenchCommand::FileOpen, ctx);
+                return;
+            }
+            "menu_file_save" => {
+                self.execute_command(WorkbenchCommand::FileSave, ctx);
+                return;
+            }
+            "menu_file_exit" => {
+                self.execute_command(WorkbenchCommand::FileExit, ctx);
+                return;
+            }
+            "menu_view_classic" => {
+                self.execute_command(WorkbenchCommand::ViewProfileClassic, ctx);
+                return;
+            }
+            "menu_view_modern" => {
+                self.execute_command(WorkbenchCommand::ViewProfileModern, ctx);
+                return;
+            }
+            "menu_view_toggle_status" => {
+                self.execute_command(WorkbenchCommand::ViewToggleStatus, ctx);
+                return;
+            }
+            "menu_tools_diag" => {
+                self.execute_command(WorkbenchCommand::ToolsRunDiagnostics, ctx);
+                return;
+            }
+            "menu_tools_reset" => {
+                self.execute_command(WorkbenchCommand::ToolsResetFields, ctx);
+                return;
+            }
+            _ => {}
+        }
 
-                // List row clicks
-                if x > 340.0 && (100.0..250.0).contains(&y) {
-                    let row_idx = ((y - 100.0) / 30.0) as usize;
-                    if row_idx < 5 {
-                        self.selected_list_item = row_idx;
-                        self.status_message = format!("Selected List Record #{row_idx}");
-                        self.rebuild_ui(ctx.app);
-                        ctx.request_redraw();
-                    }
-                }
+        // Dismiss open menu if clicked outside
+        if self.open_menu.is_some() {
+            self.open_menu = None;
+            self.rebuild_ui(ctx.app);
+            ctx.request_redraw();
+        }
+
+        // 3. Tab Clicks
+        match comp_id {
+            "tab_btn_controls" => {
+                self.active_tab = ActiveTab::Controls;
+                self.status_message = "Switched to Controls & Inputs tab.".to_string();
+                self.rebuild_ui(ctx.app);
+                ctx.request_redraw();
+                return;
             }
-            ActiveTab::Layout => {
-                let split_x = self.left_panel_width + 8.0;
-                if (split_x - 6.0..split_x + 14.0).contains(&x) {
-                    self.dragging_splitter = true;
-                    self.status_message = "Dragging splitter...".to_string();
-                }
+            "tab_btn_layout" => {
+                self.active_tab = ActiveTab::Layout;
+                self.status_message = "Switched to Resizable Split Panels tab.".to_string();
+                self.rebuild_ui(ctx.app);
+                ctx.request_redraw();
+                return;
             }
-            ActiveTab::Diagnostics => {}
+            "tab_btn_diag" => {
+                self.active_tab = ActiveTab::Diagnostics;
+                self.status_message = "Switched to Frame Diagnostics tab.".to_string();
+                self.rebuild_ui(ctx.app);
+                ctx.request_redraw();
+                return;
+            }
+            _ => {}
+        }
+
+        // 4. Controls & Input interactions
+        match comp_id {
+            "profile_btn_classic" => {
+                self.focused_id = Some("profile_btn_classic".to_string());
+                self.execute_command(WorkbenchCommand::ViewProfileClassic, ctx);
+                return;
+            }
+            "profile_btn_modern" => {
+                self.focused_id = Some("profile_btn_modern".to_string());
+                self.execute_command(WorkbenchCommand::ViewProfileModern, ctx);
+                return;
+            }
+            "checkbox_container" => {
+                self.focused_id = Some("checkbox_container".to_string());
+                self.checkbox_checked = !self.checkbox_checked;
+                self.status_message = format!("Checkbox toggled: {}", self.checkbox_checked);
+                self.rebuild_ui(ctx.app);
+                ctx.request_redraw();
+                return;
+            }
+            "sample_text_input" => {
+                self.focused_id = Some("sample_text_input".to_string());
+                self.status_message = "Text input focused. Type or press Backspace.".to_string();
+                self.rebuild_ui(ctx.app);
+                ctx.request_redraw();
+                return;
+            }
+            "splitter_handle" => {
+                self.dragging_splitter = true;
+                self.status_message = "Dragging splitter...".to_string();
+                return;
+            }
+            _ => {}
+        }
+
+        // List row clicks
+        if let Some(idx_str) = comp_id.strip_prefix("list_row_") {
+            if let Ok(idx) = idx_str.parse::<usize>() {
+                self.focused_id = Some(comp_id.to_string());
+                self.selected_list_item = idx;
+                self.status_message = format!("Selected List Record #{idx}");
+                self.rebuild_ui(ctx.app);
+                ctx.request_redraw();
+            }
         }
     }
 
     fn on_cursor_move(&mut self, ctx: &mut ShellContext, pos: (f32, f32)) {
         if self.dragging_splitter {
-            let new_w = (pos.0 - 8.0).clamp(120.0, (ctx.size.0 as f32) - 150.0);
+            let new_w = (pos.0 - 8.0).clamp(140.0, (ctx.size.0 as f32) - 160.0);
             if (new_w - self.left_panel_width).abs() > 1.0 {
                 self.left_panel_width = new_w;
                 self.rebuild_ui(ctx.app);
@@ -612,47 +743,132 @@ impl HameshApp for WorkbenchApp {
             return;
         }
 
-        match key {
-            Key::Named(NamedKey::Tab) => {
-                self.active_tab = match self.active_tab {
-                    ActiveTab::Controls => ActiveTab::Layout,
-                    ActiveTab::Layout => ActiveTab::Diagnostics,
-                    ActiveTab::Diagnostics => ActiveTab::Controls,
-                };
-                self.status_message = format!("Tab key navigated to: {:?}", self.active_tab);
-                self.rebuild_ui(ctx.app);
-                ctx.request_redraw();
-            }
-            Key::Named(NamedKey::Escape) => {
-                if self.open_menu.is_some() {
+        // 1. Menu Navigation Keys (Escape, Arrows, Enter)
+        if let Some(menu) = self.open_menu {
+            let max_idx = match menu {
+                "File" => 3,
+                "View" => 2,
+                "Tools" => 1,
+                _ => 0,
+            };
+
+            match key {
+                Key::Named(NamedKey::Escape) => {
                     self.open_menu = None;
                     self.status_message = "Menu closed with Escape.".to_string();
                     self.rebuild_ui(ctx.app);
                     ctx.request_redraw();
+                    return;
+                }
+                Key::Named(NamedKey::ArrowDown) => {
+                    if self.menu_selected_idx < max_idx {
+                        self.menu_selected_idx += 1;
+                    } else {
+                        self.menu_selected_idx = 0;
+                    }
+                    self.rebuild_ui(ctx.app);
+                    ctx.request_redraw();
+                    return;
+                }
+                Key::Named(NamedKey::ArrowUp) => {
+                    if self.menu_selected_idx > 0 {
+                        self.menu_selected_idx -= 1;
+                    } else {
+                        self.menu_selected_idx = max_idx;
+                    }
+                    self.rebuild_ui(ctx.app);
+                    ctx.request_redraw();
+                    return;
+                }
+                Key::Named(NamedKey::Enter) => {
+                    let cmd = match (menu, self.menu_selected_idx) {
+                        ("File", 0) => Some(WorkbenchCommand::FileNew),
+                        ("File", 1) => Some(WorkbenchCommand::FileOpen),
+                        ("File", 2) => Some(WorkbenchCommand::FileSave),
+                        ("File", 3) => Some(WorkbenchCommand::FileExit),
+                        ("View", 0) => Some(WorkbenchCommand::ViewProfileClassic),
+                        ("View", 1) => Some(WorkbenchCommand::ViewProfileModern),
+                        ("View", 2) => Some(WorkbenchCommand::ViewToggleStatus),
+                        ("Tools", 0) => Some(WorkbenchCommand::ToolsRunDiagnostics),
+                        ("Tools", 1) => Some(WorkbenchCommand::ToolsResetFields),
+                        _ => None,
+                    };
+                    if let Some(c) = cmd {
+                        self.execute_command(c, ctx);
+                    }
+                    return;
+                }
+                _ => {}
+            }
+        }
+
+        // 2. Focus Navigation Keys (Tab / Shift-Tab)
+        if let Key::Named(NamedKey::Tab) = key {
+            if ctx.modifiers.shift_key() {
+                // Shift-Tab: focus previous
+                if let Some(ref cur) = self.focused_id {
+                    if let Some(pos) = self.focus_ring.iter().position(|id| id == cur) {
+                        let new_idx = if pos == 0 { self.focus_ring.len() - 1 } else { pos - 1 };
+                        self.focused_id = Some(self.focus_ring[new_idx].clone());
+                    }
+                } else {
+                    self.focused_id = self.focus_ring.last().cloned();
+                }
+            } else {
+                // Tab: focus next
+                if let Some(ref cur) = self.focused_id {
+                    if let Some(pos) = self.focus_ring.iter().position(|id| id == cur) {
+                        let new_idx = (pos + 1) % self.focus_ring.len();
+                        self.focused_id = Some(self.focus_ring[new_idx].clone());
+                    }
+                } else {
+                    self.focused_id = self.focus_ring.first().cloned();
                 }
             }
-            Key::Named(NamedKey::Space) => {
-                if self.active_tab == ActiveTab::Controls {
+            self.status_message = format!("Focus moved to: {:?}", self.focused_id);
+            self.rebuild_ui(ctx.app);
+            ctx.request_redraw();
+            return;
+        }
+
+        // 3. Control-Specific Key Handling
+        match self.focused_id.as_deref() {
+            Some("sample_text_input") => {
+                match key {
+                    Key::Named(NamedKey::Backspace) => {
+                        self.text_input_value.pop();
+                        self.rebuild_ui(ctx.app);
+                        ctx.request_redraw();
+                    }
+                    Key::Named(NamedKey::Space) => {
+                        self.text_input_value.push(' ');
+                        self.rebuild_ui(ctx.app);
+                        ctx.request_redraw();
+                    }
+                    Key::Character(s) => {
+                        self.text_input_value.push_str(s.as_str());
+                        self.rebuild_ui(ctx.app);
+                        ctx.request_redraw();
+                    }
+                    _ => {}
+                }
+            }
+            Some("checkbox_container") => {
+                if let Key::Named(NamedKey::Space) | Key::Named(NamedKey::Enter) = key {
                     self.checkbox_checked = !self.checkbox_checked;
-                    self.status_message = format!("Space toggled checkbox: {}", self.checkbox_checked);
+                    self.status_message = format!("Checkbox toggled with Space: {}", self.checkbox_checked);
                     self.rebuild_ui(ctx.app);
                     ctx.request_redraw();
                 }
             }
-            Key::Named(NamedKey::ArrowUp) => {
-                if self.active_tab == ActiveTab::Controls && self.selected_list_item > 0 {
-                    self.selected_list_item -= 1;
-                    self.status_message = format!("Selected List Record #{}", self.selected_list_item);
-                    self.rebuild_ui(ctx.app);
-                    ctx.request_redraw();
+            Some("profile_btn_classic") => {
+                if let Key::Named(NamedKey::Space) | Key::Named(NamedKey::Enter) = key {
+                    self.execute_command(WorkbenchCommand::ViewProfileClassic, ctx);
                 }
             }
-            Key::Named(NamedKey::ArrowDown) => {
-                if self.active_tab == ActiveTab::Controls && self.selected_list_item < 4 {
-                    self.selected_list_item += 1;
-                    self.status_message = format!("Selected List Record #{}", self.selected_list_item);
-                    self.rebuild_ui(ctx.app);
-                    ctx.request_redraw();
+            Some("profile_btn_modern") => {
+                if let Key::Named(NamedKey::Space) | Key::Named(NamedKey::Enter) = key {
+                    self.execute_command(WorkbenchCommand::ViewProfileModern, ctx);
                 }
             }
             _ => {}
@@ -679,6 +895,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         smoke_seconds: smoke_secs,
     };
 
-    println!("Starting Hamesh Workbench on reusable hamesh-shell...");
+    println!("Starting Hamesh Workbench with semantic command routing & keyboard focus...");
     Shell::run(WorkbenchApp::new(), config)
 }
