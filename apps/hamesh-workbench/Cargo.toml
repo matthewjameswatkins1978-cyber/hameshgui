@@ -1,0 +1,22 @@
+[package]
+name = "hamesh-workbench"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Hamesh Workbench: native demonstration of desktop menus, reusable controls, and distinct visual profiles"
+
+[[bin]]
+name = "hamesh-workbench"
+path = "src/main.rs"
+
+[dependencies]
+hamesh-core = { path = "../../crates/hamesh-core" }
+hamesh-layout = { path = "../../crates/hamesh-layout" }
+hamesh-scene = { path = "../../crates/hamesh-scene" }
+hamesh-render = { path = "../../crates/hamesh-render" }
+hamesh-text = { path = "../../crates/hamesh-text" }
+hamesh-blocks = { path = "../../crates/hamesh-blocks" }
+hamesh-theme = { path = "../../crates/hamesh-theme" }
+hamesh-shell = { path = "../../crates/hamesh-shell" }
+serde_json = { workspace = true }
+winit = "0.30"

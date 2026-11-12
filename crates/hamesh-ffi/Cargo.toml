@@ -1,0 +1,20 @@
+[package]
+name = "hamesh-ffi"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Universal C ABI for Hamesh GUI: opaque handles, stable lifecycle, typed tree operations, and cross-language interoperability"
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+hamesh-core = { path = "../hamesh-core" }
+hamesh-layout = { path = "../hamesh-layout" }
+hamesh-scene = { path = "../hamesh-scene" }
+hamesh-render = { path = "../hamesh-render" }
+hamesh-text = { path = "../hamesh-text" }
+hamesh-shell = { path = "../hamesh-shell" }
+serde_json = { workspace = true }
+tiny-skia = "0.11"
+winit = "0.30"

@@ -1076,6 +1076,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "hamesh-ffi"
+version = "0.2.0"
+dependencies = [
+ "hamesh-core",
+ "hamesh-layout",
+ "hamesh-render",
+ "hamesh-scene",
+ "hamesh-shell",
+ "hamesh-text",
+ "serde_json",
+ "tiny-skia",
+ "winit",
+]
+
+[[package]]
 name = "hamesh-gallery"
 version = "0.2.0"
 dependencies = [
@@ -1177,6 +1192,26 @@ dependencies = [
 ]
 
 [[package]]
+name = "hamesh-shell"
+version = "0.2.0"
+dependencies = [
+ "hamesh-automation",
+ "hamesh-core",
+ "hamesh-diag",
+ "hamesh-ffi",
+ "hamesh-inspect",
+ "hamesh-layout",
+ "hamesh-render",
+ "hamesh-scene",
+ "hamesh-text",
+ "serde",
+ "serde_json",
+ "softbuffer",
+ "tiny-skia",
+ "winit",
+]
+
+[[package]]
 name = "hamesh-tasks"
 version = "0.2.0"
 dependencies = [
@@ -1243,6 +1278,22 @@ dependencies = [
  "tiny-skia",
  "vello",
  "wgpu",
+ "winit",
+]
+
+[[package]]
+name = "hamesh-workbench"
+version = "0.2.0"
+dependencies = [
+ "hamesh-blocks",
+ "hamesh-core",
+ "hamesh-layout",
+ "hamesh-render",
+ "hamesh-scene",
+ "hamesh-shell",
+ "hamesh-text",
+ "hamesh-theme",
+ "serde_json",
  "winit",
 ]
 
