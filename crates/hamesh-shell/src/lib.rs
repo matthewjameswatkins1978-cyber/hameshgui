@@ -77,7 +77,13 @@ pub trait HameshApp: 'static {
     fn init(&mut self, ctx: &mut ShellContext);
 
     /// Handle mouse click or release.
-    fn on_mouse_click(&mut self, _ctx: &mut ShellContext, _button: MouseButton, _state: ElementState) {}
+    fn on_mouse_click(
+        &mut self,
+        _ctx: &mut ShellContext,
+        _button: MouseButton,
+        _state: ElementState,
+    ) {
+    }
 
     /// Handle cursor motion.
     fn on_cursor_move(&mut self, _ctx: &mut ShellContext, _position: (f32, f32)) {}
@@ -86,7 +92,8 @@ pub trait HameshApp: 'static {
     fn on_mouse_wheel(&mut self, _ctx: &mut ShellContext, _delta: MouseScrollDelta) {}
 
     /// Handle keyboard input.
-    fn on_key(&mut self, _ctx: &mut ShellContext, _key: &Key, _state: ElementState, _repeat: bool) {}
+    fn on_key(&mut self, _ctx: &mut ShellContext, _key: &Key, _state: ElementState, _repeat: bool) {
+    }
 
     /// Handle IME text input.
     fn on_ime(&mut self, _ctx: &mut ShellContext, _ime: Ime) {}
@@ -98,7 +105,11 @@ pub trait HameshApp: 'static {
     fn on_idle(&mut self, _ctx: &mut ShellContext) {}
 
     /// Optional hook to handle custom external inspector operations.
-    fn on_inspect_op(&mut self, _ctx: &mut ShellContext, _op: &inspect_srv::Op) -> Option<inspect_srv::OpOutcome> {
+    fn on_inspect_op(
+        &mut self,
+        _ctx: &mut ShellContext,
+        _op: &inspect_srv::Op,
+    ) -> Option<inspect_srv::OpOutcome> {
         None
     }
 
@@ -218,7 +229,9 @@ impl<A: HameshApp> ShellRunner<A> {
         let scene_changed = self.scene_rev != self.presented_rev;
 
         if dims_changed || scene_changed || self.cpu_pixels.is_empty() {
-            let (layout, scene) = self.app_impl.view(&self.app_state, self.size, self.scene_rev);
+            let (layout, scene) = self
+                .app_impl
+                .view(&self.app_state, self.size, self.scene_rev);
             self.last_layout = Some(layout);
             self.last_scene = Some(scene.clone());
 
@@ -278,11 +291,15 @@ impl<A: HameshApp> ApplicationHandler<ShellUserEvent> for ShellRunner<A> {
         let attrs = WindowAttributes::default()
             .with_title(&self.config.title)
             .with_inner_size(PhysicalSize::new(self.config.width, self.config.height))
-            .with_min_inner_size(PhysicalSize::new(self.config.min_width, self.config.min_height));
+            .with_min_inner_size(PhysicalSize::new(
+                self.config.min_width,
+                self.config.min_height,
+            ));
 
         let window = Arc::new(event_loop.create_window(attrs).expect("create window"));
         let context = softbuffer::Context::new(Arc::clone(&window)).expect("softbuffer context");
-        let surface = softbuffer::Surface::new(&context, Arc::clone(&window)).expect("softbuffer surface");
+        let surface =
+            softbuffer::Surface::new(&context, Arc::clone(&window)).expect("softbuffer surface");
 
         self.window = Some(Arc::clone(&window));
         self.context = Some(context);
@@ -378,16 +395,20 @@ impl<A: HameshApp> ApplicationHandler<ShellUserEvent> for ShellRunner<A> {
             while i < self.pending_waits.len() {
                 if cur >= self.pending_waits[i].target_rev {
                     let w = self.pending_waits.swap_remove(i);
-                    let _ = w.respond.send(inspect_srv::OpOutcome::Ok(serde_json::json!({
-                        "resumed_at_rev": cur,
-                        "timed_out": false,
-                    })));
+                    let _ = w
+                        .respond
+                        .send(inspect_srv::OpOutcome::Ok(serde_json::json!({
+                            "resumed_at_rev": cur,
+                            "timed_out": false,
+                        })));
                 } else if now >= self.pending_waits[i].deadline {
                     let w = self.pending_waits.swap_remove(i);
-                    let _ = w.respond.send(inspect_srv::OpOutcome::Ok(serde_json::json!({
-                        "resumed_at_rev": cur,
-                        "timed_out": true,
-                    })));
+                    let _ = w
+                        .respond
+                        .send(inspect_srv::OpOutcome::Ok(serde_json::json!({
+                            "resumed_at_rev": cur,
+                            "timed_out": true,
+                        })));
                 } else {
                     i += 1;
                 }
@@ -429,14 +450,22 @@ impl<A: HameshApp> ShellRunner<A> {
         // Standard built-in Eye/Hand operations:
         let outcome = match op {
             inspect_srv::Op::Map => {
-                let (layout, scene) = self.app_impl.view(&self.app_state, self.size, self.scene_rev);
+                let (layout, scene) =
+                    self.app_impl
+                        .view(&self.app_state, self.size, self.scene_rev);
                 let map = hamesh_inspect::compact_map(&self.app_state, &layout, &scene);
-                inspect_srv::OpOutcome::Ok(serde_json::to_value(&map).unwrap_or(serde_json::Value::Null))
+                inspect_srv::OpOutcome::Ok(
+                    serde_json::to_value(&map).unwrap_or(serde_json::Value::Null),
+                )
             }
             inspect_srv::Op::Detail { id } => {
-                let (layout, scene) = self.app_impl.view(&self.app_state, self.size, self.scene_rev);
+                let (layout, scene) =
+                    self.app_impl
+                        .view(&self.app_state, self.size, self.scene_rev);
                 match hamesh_inspect::detail(&self.app_state, &layout, Some(&scene), &id) {
-                    Some(d) => inspect_srv::OpOutcome::Ok(serde_json::to_value(&d).unwrap_or(serde_json::Value::Null)),
+                    Some(d) => inspect_srv::OpOutcome::Ok(
+                        serde_json::to_value(&d).unwrap_or(serde_json::Value::Null),
+                    ),
                     None => inspect_srv::OpOutcome::Err {
                         code: "NOT_FOUND",
                         message: format!("Component '{id}' not found"),
@@ -446,7 +475,9 @@ impl<A: HameshApp> ShellRunner<A> {
                 }
             }
             inspect_srv::Op::Snapshot { path, overlay } => {
-                let (_layout, scene) = self.app_impl.view(&self.app_state, self.size, self.scene_rev);
+                let (_layout, scene) =
+                    self.app_impl
+                        .view(&self.app_state, self.size, self.scene_rev);
                 let frame = hamesh_render::render(&scene);
                 let mut pix = frame.pixmap;
                 if let Some(ref target_id) = overlay {
@@ -469,7 +500,10 @@ impl<A: HameshApp> ShellRunner<A> {
                     },
                 }
             }
-            inspect_srv::Op::Wait { app_rev, timeout_ms } => {
+            inspect_srv::Op::Wait {
+                app_rev,
+                timeout_ms,
+            } => {
                 if self.app_state.revision >= app_rev {
                     inspect_srv::OpOutcome::Ok(serde_json::json!({
                         "resumed_at_rev": self.app_state.revision,
@@ -486,8 +520,9 @@ impl<A: HameshApp> ShellRunner<A> {
             }
             _ => inspect_srv::OpOutcome::Err {
                 code: "UNSUPPORTED",
-                message: "Operation not supported by generic shell; implement on_inspect_op in HameshApp"
-                    .to_string(),
+                message:
+                    "Operation not supported by generic shell; implement on_inspect_op in HameshApp"
+                        .to_string(),
                 app_rev: self.app_state.revision,
                 scene_rev: self.scene_rev,
             },
@@ -501,7 +536,10 @@ pub struct Shell;
 
 impl Shell {
     /// Launch a Hamesh application with the given configuration.
-    pub fn run<A: HameshApp>(app: A, config: ShellConfig) -> Result<(), Box<dyn std::error::Error>> {
+    pub fn run<A: HameshApp>(
+        app: A,
+        config: ShellConfig,
+    ) -> Result<(), Box<dyn std::error::Error>> {
         hamesh_text::register_fonts_from_dir(&hamesh_text::bundled_fonts_dir());
 
         let event_loop = EventLoop::<ShellUserEvent>::with_user_event()

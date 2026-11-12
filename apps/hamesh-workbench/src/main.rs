@@ -52,6 +52,12 @@ pub struct WorkbenchApp {
     show_status_bar: bool,
 }
 
+impl Default for WorkbenchApp {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl WorkbenchApp {
     pub fn new() -> Self {
         Self {
@@ -89,16 +95,23 @@ impl WorkbenchApp {
             WorkbenchCommand::FileOpen => {
                 if let Ok(content) = std::fs::read_to_string("workbench_demo.txt") {
                     self.text_input_value = content;
-                    self.status_message = "File -> Open: Read text from workbench_demo.txt".to_string();
+                    self.status_message =
+                        "File -> Open: Read text from workbench_demo.txt".to_string();
                 } else {
-                    self.text_input_value = "Loaded demo template (workbench_demo.txt not found on disk)".to_string();
-                    self.status_message = "Demo: No workbench_demo.txt found; loaded template into editor.".to_string();
+                    self.text_input_value =
+                        "Loaded demo template (workbench_demo.txt not found on disk)".to_string();
+                    self.status_message =
+                        "Demo: No workbench_demo.txt found; loaded template into editor."
+                            .to_string();
                 }
             }
             WorkbenchCommand::FileSave => {
                 match std::fs::write("workbench_demo.txt", &self.text_input_value) {
                     Ok(_) => {
-                        self.status_message = format!("File -> Save: Written {} bytes to workbench_demo.txt", self.text_input_value.len());
+                        self.status_message = format!(
+                            "File -> Save: Written {} bytes to workbench_demo.txt",
+                            self.text_input_value.len()
+                        );
                     }
                     Err(e) => {
                         self.status_message = format!("File -> Save failed: {}", e);
@@ -111,11 +124,13 @@ impl WorkbenchApp {
             }
             WorkbenchCommand::ViewProfileClassic => {
                 self.profile = VisualProfile::ClassicDesktop;
-                self.status_message = "Switched to Classic Desktop profile [90s square boundaries].".to_string();
+                self.status_message =
+                    "Switched to Classic Desktop profile [90s square boundaries].".to_string();
             }
             WorkbenchCommand::ViewProfileModern => {
                 self.profile = VisualProfile::ModernStudio;
-                self.status_message = "Switched to Modern Studio profile [2026 refined spacing].".to_string();
+                self.status_message =
+                    "Switched to Modern Studio profile [2026 refined spacing].".to_string();
             }
             WorkbenchCommand::ViewToggleStatus => {
                 self.show_status_bar = !self.show_status_bar;
@@ -132,7 +147,8 @@ impl WorkbenchApp {
                 self.status_message = "Executed: Tools -> Reset Form Fields".to_string();
             }
             WorkbenchCommand::HelpAbout => {
-                self.status_message = "Hamesh Workbench v0.1 — Universal Native GUI Architecture".to_string();
+                self.status_message =
+                    "Hamesh Workbench v0.1 — Universal Native GUI Architecture".to_string();
             }
         }
         self.open_menu = None;
@@ -144,14 +160,21 @@ impl WorkbenchApp {
         let root_id = app.root.0.clone();
         app.components.clear();
         app.commands.clear();
-        app.components.insert(root_id.clone(), Component::new(&root_id, Role::Window, "root"));
+        app.components.insert(
+            root_id.clone(),
+            Component::new(&root_id, Role::Window, "root"),
+        );
         app.revision += 1;
 
         let is_classic = self.profile == VisualProfile::ClassicDesktop;
-        let font_family = if is_classic { "Segoe UI" } else { "Instrument Sans" };
+        let font_family = if is_classic {
+            "Segoe UI"
+        } else {
+            "Instrument Sans"
+        };
         let menu_bg = if is_classic { "surface" } else { "header" };
         let card_bg = if is_classic { "surface" } else { "raised" };
-        let border_size = if is_classic { "1" } else { "1" };
+        let border_size = "1";
         let radius = if is_classic { "0" } else { "6" };
 
         // 1. Root Window container
@@ -199,23 +222,71 @@ impl WorkbenchApp {
         if let Some(menu_name) = self.open_menu {
             let dropdown_items: &[(&str, &str, bool, Option<WorkbenchCommand>)] = match menu_name {
                 "File" => &[
-                    ("menu_file_new", "New Document (Ctrl+N)", true, Some(WorkbenchCommand::FileNew)),
-                    ("menu_file_open", "Open File... (Ctrl+O)", true, Some(WorkbenchCommand::FileOpen)),
-                    ("menu_file_save", "Save Changes (Ctrl+S)", true, Some(WorkbenchCommand::FileSave)),
-                    ("menu_file_exit", "Exit Application", true, Some(WorkbenchCommand::FileExit)),
+                    (
+                        "menu_file_new",
+                        "New Document (Ctrl+N)",
+                        true,
+                        Some(WorkbenchCommand::FileNew),
+                    ),
+                    (
+                        "menu_file_open",
+                        "Open File... (Ctrl+O)",
+                        true,
+                        Some(WorkbenchCommand::FileOpen),
+                    ),
+                    (
+                        "menu_file_save",
+                        "Save Changes (Ctrl+S)",
+                        true,
+                        Some(WorkbenchCommand::FileSave),
+                    ),
+                    (
+                        "menu_file_exit",
+                        "Exit Application",
+                        true,
+                        Some(WorkbenchCommand::FileExit),
+                    ),
                 ],
                 "View" => &[
-                    ("menu_view_classic", "Classic Desktop Profile", true, Some(WorkbenchCommand::ViewProfileClassic)),
-                    ("menu_view_modern", "Modern Studio Profile", true, Some(WorkbenchCommand::ViewProfileModern)),
-                    ("menu_view_toggle_status", "Toggle Status Bar", true, Some(WorkbenchCommand::ViewToggleStatus)),
+                    (
+                        "menu_view_classic",
+                        "Classic Desktop Profile",
+                        true,
+                        Some(WorkbenchCommand::ViewProfileClassic),
+                    ),
+                    (
+                        "menu_view_modern",
+                        "Modern Studio Profile",
+                        true,
+                        Some(WorkbenchCommand::ViewProfileModern),
+                    ),
+                    (
+                        "menu_view_toggle_status",
+                        "Toggle Status Bar",
+                        true,
+                        Some(WorkbenchCommand::ViewToggleStatus),
+                    ),
                 ],
                 "Tools" => &[
-                    ("menu_tools_diag", "Run Diagnostics Battery", true, Some(WorkbenchCommand::ToolsRunDiagnostics)),
-                    ("menu_tools_reset", "Reset Form Fields", true, Some(WorkbenchCommand::ToolsResetFields)),
+                    (
+                        "menu_tools_diag",
+                        "Run Diagnostics Battery",
+                        true,
+                        Some(WorkbenchCommand::ToolsRunDiagnostics),
+                    ),
+                    (
+                        "menu_tools_reset",
+                        "Reset Form Fields",
+                        true,
+                        Some(WorkbenchCommand::ToolsResetFields),
+                    ),
                 ],
-                _ => &[
-                    ("menu_item_disabled", "No actions in category (Disabled)", false, None),
-                ],
+                _ => &[(
+                    "menu_item_disabled",
+                    "No actions in category (Disabled)",
+                    false,
+                    None,
+                )],
             };
 
             let ox = match menu_name {
@@ -251,7 +322,11 @@ impl WorkbenchApp {
                 } else {
                     "text"
                 };
-                let surface = if is_hovered && *enabled { "accent" } else { "raised" };
+                let surface = if is_hovered && *enabled {
+                    "accent"
+                } else {
+                    "raised"
+                };
 
                 app.add(
                     "dropdown_overlay",
@@ -280,7 +355,11 @@ impl WorkbenchApp {
 
         let tabs = [
             (ActiveTab::Controls, "tab_btn_controls", "Controls & Inputs"),
-            (ActiveTab::Layout, "tab_btn_layout", "Resizable Split Panels"),
+            (
+                ActiveTab::Layout,
+                "tab_btn_layout",
+                "Resizable Split Panels",
+            ),
             (ActiveTab::Diagnostics, "tab_btn_diag", "Frame Diagnostics"),
         ];
 
@@ -376,7 +455,14 @@ impl WorkbenchApp {
                         .with_prop("surface", "surface")
                         .with_prop("border", if is_focused_chk { "2" } else { "0" })
                         .with_prop("radius", radius)
-                        .with_prop("text", if self.checkbox_checked { "[X] Option Enabled (Space to toggle)" } else { "[ ] Option Disabled (Space to toggle)" }),
+                        .with_prop(
+                            "text",
+                            if self.checkbox_checked {
+                                "[X] Option Enabled (Space to toggle)"
+                            } else {
+                                "[ ] Option Disabled (Space to toggle)"
+                            },
+                        ),
                 );
 
                 app.add(
@@ -418,7 +504,10 @@ impl WorkbenchApp {
                     Component::new("list_heading", Role::Text, "Selectable Item List")
                         .with_prop("h", "20")
                         .with_prop("font_vars", "wght 700")
-                        .with_prop("text", "Selectable Desktop Records (Click or Up/Down arrows)"),
+                        .with_prop(
+                            "text",
+                            "Selectable Desktop Records (Click or Up/Down arrows)",
+                        ),
                 );
 
                 let list_items = [
@@ -466,7 +555,14 @@ impl WorkbenchApp {
                     "main_stage",
                     Component::new("splitter_handle", Role::Button, "Splitter Handle")
                         .with_prop("w", "8")
-                        .with_prop("surface", if self.dragging_splitter { "accent" } else { "border" })
+                        .with_prop(
+                            "surface",
+                            if self.dragging_splitter {
+                                "accent"
+                            } else {
+                                "border"
+                            },
+                        )
                         .with_prop("cursor", "col-resize"),
                 );
 
@@ -593,14 +689,16 @@ impl HameshApp for WorkbenchApp {
 
         // 1. Menu Bar Clicks
         if let Some(m) = comp_id.strip_prefix("menu_bar_btn_") {
-            if self.open_menu == Some(match m {
-                "File" => "File",
-                "Edit" => "Edit",
-                "View" => "View",
-                "Tools" => "Tools",
-                "Help" => "Help",
-                _ => "",
-            }) {
+            if self.open_menu
+                == Some(match m {
+                    "File" => "File",
+                    "Edit" => "Edit",
+                    "View" => "View",
+                    "Tools" => "Tools",
+                    "Help" => "Help",
+                    _ => "",
+                })
+            {
                 self.open_menu = None;
             } else {
                 self.open_menu = Some(match m {
@@ -820,7 +918,11 @@ impl HameshApp for WorkbenchApp {
                 // Shift-Tab: focus previous
                 if let Some(ref cur) = self.focused_id {
                     if let Some(pos) = self.focus_ring.iter().position(|id| id == cur) {
-                        let new_idx = if pos == 0 { self.focus_ring.len() - 1 } else { pos - 1 };
+                        let new_idx = if pos == 0 {
+                            self.focus_ring.len() - 1
+                        } else {
+                            pos - 1
+                        };
                         self.focused_id = Some(self.focus_ring[new_idx].clone());
                     }
                 } else {
@@ -845,30 +947,29 @@ impl HameshApp for WorkbenchApp {
 
         // 3. Control-Specific Key Handling
         match self.focused_id.as_deref() {
-            Some("sample_text_input") => {
-                match key {
-                    Key::Named(NamedKey::Backspace) => {
-                        self.text_input_value.pop();
-                        self.rebuild_ui(ctx.app);
-                        ctx.request_redraw();
-                    }
-                    Key::Named(NamedKey::Space) => {
-                        self.text_input_value.push(' ');
-                        self.rebuild_ui(ctx.app);
-                        ctx.request_redraw();
-                    }
-                    Key::Character(s) => {
-                        self.text_input_value.push_str(s.as_str());
-                        self.rebuild_ui(ctx.app);
-                        ctx.request_redraw();
-                    }
-                    _ => {}
+            Some("sample_text_input") => match key {
+                Key::Named(NamedKey::Backspace) => {
+                    self.text_input_value.pop();
+                    self.rebuild_ui(ctx.app);
+                    ctx.request_redraw();
                 }
-            }
+                Key::Named(NamedKey::Space) => {
+                    self.text_input_value.push(' ');
+                    self.rebuild_ui(ctx.app);
+                    ctx.request_redraw();
+                }
+                Key::Character(s) => {
+                    self.text_input_value.push_str(s.as_str());
+                    self.rebuild_ui(ctx.app);
+                    ctx.request_redraw();
+                }
+                _ => {}
+            },
             Some("checkbox_container") => {
                 if let Key::Named(NamedKey::Space) | Key::Named(NamedKey::Enter) = key {
                     self.checkbox_checked = !self.checkbox_checked;
-                    self.status_message = format!("Checkbox toggled with Space: {}", self.checkbox_checked);
+                    self.status_message =
+                        format!("Checkbox toggled with Space: {}", self.checkbox_checked);
                     self.rebuild_ui(ctx.app);
                     ctx.request_redraw();
                 }
@@ -893,8 +994,8 @@ impl HameshApp for WorkbenchApp {
 }
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let smoke_secs: Option<u64> = std::env::args()
-        .find_map(|a| a.strip_prefix("--smoke-test=").and_then(|v| v.parse().ok()));
+    let smoke_secs: Option<u64> =
+        std::env::args().find_map(|a| a.strip_prefix("--smoke-test=").and_then(|v| v.parse().ok()));
 
     let config = ShellConfig {
         title: "Hamesh Workbench — Native Multi-Profile Suite".to_string(),

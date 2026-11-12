@@ -100,7 +100,7 @@ def test_invalid_role():
         hamesh.hamesh_app_destroy(app)
 
 EVENT_CALLBACK_TYPE = ctypes.CFUNCTYPE(None, ctypes.c_void_p, ctypes.c_char_p, ctypes.c_char_p, ctypes.c_char_p)
-hamesh.hamesh_app_set_event_callback.argtypes = [ctypes.c_void_p, EVENT_CALLBACK_TYPE, ctypes.c_void_p]
+hamesh.hamesh_app_set_event_callback.argtypes = [ctypes.c_void_p, ctypes.c_void_p, ctypes.c_void_p]
 hamesh.hamesh_app_set_event_callback.restype = ctypes.c_int
 hamesh.hamesh_app_set_visible.argtypes = [ctypes.c_void_p, ctypes.c_char_p, ctypes.c_int]
 hamesh.hamesh_app_set_visible.restype = ctypes.c_int
@@ -114,6 +114,15 @@ hamesh.hamesh_app_simulate_click_component.argtypes = [ctypes.c_void_p, ctypes.c
 hamesh.hamesh_app_simulate_click_component.restype = ctypes.c_int
 hamesh.hamesh_app_simulate_key.argtypes = [ctypes.c_void_p, ctypes.c_char_p]
 hamesh.hamesh_app_simulate_key.restype = ctypes.c_int
+hamesh.hamesh_app_poll_event.argtypes = [
+    ctypes.c_void_p,
+    ctypes.c_char_p, ctypes.c_size_t,
+    ctypes.c_char_p, ctypes.c_size_t,
+    ctypes.c_char_p, ctypes.c_size_t
+]
+hamesh.hamesh_app_poll_event.restype = ctypes.c_int
+hamesh.hamesh_app_poll_events.argtypes = [ctypes.c_void_p]
+hamesh.hamesh_app_poll_events.restype = ctypes.c_int
 
 def test_deadlock_free_callback_reentrancy():
     """Verify that a foreign callback can call set_prop reentrantly without deadlock."""
@@ -204,6 +213,73 @@ def test_graceful_exit_request():
     finally:
         hamesh.hamesh_app_destroy(app)
 
+def test_bounded_event_polling():
+    """Verify bounded event polling without callbacks and zero event loss."""
+    app = hamesh.hamesh_app_create(b"root")
+    try:
+        hamesh.hamesh_app_add_component(app, b"root", b"poll_btn", 3, b"Button")
+
+        # Without callback: simulate click -> queued
+        st = hamesh.hamesh_app_simulate_click_component(app, b"poll_btn", 800, 600)
+        assert st == STATUS_OK
+
+        # Pending count reported without dropping events
+        pending = hamesh.hamesh_app_poll_events(app)
+        assert pending == 1, f"Expected 1 pending event, got {pending}"
+
+        comp_buf = ctypes.create_string_buffer(64)
+        type_buf = ctypes.create_string_buffer(32)
+        payload_buf = ctypes.create_string_buffer(128)
+
+        ret = hamesh.hamesh_app_poll_event(
+            app,
+            comp_buf, len(comp_buf),
+            type_buf, len(type_buf),
+            payload_buf, len(payload_buf)
+        )
+        assert ret == 1
+        assert comp_buf.value.decode("utf-8") == "poll_btn"
+        assert type_buf.value.decode("utf-8") == "click"
+
+        # Queue now empty
+        empty = hamesh.hamesh_app_poll_event(
+            app,
+            comp_buf, len(comp_buf),
+            type_buf, len(type_buf),
+            payload_buf, len(payload_buf)
+        )
+        assert empty == 0
+        print("[TEST PASS] Bounded event polling without callbacks verified (0 event loss)")
+    finally:
+        hamesh.hamesh_app_destroy(app)
+
+def test_callback_unregistration():
+    """Verify safe callback unregistration and zero post-teardown dispatch."""
+    app = hamesh.hamesh_app_create(b"root")
+    try:
+        hamesh.hamesh_app_add_component(app, b"root", b"unreg_btn", 3, b"Button")
+        calls = [0]
+        def on_event(u, c, e, p):
+            calls[0] += 1
+        cb = EVENT_CALLBACK_TYPE(on_event)
+
+        # Register callback
+        st = hamesh.hamesh_app_set_event_callback(app, cb, None)
+        assert st == STATUS_OK
+
+        # Unregister callback by passing NULL/None
+        st = hamesh.hamesh_app_set_event_callback(app, None, None)
+        assert st == STATUS_OK
+
+        # Simulate click: must queue, NOT invoke unreferenced callback
+        st = hamesh.hamesh_app_simulate_click_component(app, b"unreg_btn", 800, 600)
+        assert st == STATUS_OK
+        assert calls[0] == 0, "Unregistered callback was invoked!"
+        assert hamesh.hamesh_app_poll_events(app) == 1
+        print("[TEST PASS] Callback unregistration verified")
+    finally:
+        hamesh.hamesh_app_destroy(app)
+
 if __name__ == "__main__":
     print("=== Running Python C ABI Safety Battery ===")
     test_abi_version()
@@ -214,4 +290,6 @@ if __name__ == "__main__":
     test_deadlock_free_callback_reentrancy()
     test_visibility_and_hit_rejection()
     test_graceful_exit_request()
+    test_bounded_event_polling()
+    test_callback_unregistration()
     print("=== All Python C ABI Safety Tests PASSED ===")

@@ -4,6 +4,8 @@
 //! - Cross-language C ABI memory safety, mutation, and revision tracking
 //! - Menu dropdown toggle and keyboard navigation stability
 
+#![allow(clippy::manual_c_str_literals)]
+
 use hamesh_core::{App, Component, Role};
 use hamesh_ffi::*;
 use hamesh_layout::compute;
@@ -40,7 +42,10 @@ fn test_bat_10_ffi_opaque_handle_lifecycle_and_mutation() {
         let handle = &*app;
         let guard = handle.inner.lock().unwrap();
         let comp = guard.get("label_test").expect("component exists");
-        assert_eq!(comp.props.get("text").map(|s| s.as_str()), Some("Hello from C ABI"));
+        assert_eq!(
+            comp.props.get("text").map(|s| s.as_str()),
+            Some("Hello from C ABI")
+        );
         drop(guard);
 
         hamesh_app_destroy(app);
@@ -83,25 +88,35 @@ fn test_bat_12_profile_switching_without_state_loss() {
 
     // Simulate Profile Switch: Classic Desktop -> Modern Studio
     if let Some(comp) = app.get_mut("user_input") {
-        comp.props.insert("font".to_string(), "Segoe UI".to_string());
+        comp.props
+            .insert("font".to_string(), "Segoe UI".to_string());
         comp.props.insert("radius".to_string(), "0".to_string());
         app.revision += 1;
     }
 
     assert_eq!(
-        app.get("user_input").unwrap().props.get("text").map(|s| s.as_str()),
+        app.get("user_input")
+            .unwrap()
+            .props
+            .get("text")
+            .map(|s| s.as_str()),
         Some("Persisted Value 42")
     );
 
     // Switch to Modern Studio
     if let Some(comp) = app.get_mut("user_input") {
-        comp.props.insert("font".to_string(), "Instrument Sans".to_string());
+        comp.props
+            .insert("font".to_string(), "Instrument Sans".to_string());
         comp.props.insert("radius".to_string(), "6".to_string());
         app.revision += 1;
     }
 
     assert_eq!(
-        app.get("user_input").unwrap().props.get("text").map(|s| s.as_str()),
+        app.get("user_input")
+            .unwrap()
+            .props
+            .get("text")
+            .map(|s| s.as_str()),
         Some("Persisted Value 42")
     );
     assert!(app.revision > rev_before + 1);
@@ -194,12 +209,16 @@ fn test_bat_14_event_polling_and_callback_isolation() {
         ) {
             unsafe {
                 CALLED.store(true, Ordering::SeqCst);
-                *LAST_COMP.lock().unwrap() = std::ffi::CStr::from_ptr(comp_id).to_string_lossy().to_string();
-                *LAST_TYPE.lock().unwrap() = std::ffi::CStr::from_ptr(event_type).to_string_lossy().to_string();
+                *LAST_COMP.lock().unwrap() = std::ffi::CStr::from_ptr(comp_id)
+                    .to_string_lossy()
+                    .to_string();
+                *LAST_TYPE.lock().unwrap() = std::ffi::CStr::from_ptr(event_type)
+                    .to_string_lossy()
+                    .to_string();
             }
         }
 
-        let s = hamesh_app_set_event_callback(app, on_event, std::ptr::null_mut());
+        let s = hamesh_app_set_event_callback(app, Some(on_event), std::ptr::null_mut());
         assert_eq!(s, HameshStatus::Ok);
 
         // Queue event directly via handle
@@ -236,8 +255,20 @@ fn test_bat_15_deadlock_free_callback_reentrancy() {
         let input_id = CString::new("input_field").unwrap();
         let echo_id = CString::new("echo_field").unwrap();
 
-        hamesh_app_add_component(app, parent.as_ptr(), input_id.as_ptr(), 4, b"Input\0".as_ptr() as *const _);
-        hamesh_app_add_component(app, parent.as_ptr(), echo_id.as_ptr(), 5, b"Echo\0".as_ptr() as *const _);
+        hamesh_app_add_component(
+            app,
+            parent.as_ptr(),
+            input_id.as_ptr(),
+            4,
+            b"Input\0".as_ptr() as *const _,
+        );
+        hamesh_app_add_component(
+            app,
+            parent.as_ptr(),
+            echo_id.as_ptr(),
+            5,
+            b"Echo\0".as_ptr() as *const _,
+        );
 
         static REENTRANT_CALLS: AtomicUsize = AtomicUsize::new(0);
         static mut APP_PTR: *mut HameshAppHandle = std::ptr::null_mut();
@@ -261,14 +292,19 @@ fn test_bat_15_deadlock_free_callback_reentrancy() {
 
                     // Reentrantly call set_prop while inside the callback!
                     // This MUST NOT deadlock!
-                    let st = hamesh_app_set_prop(APP_PTR, echo_id.as_ptr(), echo_k.as_ptr(), echo_v.as_ptr());
+                    let st = hamesh_app_set_prop(
+                        APP_PTR,
+                        echo_id.as_ptr(),
+                        echo_k.as_ptr(),
+                        echo_v.as_ptr(),
+                    );
                     assert_eq!(st, HameshStatus::Ok);
                     REENTRANT_CALLS.fetch_add(1, Ordering::SeqCst);
                 }
             }
         }
 
-        hamesh_app_set_event_callback(app, on_change, std::ptr::null_mut());
+        hamesh_app_set_event_callback(app, Some(on_change), std::ptr::null_mut());
         hamesh_app_set_focus(app, input_id.as_ptr());
 
         // Simulate typing into input field
@@ -281,7 +317,10 @@ fn test_bat_15_deadlock_free_callback_reentrancy() {
         let handle = &*app;
         let guard = handle.inner.lock().unwrap();
         let echo_comp = guard.get("echo_field").unwrap();
-        assert_eq!(echo_comp.props.get("text").map(|s| s.as_str()), Some("Echo: Hello Hamesh"));
+        assert_eq!(
+            echo_comp.props.get("text").map(|s| s.as_str()),
+            Some("Echo: Hello Hamesh")
+        );
         drop(guard);
 
         hamesh_app_destroy(app);
@@ -298,7 +337,13 @@ fn test_bat_16_exactly_once_event_dispatch() {
 
         let parent = CString::new("root").unwrap();
         let btn_id = CString::new("test_btn").unwrap();
-        hamesh_app_add_component(app, parent.as_ptr(), btn_id.as_ptr(), 3, b"Button\0".as_ptr() as *const _);
+        hamesh_app_add_component(
+            app,
+            parent.as_ptr(),
+            btn_id.as_ptr(),
+            3,
+            b"Button\0".as_ptr() as *const _,
+        );
 
         static EVENT_COUNT: AtomicUsize = AtomicUsize::new(0);
         EVENT_COUNT.store(0, Ordering::SeqCst);
@@ -312,7 +357,7 @@ fn test_bat_16_exactly_once_event_dispatch() {
             EVENT_COUNT.fetch_add(1, Ordering::SeqCst);
         }
 
-        hamesh_app_set_event_callback(app, on_click, std::ptr::null_mut());
+        hamesh_app_set_event_callback(app, Some(on_click), std::ptr::null_mut());
 
         // Simulate 3 clicks
         for _ in 0..3 {
@@ -342,8 +387,20 @@ fn test_bat_17_visibility_and_hidden_click_rejection() {
         let panel_id = CString::new("dropdown_panel").unwrap();
         let item_id = CString::new("dropdown_item").unwrap();
 
-        hamesh_app_add_component(app, parent.as_ptr(), panel_id.as_ptr(), 1, b"Panel\0".as_ptr() as *const _);
-        hamesh_app_add_component(app, panel_id.as_ptr(), item_id.as_ptr(), 3, b"Item\0".as_ptr() as *const _);
+        hamesh_app_add_component(
+            app,
+            parent.as_ptr(),
+            panel_id.as_ptr(),
+            1,
+            b"Panel\0".as_ptr() as *const _,
+        );
+        hamesh_app_add_component(
+            app,
+            panel_id.as_ptr(),
+            item_id.as_ptr(),
+            3,
+            b"Item\0".as_ptr() as *const _,
+        );
 
         // Hide panel
         let st = hamesh_app_set_visible(app, panel_id.as_ptr(), 0);
@@ -365,5 +422,142 @@ fn test_bat_17_visibility_and_hidden_click_rejection() {
     }
 }
 
+#[test]
+fn test_bat_18_bounded_event_polling_and_callback_unregistration() {
+    use std::os::raw::c_char;
 
+    unsafe {
+        let app = hamesh_app_create(b"root\0".as_ptr() as *const _);
+        assert!(!app.is_null());
 
+        let parent = CString::new("root").unwrap();
+        let btn_id = CString::new("poll_btn").unwrap();
+        hamesh_app_add_component(
+            app,
+            parent.as_ptr(),
+            btn_id.as_ptr(),
+            3,
+            b"PollButton\0".as_ptr() as *const _,
+        );
+
+        // 1. Without callback: events accumulate in queue
+        let st = hamesh_app_simulate_click_component(app, btn_id.as_ptr(), 800, 600);
+        assert_eq!(st, HameshStatus::Ok);
+
+        // hamesh_app_poll_events reports count without dropping events
+        let pending = hamesh_app_poll_events(app);
+        assert_eq!(pending, 1);
+
+        // 2. Poll event into bounded buffers
+        let mut comp_id_buf = [0 as c_char; 64];
+        let mut type_buf = [0 as c_char; 32];
+        let mut payload_buf = [0 as c_char; 128];
+
+        let res = hamesh_app_poll_event(
+            app,
+            comp_id_buf.as_mut_ptr(),
+            comp_id_buf.len(),
+            type_buf.as_mut_ptr(),
+            type_buf.len(),
+            payload_buf.as_mut_ptr(),
+            payload_buf.len(),
+        );
+        assert_eq!(res, 1);
+
+        let retrieved_comp = std::ffi::CStr::from_ptr(comp_id_buf.as_ptr())
+            .to_str()
+            .unwrap();
+        let retrieved_type = std::ffi::CStr::from_ptr(type_buf.as_ptr())
+            .to_str()
+            .unwrap();
+        assert_eq!(retrieved_comp, "poll_btn");
+        assert_eq!(retrieved_type, "click");
+
+        // Queue now empty
+        let empty_res = hamesh_app_poll_event(
+            app,
+            comp_id_buf.as_mut_ptr(),
+            comp_id_buf.len(),
+            type_buf.as_mut_ptr(),
+            type_buf.len(),
+            payload_buf.as_mut_ptr(),
+            payload_buf.len(),
+        );
+        assert_eq!(empty_res, 0);
+
+        // 3. Register and unregister callback
+        extern "C" fn dummy_cb(
+            _: *mut std::ffi::c_void,
+            _: *const c_char,
+            _: *const c_char,
+            _: *const c_char,
+        ) {
+        }
+        let reg_st = hamesh_app_set_event_callback(app, Some(dummy_cb), std::ptr::null_mut());
+        assert_eq!(reg_st, HameshStatus::Ok);
+
+        // Unregister callback
+        let unreg_st = hamesh_app_set_event_callback(app, None, std::ptr::null_mut());
+        assert_eq!(unreg_st, HameshStatus::Ok);
+
+        // Subsequent event queues without invoking unreferenced callback
+        let st2 = hamesh_app_simulate_click_component(app, btn_id.as_ptr(), 800, 600);
+        assert_eq!(st2, HameshStatus::Ok);
+        assert_eq!(hamesh_app_poll_events(app), 1);
+
+        hamesh_app_destroy(app);
+    }
+}
+
+#[test]
+fn test_bat_19_component_bounds_query() {
+    unsafe {
+        let app = hamesh_app_create(b"root\0".as_ptr() as *const _);
+        assert!(!app.is_null());
+
+        let parent = CString::new("root").unwrap();
+        let btn_id = CString::new("query_btn").unwrap();
+        hamesh_app_add_component(
+            app,
+            parent.as_ptr(),
+            btn_id.as_ptr(),
+            3,
+            b"QueryButton\0".as_ptr() as *const _,
+        );
+
+        let mut x = 0.0f32;
+        let mut y = 0.0f32;
+        let mut w = 0.0f32;
+        let mut h = 0.0f32;
+
+        let st = hamesh_app_get_component_bounds(
+            app,
+            btn_id.as_ptr(),
+            800,
+            600,
+            &mut x,
+            &mut y,
+            &mut w,
+            &mut h,
+        );
+        assert_eq!(st, HameshStatus::Ok);
+        assert!(w > 0.0);
+        assert!(h > 0.0);
+
+        // Querying non-existent component returns NotFound
+        let bad_id = CString::new("non_existent").unwrap();
+        let st_bad = hamesh_app_get_component_bounds(
+            app,
+            bad_id.as_ptr(),
+            800,
+            600,
+            &mut x,
+            &mut y,
+            &mut w,
+            &mut h,
+        );
+        assert_eq!(st_bad, HameshStatus::NotFound);
+
+        hamesh_app_destroy(app);
+    }
+}

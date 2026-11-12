@@ -59,8 +59,25 @@ hamesh.hamesh_app_request_exit.argtypes = [c_void_p]
 hamesh.hamesh_app_request_exit.restype = c_int
 
 EVENT_CALLBACK_TYPE = CFUNCTYPE(None, c_void_p, c_char_p, c_char_p, c_char_p)
-hamesh.hamesh_app_set_event_callback.argtypes = [c_void_p, EVENT_CALLBACK_TYPE, c_void_p]
+hamesh.hamesh_app_set_event_callback.argtypes = [c_void_p, c_void_p, c_void_p]
 hamesh.hamesh_app_set_event_callback.restype = c_int
+
+hamesh.hamesh_app_poll_event.argtypes = [
+    c_void_p,
+    c_char_p, ctypes.c_size_t,
+    c_char_p, ctypes.c_size_t,
+    c_char_p, ctypes.c_size_t
+]
+hamesh.hamesh_app_poll_event.restype = c_int
+
+hamesh.hamesh_app_poll_events.argtypes = [c_void_p]
+hamesh.hamesh_app_poll_events.restype = c_int
+
+hamesh.hamesh_app_get_component_bounds.argtypes = [
+    c_void_p, c_char_p, c_uint32, c_uint32,
+    ctypes.POINTER(c_float), ctypes.POINTER(c_float), ctypes.POINTER(c_float), ctypes.POINTER(c_float)
+]
+hamesh.hamesh_app_get_component_bounds.restype = c_int
 
 hamesh.hamesh_app_simulate_click.argtypes = [c_void_p, c_float, c_float, c_uint32, c_uint32]
 hamesh.hamesh_app_simulate_click.restype = c_int
@@ -86,6 +103,7 @@ class HameshInteractiveApp:
 
         self.click_count = 0
         self.file_menu_open = False
+        self.dark_theme = True
         self.text_content = "Type here..."
         self.dispatched_events = []
 
@@ -147,6 +165,49 @@ class HameshInteractiveApp:
     def get_revision(self):
         return hamesh.hamesh_app_get_revision(self.app_handle)
 
+    def get_component_bounds(self, comp_id):
+        """Query component layout bounds (x, y, width, height) relative to the window client area."""
+        x = c_float(0.0)
+        y = c_float(0.0)
+        w = c_float(0.0)
+        h = c_float(0.0)
+        st = hamesh.hamesh_app_get_component_bounds(
+            self.app_handle,
+            comp_id.encode("utf-8"),
+            self.width,
+            self.height,
+            ctypes.byref(x),
+            ctypes.byref(y),
+            ctypes.byref(w),
+            ctypes.byref(h),
+        )
+        if st == STATUS_OK:
+            return (x.value, y.value, w.value, h.value)
+        return None
+
+    def poll_event(self):
+        """Poll a single queued event into bounded buffers without a callback."""
+        comp_id_buf = ctypes.create_string_buffer(128)
+        event_type_buf = ctypes.create_string_buffer(64)
+        payload_buf = ctypes.create_string_buffer(512)
+        res = hamesh.hamesh_app_poll_event(
+            self.app_handle,
+            comp_id_buf, len(comp_id_buf),
+            event_type_buf, len(event_type_buf),
+            payload_buf, len(payload_buf),
+        )
+        if res == 1:
+            return (
+                comp_id_buf.value.decode("utf-8"),
+                event_type_buf.value.decode("utf-8"),
+                payload_buf.value.decode("utf-8"),
+            )
+        return None
+
+    def poll_events(self):
+        """Report pending queued events, or flush to callback if registered."""
+        return hamesh.hamesh_app_poll_events(self.app_handle)
+
     def _on_event(self, user_data, comp_id_ptr, event_type_ptr, payload_ptr):
         comp_id = ctypes.string_at(comp_id_ptr).decode("utf-8")
         event_type = ctypes.string_at(event_type_ptr).decode("utf-8")
@@ -163,9 +224,20 @@ class HameshInteractiveApp:
         elif comp_id == "file_item_new":
             self.file_menu_open = False
             self.set_visible("file_dropdown", False)
-            self.set_prop("py_text_input", "text", "New document initialized from Python!")
-            self.set_prop("echo_label", "text", "Live Echo: New document initialized from Python!")
+            self.text_content = "New document initialized from Python!"
+            self.set_prop("py_text_input", "text", self.text_content)
+            self.set_prop("echo_label", "text", f"Live Echo: {self.text_content}")
             self.set_prop("status_label", "text", "Executed: File -> New Document")
+
+        elif comp_id in ("menu_theme", "file_item_theme"):
+            if comp_id == "file_item_theme":
+                self.file_menu_open = False
+                self.set_visible("file_dropdown", False)
+            self.dark_theme = not self.dark_theme
+            theme_name = "dark" if self.dark_theme else "light"
+            surface_color = "window" if self.dark_theme else "raised"
+            self.set_prop("py_root", "surface", surface_color)
+            self.set_prop("status_label", "text", f"Theme switched to: {theme_name}")
 
         elif comp_id == "file_item_exit":
             print("[Python] Exit requested via File -> Exit.")
@@ -204,7 +276,7 @@ class HameshInteractiveApp:
             "border": "1"
         })
 
-        for item in ["File", "Edit", "Help"]:
+        for item in ["File", "Edit", "Theme", "Help"]:
             self.add_component("py_menu_bar", f"menu_{item.lower()}", ROLE_BUTTON, item, {
                 "layout": "row",
                 "pad": "4",
@@ -218,7 +290,7 @@ class HameshInteractiveApp:
         self.add_component("py_root", "file_dropdown", ROLE_OVERLAY, "File Menu Dropdown", {
             "layout": "column",
             "w": "160",
-            "h": "120",
+            "h": "144",
             "pad": "4",
             "gap": "2",
             "surface": "surface",
@@ -228,7 +300,13 @@ class HameshInteractiveApp:
         })
         self.set_visible("file_dropdown", False)
 
-        for item_id, item_label in [("file_item_new", "New Document"), ("file_item_open", "Open..."), ("file_item_save", "Save"), ("file_item_exit", "Exit")]:
+        for item_id, item_label in [
+            ("file_item_new", "New Document"),
+            ("file_item_theme", "Toggle Theme"),
+            ("file_item_open", "Open..."),
+            ("file_item_save", "Save"),
+            ("file_item_exit", "Exit"),
+        ]:
             self.add_component("file_dropdown", item_id, ROLE_BUTTON, item_label, {
                 "layout": "row",
                 "h": "24",
@@ -320,8 +398,10 @@ class HameshInteractiveApp:
 
     def destroy(self):
         if self.app_handle:
+            hamesh.hamesh_app_set_event_callback(self.app_handle, None, None)
             hamesh.hamesh_app_destroy(self.app_handle)
             self.app_handle = None
+            self.callback_ref = None
 
 
 if __name__ == "__main__":
