@@ -240,8 +240,14 @@ pub unsafe extern "C" fn hamesh_app_create(root_id: *const c_char) -> *mut Hames
 
 /// Destroy an App instance and release all associated memory.
 ///
-/// Precondition: Foreign callers MUST NOT invoke `hamesh_app_destroy` concurrently with an active
-/// `hamesh_run` window loop or active FFI mutations on other threads.
+/// # Concurrency & Lifecycle Precondition
+/// Callback quiescence and handle-use quiescence are distinct guarantees:
+/// - This function guarantees callback quiescence: it detaches the callback and awaits the completion
+///   of in-flight event callback dispatches before freeing the handle.
+/// - It does NOT provide complete handle-use concurrency safety: foreign callers MUST NOT invoke
+///   `hamesh_app_destroy` concurrently with an active `hamesh_run` window loop or concurrent FFI
+///   mutations on other threads. Callers MUST ensure that `hamesh_run` has returned and all worker
+///   threads accessing this handle have finished before calling destroy.
 ///
 /// Shutdown sequence:
 /// 1. Detaches the event callback immediately so that no new dispatches can initiate.
@@ -276,8 +282,13 @@ pub unsafe extern "C" fn hamesh_app_destroy(app: *mut HameshAppHandle) {
 
 /// Attempt to destroy an App instance and release all associated memory after checking for quiescence.
 ///
-/// Precondition: Foreign callers MUST NOT invoke `hamesh_app_destroy_checked` concurrently with an active
-/// `hamesh_run` window loop or active FFI mutations on other threads.
+/// # Concurrency & Lifecycle Precondition
+/// Callback quiescence and handle-use quiescence are distinct guarantees:
+/// - This function guarantees callback quiescence: it checks and awaits in-flight event callback dispatches.
+/// - It does NOT provide general handle-use concurrency safety: foreign callers MUST NOT invoke
+///   `hamesh_app_destroy_checked` concurrently with an active `hamesh_run` window loop or concurrent FFI
+///   mutations on other threads. Callers MUST ensure that `hamesh_run` has returned and all worker
+///   threads accessing this handle have finished before calling destroy.
 ///
 /// Teardown sequence:
 /// 1. Detaches the event callback immediately so that no new dispatches can initiate.

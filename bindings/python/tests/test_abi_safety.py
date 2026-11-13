@@ -418,9 +418,11 @@ def test_callback_quiescence_and_races():
 
 def test_checked_destruction_and_callback_lifetime():
     """Verify checked destruction: returns Busy while callbacks in-flight, preserves
-    callback references in Python, and only deallocates upon confirmed quiescence."""
+    callback references in Python even under forced garbage collection, and only deallocates
+    upon confirmed quiescence."""
     import time
     import threading
+    import gc
 
     sys.path.insert(0, os.path.abspath(os.path.join(CURRENT_DIR, "..")))
     from hamesh import HameshInteractiveApp, STATUS_BUSY, STATUS_OK
@@ -433,7 +435,7 @@ def test_checked_destruction_and_callback_lifetime():
 
     def long_callback(comp_id, event_type, payload):
         started.set()
-        time.sleep(1.1) # Long-running callback (>1000ms)
+        time.sleep(1.1)  # Long-running callback (>1000ms)
         finished.set()
 
     app.set_event_callback(long_callback)
@@ -447,13 +449,20 @@ def test_checked_destruction_and_callback_lifetime():
     # Wait for callback to begin execution
     assert started.wait(timeout=2.0)
 
+    # Force aggressive garbage collection while callback is in-flight
+    gc.collect()
+
     # 1. Attempt destruction while in-flight with short timeout (100 ms).
     # Must refuse teardown with STATUS_BUSY and preserve references!
     status = app.destroy_checked(timeout_ms=100)
     assert status == STATUS_BUSY
     assert app.app_handle is not None
-    assert app.callback_ref is not None
+    assert app.callback_ref is None  # Moved to _retired_callbacks on destroy attempt
+    assert len(app._retired_callbacks) > 0  # Held safely in retired set
     assert not finished.is_set()
+
+    # Force garbage collection again while retired callback is still in flight
+    gc.collect()
 
     # 2. Verify wrapper destroy() raises RuntimeError on timeout
     try:
@@ -462,17 +471,121 @@ def test_checked_destruction_and_callback_lifetime():
     except RuntimeError as e:
         assert "did not quiesce" in str(e)
     assert app.app_handle is not None
-    assert app.callback_ref is not None
+    assert len(app._retired_callbacks) > 0
 
     # 3. Retry destruction with sufficient timeout (2000 ms) to await completion
     status = app.destroy_checked(timeout_ms=2000)
     assert status == STATUS_OK
     assert app.app_handle is None
     assert app.callback_ref is None
+    assert len(app._retired_callbacks) == 0  # Safely purged after quiescence
     assert finished.is_set()
 
     dispatch_thread.join(timeout=1.0)
     print("[TEST PASS] Checked destruction and Python callback lifetime verified")
+
+def test_callback_replacement_and_unregistration_under_forced_gc():
+    """Verify callback replacement and unregistration during active execution with forced GC.
+    Ensures that retired ctypes callbacks remain referenced until quiescence."""
+    import time
+    import threading
+    import gc
+
+    sys.path.insert(0, os.path.abspath(os.path.join(CURRENT_DIR, "..")))
+    from hamesh import HameshInteractiveApp, STATUS_OK
+
+    app = HameshInteractiveApp(title="Callback Replacement GC Test", width=400, height=300)
+    app.setup_ui()
+
+    cb_a_started = threading.Event()
+    cb_a_finished = threading.Event()
+    cb_b_invoked = [False]
+
+    def callback_a(comp_id, event_type, payload):
+        cb_a_started.set()
+        time.sleep(0.4)
+        cb_a_finished.set()
+
+    def callback_b(comp_id, event_type, payload):
+        cb_b_invoked[0] = True
+
+    # 1. Register Callback A
+    app.set_event_callback(callback_a)
+
+    # 2. Dispatch event to trigger Callback A
+    t1 = threading.Thread(
+        target=lambda: hamesh.hamesh_app_simulate_click_component(app.app_handle, b"btn_counter", 800, 600)
+    )
+    t1.start()
+    assert cb_a_started.wait(timeout=2.0)
+
+    # 3. Replace callback with Callback B while Callback A is actively in-flight
+    st = app.set_event_callback(callback_b)
+    assert st == STATUS_OK
+    # Retired callback A is now in _retired_callbacks
+    assert len(app._retired_callbacks) > 0
+
+    # Force aggressive garbage collection while Callback A is in-flight
+    gc.collect()
+    gc.collect()
+
+    # Wait for Callback A thread to finish
+    t1.join(timeout=1.0)
+    assert cb_a_finished.is_set()
+
+    # 4. Dispatch new event; must invoke Callback B
+    st2 = hamesh.hamesh_app_simulate_click_component(app.app_handle, b"btn_counter", 800, 600)
+    assert st2 == STATUS_OK
+    assert cb_b_invoked[0] is True
+
+    # 5. Unregister callback B while idle
+    app.set_event_callback(None)
+    assert app.callback_ref is None
+
+    # Quiescence check purges retired callbacks
+    app.await_quiescence(100)
+    assert len(app._retired_callbacks) == 0
+
+    app.destroy()
+    print("[TEST PASS] Callback replacement and unregistration under forced GC verified")
+
+def test_callback_self_unregistration_reentrancy():
+    """Verify that a callback can safely unregister itself from within its own execution
+    without deadlocking or prematurely releasing its ctypes callable."""
+    import threading
+    import gc
+
+    sys.path.insert(0, os.path.abspath(os.path.join(CURRENT_DIR, "..")))
+    from hamesh import HameshInteractiveApp, STATUS_OK
+
+    app = HameshInteractiveApp(title="Self Unregistration Test", width=400, height=300)
+    app.setup_ui()
+
+    self_unreg_done = threading.Event()
+
+    def self_unreg_cb(comp_id, event_type, payload):
+        # Self-unregistration: must not deadlock on internal locks!
+        res = app.set_event_callback(None)
+        assert res == STATUS_OK
+        # Force GC inside callback execution
+        gc.collect()
+        self_unreg_done.set()
+
+    app.set_event_callback(self_unreg_cb)
+
+    # Dispatch event
+    st = hamesh.hamesh_app_simulate_click_component(app.app_handle, b"btn_counter", 800, 600)
+    assert st == STATUS_OK
+    assert self_unreg_done.is_set()
+    assert app.callback_ref is None
+
+    # Subsequent clicks safely divert to polling queue without invoking callback
+    st2 = hamesh.hamesh_app_simulate_click_component(app.app_handle, b"btn_counter", 800, 600)
+    assert st2 == STATUS_OK
+    assert hamesh.hamesh_app_poll_events(app.app_handle) == 1
+
+    app.destroy()
+    print("[TEST PASS] Callback self-unregistration reentrancy verified")
 
 if __name__ == "__main__":
     print("=== Running Python C ABI Safety Battery ===")
@@ -489,4 +602,6 @@ if __name__ == "__main__":
     test_callback_unregistration()
     test_callback_quiescence_and_races()
     test_checked_destruction_and_callback_lifetime()
+    test_callback_replacement_and_unregistration_under_forced_gc()
+    test_callback_self_unregistration_reentrancy()
     print("=== All Python C ABI Safety Tests PASSED ===")

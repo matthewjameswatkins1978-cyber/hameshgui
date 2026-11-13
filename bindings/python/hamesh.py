@@ -12,6 +12,7 @@ Demonstrates:
 import ctypes
 import os
 import sys
+import threading
 from ctypes import c_char_p, c_int, c_uint32, c_uint64, c_void_p, c_float, CFUNCTYPE
 
 CURRENT_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -123,27 +124,56 @@ class HameshInteractiveApp:
         self.text_content = "Type here..."
         self.dispatched_events = []
 
+        # Synchronized callback tracking to ensure ctypes closures are never
+        # collected while native in-flight invocations are active.
+        self._callback_lock = threading.RLock()
+        self._retired_callbacks = []
+
         # Register event callback
         self.callback_ref = EVENT_CALLBACK_TYPE(self._on_event)
         hamesh.hamesh_app_set_event_callback(self.app_handle, self.callback_ref, None)
 
+    def _purge_retired_callbacks_if_quiesced(self):
+        """Purge retired callback references if all in-flight dispatches have completed."""
+        with self._callback_lock:
+            if not self._retired_callbacks:
+                return
+            if self.app_handle:
+                # Non-blocking quiescence check
+                if hamesh.hamesh_app_await_quiescence(self.app_handle, 0) == 1:
+                    self._retired_callbacks.clear()
+
     def set_event_callback(self, callback_fn):
-        """Register or replace the event callback. Pass None to unregister."""
+        """Register, replace, or unregister the event callback. Pass None to unregister.
+        Retains retired callback references until in-flight invocations have quiesced."""
         if not self.app_handle:
             return STATUS_NULL_POINTER
-        if callback_fn is not None:
-            def wrapper(user_data, comp_id_ptr, event_type_ptr, payload_ptr):
-                comp_id = ctypes.string_at(comp_id_ptr).decode("utf-8")
-                event_type = ctypes.string_at(event_type_ptr).decode("utf-8")
-                payload = ctypes.string_at(payload_ptr).decode("utf-8") if payload_ptr else ""
-                callback_fn(comp_id, event_type, payload)
 
-            self.callback_ref = EVENT_CALLBACK_TYPE(wrapper)
-            return hamesh.hamesh_app_set_event_callback(self.app_handle, self.callback_ref, None)
-        else:
-            status = hamesh.hamesh_app_set_event_callback(self.app_handle, None, None)
-            self.callback_ref = None
-            return status
+        self._purge_retired_callbacks_if_quiesced()
+
+        with self._callback_lock:
+            old_ref = self.callback_ref
+            if old_ref is not None:
+                self._retired_callbacks.append(old_ref)
+
+            if callback_fn is not None:
+                def wrapper(user_data, comp_id_ptr, event_type_ptr, payload_ptr):
+                    comp_id = ctypes.string_at(comp_id_ptr).decode("utf-8")
+                    event_type = ctypes.string_at(event_type_ptr).decode("utf-8")
+                    payload = ctypes.string_at(payload_ptr).decode("utf-8") if payload_ptr else ""
+                    callback_fn(comp_id, event_type, payload)
+
+                new_ref = EVENT_CALLBACK_TYPE(wrapper)
+                status = hamesh.hamesh_app_set_event_callback(self.app_handle, new_ref, None)
+                if status == STATUS_OK:
+                    self.callback_ref = new_ref
+                else:
+                    self.callback_ref = None
+                return status
+            else:
+                status = hamesh.hamesh_app_set_event_callback(self.app_handle, None, None)
+                self.callback_ref = None
+                return status
 
     def add_component(self, parent_id, comp_id, role, name, props=None):
         status = hamesh.hamesh_app_add_component(
@@ -434,18 +464,29 @@ class HameshInteractiveApp:
 
     def await_quiescence(self, timeout_ms=1000):
         if self.app_handle:
-            return hamesh.hamesh_app_await_quiescence(self.app_handle, timeout_ms)
+            res = hamesh.hamesh_app_await_quiescence(self.app_handle, timeout_ms)
+            if res == 1:
+                with self._callback_lock:
+                    self._retired_callbacks.clear()
+            return res
         return -1
 
     def destroy_checked(self, timeout_ms=5000):
         """Attempt checked teardown. Returns STATUS_OK if destroyed, or STATUS_BUSY if callbacks remain in flight."""
         if not self.app_handle:
             return STATUS_OK
+
+        with self._callback_lock:
+            if self.callback_ref is not None:
+                self._retired_callbacks.append(self.callback_ref)
+                self.callback_ref = None
+
         hamesh.hamesh_app_set_event_callback(self.app_handle, None, None)
         status = hamesh.hamesh_app_destroy_checked(self.app_handle, timeout_ms)
         if status == STATUS_OK:
-            self.app_handle = None
-            self.callback_ref = None
+            with self._callback_lock:
+                self.app_handle = None
+                self._retired_callbacks.clear()
         return status
 
     def destroy(self, timeout_ms=5000):
