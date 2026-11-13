@@ -15,8 +15,8 @@ hamesh-layout = { path = "../../crates/hamesh-layout" }
 hamesh-scene = { path = "../../crates/hamesh-scene" }
 hamesh-render = { path = "../../crates/hamesh-render" }
 hamesh-text = { path = "../../crates/hamesh-text" }
-hamesh-blocks = { path = "../../crates/hamesh-blocks" }
 hamesh-theme = { path = "../../crates/hamesh-theme" }
+hamesh-widgets = { path = "../../crates/hamesh-widgets" }
 hamesh-shell = { path = "../../crates/hamesh-shell" }
 serde_json = { workspace = true }
 winit = "0.30"

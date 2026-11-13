@@ -1204,6 +1204,8 @@ dependencies = [
  "hamesh-render",
  "hamesh-scene",
  "hamesh-text",
+ "hamesh-theme",
+ "hamesh-widgets",
  "serde",
  "serde_json",
  "softbuffer",
@@ -1240,6 +1242,9 @@ dependencies = [
 [[package]]
 name = "hamesh-theme"
 version = "0.2.0"
+dependencies = [
+ "serde",
+]
 
 [[package]]
 name = "hamesh-widgets"
@@ -1247,7 +1252,9 @@ version = "0.2.0"
 dependencies = [
  "hamesh-core",
  "hamesh-layout",
+ "hamesh-scene",
  "hamesh-text",
+ "hamesh-theme",
  "serde",
  "unicode-segmentation",
 ]
@@ -1285,7 +1292,6 @@ dependencies = [
 name = "hamesh-workbench"
 version = "0.2.0"
 dependencies = [
- "hamesh-blocks",
  "hamesh-core",
  "hamesh-layout",
  "hamesh-render",
@@ -1293,6 +1299,7 @@ dependencies = [
  "hamesh-shell",
  "hamesh-text",
  "hamesh-theme",
+ "hamesh-widgets",
  "serde_json",
  "winit",
 ]

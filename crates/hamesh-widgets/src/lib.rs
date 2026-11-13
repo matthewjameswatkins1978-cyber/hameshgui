@@ -11,6 +11,12 @@ use unicode_segmentation::UnicodeSegmentation;
 pub mod select;
 pub use select::{filtered_row, list_nav, picker_nav, ListView, Nav, Picker};
 
+pub mod desktop;
+pub use desktop::{
+    CheckboxControl, Command, CommandRegistry, FocusRing, MenuBar, MenuCategory, MenuItem,
+    SelectableListControl, SplitterControl, StatusBarControl, TabControl,
+};
+
 /// Char offsets of every grapheme boundary in `text`, including 0 and the
 /// end. The caret stays char-indexed (cheap, stable across edits); all
 /// deletions and arrow moves snap to these boundaries so multi-char

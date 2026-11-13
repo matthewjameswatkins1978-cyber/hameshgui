@@ -7,8 +7,10 @@ license.workspace = true
 [dependencies]
 hamesh-core = { path = "../hamesh-core" }
 hamesh-text = { path = "../hamesh-text" }
+hamesh-theme = { path = "../hamesh-theme" }
 serde.workspace = true
 unicode-segmentation = "1"
 
 [dev-dependencies]
 hamesh-layout = { path = "../hamesh-layout" }
+hamesh-scene = { path = "../hamesh-scene" }

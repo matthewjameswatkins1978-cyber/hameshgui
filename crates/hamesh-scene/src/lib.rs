@@ -117,29 +117,14 @@ pub struct Scene {
     pub nodes: Vec<SceneNode>,
 }
 
-fn role_color(role: &str, name: &str) -> [u8; 4] {
-    // One polished dark theme: near-black surfaces, restrained teal/green.
-    match role {
-        s if s.contains("Window") => [14, 20, 22, 255],
-        s if s.contains("Header") => [20, 30, 33, 255],
-        s if s.contains("Button") => {
-            if name.to_lowercase().contains("primary") || name.to_lowercase().contains("increment")
-            {
-                [45, 151, 134, 255] // teal accent
-            } else {
-                [38, 52, 56, 255]
-            }
-        }
-        s if s.contains("Overlay") => [120, 40, 40, 180], // translucent red for fault drills
-        // Text/Status nodes are labels on their parent surface: no fill of
-        // their own (transparent), so the parent shows through. Their
-        // content is the rasterized text, not the rect.
-        s if s.contains("Text") | s.contains("Status") => [0, 0, 0, 0],
-        _ => [30, 42, 46, 255],
-    }
-}
-
 pub fn build(app: &App, layout: &LayoutOutput, scene_revision: u64) -> Scene {
+    let world = app
+        .components
+        .get(&app.root.0)
+        .and_then(|r| r.props.get("theme").or_else(|| r.props.get("profile")))
+        .and_then(|t| hamesh_theme::world_by_name(t))
+        .unwrap_or(hamesh_theme::VisualWorld::ModernStudio);
+
     let mut nodes: Vec<SceneNode> = app
         .components
         .values()
@@ -164,8 +149,8 @@ pub fn build(app: &App, layout: &LayoutOutput, scene_revision: u64) -> Scene {
             let color = c
                 .props
                 .get("surface")
-                .map(|t| hamesh_theme::resolve(t))
-                .unwrap_or_else(|| role_color(&role, &c.name));
+                .map(|t| hamesh_theme::resolve_token(world, t))
+                .unwrap_or_else(|| hamesh_theme::role_color(world, &role, &c.name));
             // Progress fill is opt-in: only `block == "Progress"` nodes
             // interpret value/min/max as a fill fraction. Other blocks
             // (e.g. Metric tiles) reuse `value` as Eye metadata.
@@ -322,14 +307,15 @@ pub fn build(app: &App, layout: &LayoutOutput, scene_revision: u64) -> Scene {
                 border_rgba: c
                     .props
                     .get("border_token")
-                    .map(|t| hamesh_theme::resolve(t))
-                    .unwrap_or_else(|| hamesh_theme::resolve("border")),
+                    .or_else(|| c.props.get("border_color"))
+                    .map(|t| hamesh_theme::resolve_token(world, t))
+                    .unwrap_or_else(|| hamesh_theme::resolve_token(world, "border")),
                 fill_frac,
                 fill_rgba: c
                     .props
                     .get("fill")
-                    .map(|t| hamesh_theme::resolve(t))
-                    .unwrap_or_else(|| hamesh_theme::resolve("accent")),
+                    .map(|t| hamesh_theme::resolve_token(world, t))
+                    .unwrap_or_else(|| hamesh_theme::resolve_token(world, "accent")),
                 icon: c.props.get("icon").cloned(),
                 font_size,
                 line_height,
@@ -337,8 +323,9 @@ pub fn build(app: &App, layout: &LayoutOutput, scene_revision: u64) -> Scene {
                 text_rgba: c
                     .props
                     .get("text_token")
-                    .map(|t| hamesh_theme::resolve(t))
-                    .unwrap_or_else(|| hamesh_theme::resolve("text")),
+                    .or_else(|| c.props.get("color"))
+                    .map(|t| hamesh_theme::resolve_token(world, t))
+                    .unwrap_or_else(|| hamesh_theme::resolve_token(world, "text")),
                 ghost: c.props.get("ghost").map(|s| s == "true").unwrap_or(false),
                 ink,
                 trim,
