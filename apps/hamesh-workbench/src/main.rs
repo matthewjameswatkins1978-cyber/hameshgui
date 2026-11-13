@@ -1065,6 +1065,15 @@ impl HameshApp for WorkbenchApp {
 }
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let capture_flag = std::env::args().any(|a| a == "--capture-screenshots" || a == "--capture");
+    if capture_flag {
+        let mut workbench = WorkbenchApp::new();
+        let mut app = App::new("root");
+        workbench.capture_visual_receipts(&mut app);
+        println!("Captured visual receipts for all 5 worlds to target/visual_receipts/");
+        return Ok(());
+    }
+
     let smoke_secs: Option<u64> =
         std::env::args().find_map(|a| a.strip_prefix("--smoke-test=").and_then(|v| v.parse().ok()));
 
