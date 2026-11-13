@@ -243,7 +243,7 @@ impl WorkbenchApp {
             "workbench_records_row_4".to_string(),
         ]);
 
-        let splitter = SplitterControl::new("sidebar_splitter", 250.0, 160.0, 500.0);
+        let splitter = SplitterControl::new("sidebar_splitter", 280.0, 180.0, 500.0);
         let checkbox = CheckboxControl::new("sample_checkbox", "Enable Telemetry Streaming", true);
         let mut status_bar = StatusBarControl::new(
             "workbench_status_bar",
@@ -392,7 +392,7 @@ impl WorkbenchApp {
         let orig_world = self.world;
 
         for world in VisualWorld::ALL {
-            self.world = world;
+            self.set_visual_world(world);
             self.rebuild_ui(app);
             let layout = hamesh_layout::compute(app, 1024.0, 768.0);
             let scene = hamesh_scene::build(app, &layout, 1);
@@ -401,7 +401,7 @@ impl WorkbenchApp {
             let _ = frame.pixmap.save_png(&path);
         }
 
-        self.world = orig_world;
+        self.set_visual_world(orig_world);
         self.rebuild_ui(app);
     }
 
@@ -513,8 +513,8 @@ impl WorkbenchApp {
                 app.add(
                     "controls_left",
                     Component::new("text_field_label", Role::Text, "Input Label")
-                        .with_prop("h", "16")
-                        .with_prop("text", "Text Field (Tab focuses, type to edit):"),
+                        .with_prop("h", "20")
+                        .with_prop("text", "Text Field (Tab to focus):"),
                 );
 
                 let is_input_focused = self.focus_ring.current() == Some("sample_text_input");

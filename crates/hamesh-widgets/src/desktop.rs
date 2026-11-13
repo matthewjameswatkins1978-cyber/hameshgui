@@ -529,13 +529,14 @@ impl CheckboxControl {
         } else {
             format!("[ ] {}", self.label)
         };
-        let h = format!("{:.0}", world.control_height().min(30.0));
+        let h = format!("{:.0}", world.control_height());
         let radius = format!("{:.0}", world.corner_radius_sm());
 
         app.add(
             parent_id,
             Component::new(&self.id, Role::Button, &self.label)
                 .with_prop("layout", "row")
+                .with_prop("w", "100%")
                 .with_prop("h", &h)
                 .with_prop("gap", "8")
                 .with_prop("pad", "6")
@@ -707,6 +708,7 @@ impl SelectableListControl {
     ) {
         let row_h = format!("{:.0}", world.row_height());
         let radius = format!("{:.0}", world.corner_radius_sm());
+        let row_pad = if world.row_height() <= 24.0 { "4" } else { "6" };
 
         app.add(
             parent_id,
@@ -730,7 +732,7 @@ impl SelectableListControl {
                 &self.id,
                 Component::new(&row_id, Role::ListItem, item)
                     .with_prop("h", &row_h)
-                    .with_prop("pad", "8")
+                    .with_prop("pad", row_pad)
                     .with_prop("surface", row_surface)
                     .with_prop("color", row_color)
                     .with_prop("border", if is_focused { "2" } else { "0" })
