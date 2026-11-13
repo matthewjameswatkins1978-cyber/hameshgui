@@ -28,11 +28,14 @@ STATUS_NOT_FOUND = 3
 STATUS_DUPLICATE_ID = 4
 STATUS_PARENT_NOT_FOUND = 5
 STATUS_INVALID_ROLE = 6
+STATUS_BUSY = 10
 
 hamesh.hamesh_abi_version.restype = ctypes.c_uint32
 hamesh.hamesh_app_create.argtypes = [ctypes.c_char_p]
 hamesh.hamesh_app_create.restype = ctypes.c_void_p
 hamesh.hamesh_app_destroy.argtypes = [ctypes.c_void_p]
+hamesh.hamesh_app_destroy_checked.argtypes = [ctypes.c_void_p, ctypes.c_uint32]
+hamesh.hamesh_app_destroy_checked.restype = ctypes.c_int
 hamesh.hamesh_app_get_revision.argtypes = [ctypes.c_void_p]
 hamesh.hamesh_app_get_revision.restype = ctypes.c_uint64
 hamesh.hamesh_app_add_component.argtypes = [ctypes.c_void_p, ctypes.c_char_p, ctypes.c_char_p, ctypes.c_int, ctypes.c_char_p]
@@ -413,6 +416,64 @@ def test_callback_quiescence_and_races():
     finally:
         hamesh.hamesh_app_destroy(app)
 
+def test_checked_destruction_and_callback_lifetime():
+    """Verify checked destruction: returns Busy while callbacks in-flight, preserves
+    callback references in Python, and only deallocates upon confirmed quiescence."""
+    import time
+    import threading
+
+    sys.path.insert(0, os.path.abspath(os.path.join(CURRENT_DIR, "..")))
+    from hamesh import HameshInteractiveApp, STATUS_BUSY, STATUS_OK
+
+    app = HameshInteractiveApp(title="Checked Destruction Test", width=400, height=300)
+    app.setup_ui()
+
+    started = threading.Event()
+    finished = threading.Event()
+
+    def long_callback(comp_id, event_type, payload):
+        started.set()
+        time.sleep(1.1) # Long-running callback (>1000ms)
+        finished.set()
+
+    app.set_event_callback(long_callback)
+
+    # Spawn thread to simulate event dispatch
+    dispatch_thread = threading.Thread(
+        target=lambda: hamesh.hamesh_app_simulate_click_component(app.app_handle, b"btn_counter", 800, 600)
+    )
+    dispatch_thread.start()
+
+    # Wait for callback to begin execution
+    assert started.wait(timeout=2.0)
+
+    # 1. Attempt destruction while in-flight with short timeout (100 ms).
+    # Must refuse teardown with STATUS_BUSY and preserve references!
+    status = app.destroy_checked(timeout_ms=100)
+    assert status == STATUS_BUSY
+    assert app.app_handle is not None
+    assert app.callback_ref is not None
+    assert not finished.is_set()
+
+    # 2. Verify wrapper destroy() raises RuntimeError on timeout
+    try:
+        app.destroy(timeout_ms=50)
+        assert False, "Expected RuntimeError on destroy() while busy"
+    except RuntimeError as e:
+        assert "did not quiesce" in str(e)
+    assert app.app_handle is not None
+    assert app.callback_ref is not None
+
+    # 3. Retry destruction with sufficient timeout (2000 ms) to await completion
+    status = app.destroy_checked(timeout_ms=2000)
+    assert status == STATUS_OK
+    assert app.app_handle is None
+    assert app.callback_ref is None
+    assert finished.is_set()
+
+    dispatch_thread.join(timeout=1.0)
+    print("[TEST PASS] Checked destruction and Python callback lifetime verified")
+
 if __name__ == "__main__":
     print("=== Running Python C ABI Safety Battery ===")
     test_abi_version()
@@ -427,4 +488,5 @@ if __name__ == "__main__":
     test_lossless_polling_and_multibyte_utf8()
     test_callback_unregistration()
     test_callback_quiescence_and_races()
+    test_checked_destruction_and_callback_lifetime()
     print("=== All Python C ABI Safety Tests PASSED ===")

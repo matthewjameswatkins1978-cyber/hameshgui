@@ -32,6 +32,7 @@ STATUS_INVALID_ROLE = 6
 STATUS_PANIC_CAUGHT = 7
 STATUS_ERROR = 8
 STATUS_BUFFER_TOO_SMALL = 9
+STATUS_BUSY = 10
 ROLE_WINDOW = 0
 ROLE_PANEL = 1
 ROLE_HEADER = 2
@@ -48,6 +49,9 @@ hamesh.hamesh_app_create.restype = c_void_p
 
 hamesh.hamesh_app_destroy.argtypes = [c_void_p]
 hamesh.hamesh_app_destroy.restype = None
+
+hamesh.hamesh_app_destroy_checked.argtypes = [c_void_p, c_uint32]
+hamesh.hamesh_app_destroy_checked.restype = c_int
 
 hamesh.hamesh_app_get_revision.argtypes = [c_void_p]
 hamesh.hamesh_app_get_revision.restype = c_uint64
@@ -122,6 +126,24 @@ class HameshInteractiveApp:
         # Register event callback
         self.callback_ref = EVENT_CALLBACK_TYPE(self._on_event)
         hamesh.hamesh_app_set_event_callback(self.app_handle, self.callback_ref, None)
+
+    def set_event_callback(self, callback_fn):
+        """Register or replace the event callback. Pass None to unregister."""
+        if not self.app_handle:
+            return STATUS_NULL_POINTER
+        if callback_fn is not None:
+            def wrapper(user_data, comp_id_ptr, event_type_ptr, payload_ptr):
+                comp_id = ctypes.string_at(comp_id_ptr).decode("utf-8")
+                event_type = ctypes.string_at(event_type_ptr).decode("utf-8")
+                payload = ctypes.string_at(payload_ptr).decode("utf-8") if payload_ptr else ""
+                callback_fn(comp_id, event_type, payload)
+
+            self.callback_ref = EVENT_CALLBACK_TYPE(wrapper)
+            return hamesh.hamesh_app_set_event_callback(self.app_handle, self.callback_ref, None)
+        else:
+            status = hamesh.hamesh_app_set_event_callback(self.app_handle, None, None)
+            self.callback_ref = None
+            return status
 
     def add_component(self, parent_id, comp_id, role, name, props=None):
         status = hamesh.hamesh_app_add_component(
@@ -415,13 +437,27 @@ class HameshInteractiveApp:
             return hamesh.hamesh_app_await_quiescence(self.app_handle, timeout_ms)
         return -1
 
-    def destroy(self):
-        if self.app_handle:
-            hamesh.hamesh_app_set_event_callback(self.app_handle, None, None)
-            hamesh.hamesh_app_await_quiescence(self.app_handle, 1000)
-            hamesh.hamesh_app_destroy(self.app_handle)
+    def destroy_checked(self, timeout_ms=5000):
+        """Attempt checked teardown. Returns STATUS_OK if destroyed, or STATUS_BUSY if callbacks remain in flight."""
+        if not self.app_handle:
+            return STATUS_OK
+        hamesh.hamesh_app_set_event_callback(self.app_handle, None, None)
+        status = hamesh.hamesh_app_destroy_checked(self.app_handle, timeout_ms)
+        if status == STATUS_OK:
             self.app_handle = None
             self.callback_ref = None
+        return status
+
+    def destroy(self, timeout_ms=5000):
+        """Destroy the app instance. Never releases callback reference if callbacks remain in flight."""
+        if self.app_handle:
+            status = self.destroy_checked(timeout_ms)
+            if status == STATUS_BUSY:
+                raise RuntimeError(
+                    f"HameshApp destroy failed: in-flight callbacks did not quiesce within {timeout_ms}ms"
+                )
+            elif status != STATUS_OK:
+                raise RuntimeError(f"HameshApp destroy failed with status {status}")
 
 
 if __name__ == "__main__":

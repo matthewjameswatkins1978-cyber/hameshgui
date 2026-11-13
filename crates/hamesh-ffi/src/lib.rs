@@ -27,8 +27,10 @@
 //!        have completed before deallocating `user_data` or foreign resources.
 //!    - Foreign callers own the callback function pointer and `user_data` context pointer, and are responsible
 //!      for keeping them valid while registered and until any in-flight invocations have quiesced.
-//!    - `hamesh_app_destroy` explicitly detaches the callback and enforces a bounded quiescence barrier
+//!    - `hamesh_app_destroy` explicitly detaches the callback and awaits quiescence of all in-flight dispatches
 //!      before deallocating handle memory, preventing teardown from racing with in-flight foreign dispatches.
+//!      `hamesh_app_destroy_checked(app, timeout_ms)` provides a checked teardown interface that returns
+//!      `HameshStatus::Busy` and refuses deallocation if in-flight callbacks do not complete within `timeout_ms`.
 //!    - Reentrant callback execution is safe: foreign callbacks can mutate state (`set_prop`), request shutdown
 //!      (`request_exit`), or unregister themselves during callback execution without deadlock.
 //! 2. **Pointer Validity & Boundaries**:
@@ -84,6 +86,7 @@ pub enum HameshStatus {
     PanicCaught = 7,
     Error = 8,
     BufferTooSmall = 9,
+    Busy = 10,
 }
 
 /// An event delivered from the UI thread to a foreign language callback or poll queue.
@@ -242,31 +245,101 @@ pub unsafe extern "C" fn hamesh_app_create(root_id: *const c_char) -> *mut Hames
 ///
 /// Shutdown sequence:
 /// 1. Detaches the event callback immediately so that no new dispatches can initiate.
-/// 2. Enforces a bounded quiescence barrier (up to 1,000 ms) waiting for any currently in-flight
-///    callback dispatches to finish before deallocating the underlying handle.
+/// 2. Awaits quiescence of any currently in-flight callback dispatches (waiting until in-flight count reaches 0)
+///    before deallocating the underlying handle. It never frees memory while a callback is in flight.
 #[no_mangle]
 pub unsafe extern "C" fn hamesh_app_destroy(app: *mut HameshAppHandle) {
     let _ = catch_unwind(|| {
         if !app.is_null() {
-            let handle = Box::from_raw(app);
+            let handle_ref = &*app;
             // 1. Detach callback immediately so no new dispatches can begin
-            if let Ok(mut s) = handle.callback_slot.state.lock() {
+            if let Ok(mut s) = handle_ref.callback_slot.state.lock() {
                 s.callback = None;
                 s.user_data = std::ptr::null_mut();
             }
-            // 2. Await quiescence of any in-flight dispatches (bounded up to 1,000 ms)
-            if let Ok(guard) = handle.callback_slot.state.lock() {
-                if guard.in_flight > 0 {
-                    let _ = handle.callback_slot.quiesced.wait_timeout_while(
-                        guard,
-                        std::time::Duration::from_millis(1000),
-                        |s| s.in_flight > 0,
-                    );
+            // 2. Await quiescence unconditionally until in_flight reaches 0
+            if let Ok(state) = handle_ref.callback_slot.state.lock() {
+                if state.in_flight > 0 {
+                    if let Ok(_guard) = handle_ref
+                        .callback_slot
+                        .quiesced
+                        .wait_while(state, |s| s.in_flight > 0)
+                    {}
                 }
             }
+            // 3. All in-flight dispatches have completed; safely deallocate
+            let handle = Box::from_raw(app);
             drop(handle);
         }
     });
+}
+
+/// Attempt to destroy an App instance and release all associated memory after checking for quiescence.
+///
+/// Precondition: Foreign callers MUST NOT invoke `hamesh_app_destroy_checked` concurrently with an active
+/// `hamesh_run` window loop or active FFI mutations on other threads.
+///
+/// Teardown sequence:
+/// 1. Detaches the event callback immediately so that no new dispatches can initiate.
+/// 2. If `in_flight == 0`, immediately drops and deallocates the handle, returning `HameshStatus::Ok`.
+/// 3. If `in_flight > 0` and `timeout_ms > 0`, blocks up to `timeout_ms` waiting for in-flight dispatches to reach 0.
+/// 4. If all dispatches complete within the timeout, deallocates the handle and returns `HameshStatus::Ok`.
+/// 5. If dispatches remain in flight after the timeout, REFUSES teardown, keeps the handle allocated,
+///    and returns `HameshStatus::Busy` (code 10). Memory is NOT freed.
+#[no_mangle]
+pub unsafe extern "C" fn hamesh_app_destroy_checked(
+    app: *mut HameshAppHandle,
+    timeout_ms: u32,
+) -> HameshStatus {
+    let result = catch_unwind(|| {
+        if app.is_null() {
+            return HameshStatus::NullPointer;
+        }
+        let handle_ref = &*app;
+
+        // 1. Detach callback immediately so no new dispatches can begin
+        if let Ok(mut s) = handle_ref.callback_slot.state.lock() {
+            s.callback = None;
+            s.user_data = std::ptr::null_mut();
+        } else {
+            return HameshStatus::Error;
+        }
+
+        // 2. Check if in-flight is 0, or wait bounded up to timeout_ms
+        let quiesced = {
+            let state = match handle_ref.callback_slot.state.lock() {
+                Ok(s) => s,
+                Err(_) => return HameshStatus::Error,
+            };
+            if state.in_flight == 0 {
+                true
+            } else if timeout_ms == 0 {
+                false
+            } else {
+                let dur = std::time::Duration::from_millis(timeout_ms as u64);
+                match handle_ref
+                    .callback_slot
+                    .quiesced
+                    .wait_timeout_while(state, dur, |s| s.in_flight > 0)
+                {
+                    Ok((guard, _)) => guard.in_flight == 0,
+                    Err(_) => return HameshStatus::Error,
+                }
+            }
+        };
+
+        if !quiesced {
+            // Active dispatches remain; refuse destruction, keep handle allocated!
+            return HameshStatus::Busy;
+        }
+
+        // Safe to deallocate
+        let handle = Box::from_raw(app);
+        drop(handle);
+        HameshStatus::Ok
+    });
+
+    result.unwrap_or(HameshStatus::PanicCaught)
 }
 
 /// Get the current monotonic revision number of the app tree.

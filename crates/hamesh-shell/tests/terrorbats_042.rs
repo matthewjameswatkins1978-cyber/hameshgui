@@ -11,6 +11,11 @@ use hamesh_ffi::*;
 use hamesh_layout::compute;
 use hamesh_scene::build;
 use std::ffi::CString;
+use std::os::raw::c_char;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
+use std::thread;
+use std::time::Duration;
 
 #[test]
 fn test_bat_10_ffi_opaque_handle_lifecycle_and_mutation() {
@@ -832,4 +837,164 @@ fn test_bat_22_callback_lifetime_quiescence_and_races() {
         // 4. Clean shutdown: bounded barrier in destroy does not hang
         hamesh_app_destroy(app);
     }
+}
+
+#[test]
+fn test_bat_23_checked_destruction_refuses_active_in_flight() {
+    // BAT-23: hamesh_app_destroy_checked returns Busy and preserves handle when in-flight > 0
+    let root = CString::new("root_23").unwrap();
+    let app = unsafe { hamesh_app_create(root.as_ptr()) };
+    assert!(!app.is_null());
+
+    let parent = CString::new("root_23").unwrap();
+    let btn = CString::new("btn_destroy_test").unwrap();
+    unsafe {
+        hamesh_app_add_component(
+            app,
+            parent.as_ptr(),
+            btn.as_ptr(),
+            3,
+            b"Button\0".as_ptr() as *const _,
+        );
+    }
+
+    struct TestCtx {
+        started: AtomicBool,
+        finished: AtomicBool,
+    }
+    let ctx = Arc::new(TestCtx {
+        started: AtomicBool::new(false),
+        finished: AtomicBool::new(false),
+    });
+
+    extern "C" fn long_running_cb(
+        user_data: *mut std::ffi::c_void,
+        _: *const c_char,
+        _: *const c_char,
+        _: *const c_char,
+    ) {
+        let ctx = unsafe { &*(user_data as *const TestCtx) };
+        ctx.started.store(true, Ordering::SeqCst);
+        // Long running callback (>1000 ms)
+        thread::sleep(Duration::from_millis(1100));
+        ctx.finished.store(true, Ordering::SeqCst);
+    }
+
+    unsafe {
+        hamesh_app_set_event_callback(
+            app,
+            Some(long_running_cb),
+            Arc::as_ptr(&ctx) as *mut std::ffi::c_void,
+        );
+    }
+
+    let app_usize = app as usize;
+    let t = thread::spawn(move || {
+        let app_ptr = app_usize as *mut HameshAppHandle;
+        let btn_name = CString::new("btn_destroy_test").unwrap();
+        unsafe {
+            hamesh_app_simulate_click_component(app_ptr, btn_name.as_ptr(), 800, 600);
+        }
+    });
+
+    // Spin until callback is actively running
+    let start = std::time::Instant::now();
+    while !ctx.started.load(Ordering::SeqCst) {
+        if start.elapsed() > Duration::from_secs(2) {
+            panic!("Timed out waiting for long_running_cb to start");
+        }
+        thread::yield_now();
+    }
+
+    // 1. Attempt destruction while callback is actively in-flight with short timeout (100 ms).
+    // Must refuse destruction and return HameshStatus::Busy.
+    let busy_res = unsafe { hamesh_app_destroy_checked(app, 100) };
+    assert_eq!(busy_res, HameshStatus::Busy);
+    assert!(!ctx.finished.load(Ordering::SeqCst));
+
+    // 2. Retry destruction with sufficient timeout (2000 ms) to allow completion.
+    // Once quiescence is reached, destruction succeeds and frees the handle.
+    let ok_res = unsafe { hamesh_app_destroy_checked(app, 2000) };
+    assert_eq!(ok_res, HameshStatus::Ok);
+    assert!(ctx.finished.load(Ordering::SeqCst));
+
+    t.join().unwrap();
+}
+
+#[test]
+fn test_bat_24_unregistration_and_unbounded_destroy_with_long_running_cb() {
+    // BAT-24: Unregistration during active long-running callback (>1000 ms)
+    // followed by hamesh_app_destroy waits safely until quiescence before freeing handle.
+    let root = CString::new("root_24").unwrap();
+    let app = unsafe { hamesh_app_create(root.as_ptr()) };
+    assert!(!app.is_null());
+
+    let parent = CString::new("root_24").unwrap();
+    let btn = CString::new("btn_unreg_test").unwrap();
+    unsafe {
+        hamesh_app_add_component(
+            app,
+            parent.as_ptr(),
+            btn.as_ptr(),
+            3,
+            b"Button\0".as_ptr() as *const _,
+        );
+    }
+
+    struct TestCtx {
+        started: AtomicBool,
+        finished: AtomicBool,
+    }
+    let ctx = Arc::new(TestCtx {
+        started: AtomicBool::new(false),
+        finished: AtomicBool::new(false),
+    });
+
+    extern "C" fn long_running_cb2(
+        user_data: *mut std::ffi::c_void,
+        _: *const c_char,
+        _: *const c_char,
+        _: *const c_char,
+    ) {
+        let ctx = unsafe { &*(user_data as *const TestCtx) };
+        ctx.started.store(true, Ordering::SeqCst);
+        thread::sleep(Duration::from_millis(1100));
+        ctx.finished.store(true, Ordering::SeqCst);
+    }
+
+    unsafe {
+        hamesh_app_set_event_callback(
+            app,
+            Some(long_running_cb2),
+            Arc::as_ptr(&ctx) as *mut std::ffi::c_void,
+        );
+    }
+
+    let app_usize = app as usize;
+    let t = thread::spawn(move || {
+        let app_ptr = app_usize as *mut HameshAppHandle;
+        let btn_name = CString::new("btn_unreg_test").unwrap();
+        unsafe {
+            hamesh_app_simulate_click_component(app_ptr, btn_name.as_ptr(), 800, 600);
+        }
+    });
+
+    // Wait until running
+    let start = std::time::Instant::now();
+    while !ctx.started.load(Ordering::SeqCst) {
+        if start.elapsed() > Duration::from_secs(2) {
+            panic!("Timed out waiting for long_running_cb2 to start");
+        }
+        thread::yield_now();
+    }
+
+    // Detach callback during active execution
+    let st = unsafe { hamesh_app_set_event_callback(app, None, std::ptr::null_mut()) };
+    assert_eq!(st, HameshStatus::Ok);
+
+    // hamesh_app_destroy must await complete quiescence of the 1100ms callback
+    unsafe { hamesh_app_destroy(app) };
+    assert!(ctx.finished.load(Ordering::SeqCst));
+
+    t.join().unwrap();
 }
