@@ -23,6 +23,15 @@ if not os.path.exists(DLL_PATH):
 hamesh = ctypes.CDLL(DLL_PATH)
 
 STATUS_OK = 0
+STATUS_NULL_POINTER = 1
+STATUS_INVALID_UTF8 = 2
+STATUS_NOT_FOUND = 3
+STATUS_DUPLICATE_ID = 4
+STATUS_PARENT_NOT_FOUND = 5
+STATUS_INVALID_ROLE = 6
+STATUS_PANIC_CAUGHT = 7
+STATUS_ERROR = 8
+STATUS_BUFFER_TOO_SMALL = 9
 ROLE_WINDOW = 0
 ROLE_PANEL = 1
 ROLE_HEADER = 2
@@ -185,11 +194,11 @@ class HameshInteractiveApp:
             return (x.value, y.value, w.value, h.value)
         return None
 
-    def poll_event(self):
+    def poll_event(self, comp_id_len=128, event_type_len=64, payload_len=512):
         """Poll a single queued event into bounded buffers without a callback."""
-        comp_id_buf = ctypes.create_string_buffer(128)
-        event_type_buf = ctypes.create_string_buffer(64)
-        payload_buf = ctypes.create_string_buffer(512)
+        comp_id_buf = ctypes.create_string_buffer(comp_id_len)
+        event_type_buf = ctypes.create_string_buffer(event_type_len)
+        payload_buf = ctypes.create_string_buffer(payload_len)
         res = hamesh.hamesh_app_poll_event(
             self.app_handle,
             comp_id_buf, len(comp_id_buf),
@@ -202,6 +211,8 @@ class HameshInteractiveApp:
                 event_type_buf.value.decode("utf-8"),
                 payload_buf.value.decode("utf-8"),
             )
+        elif res == -STATUS_BUFFER_TOO_SMALL:
+            return -STATUS_BUFFER_TOO_SMALL
         return None
 
     def poll_events(self):

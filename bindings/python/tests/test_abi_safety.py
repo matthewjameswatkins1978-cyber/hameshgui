@@ -249,12 +249,66 @@ def test_bounded_event_polling():
             payload_buf, len(payload_buf)
         )
         assert empty == 0
-        print("[TEST PASS] Bounded event polling without callbacks verified (0 event loss)")
+        print("[TEST PASS] Event polling without callbacks verified (0 event loss)")
+    finally:
+        hamesh.hamesh_app_destroy(app)
+
+def test_lossless_polling_and_multibyte_utf8():
+    """Verify capacity validation before consumption, event preservation on BufferTooSmall, and UTF-8 integrity."""
+    STATUS_BUFFER_TOO_SMALL = 9
+    app = hamesh.hamesh_app_create(b"root")
+    try:
+        hamesh.hamesh_app_add_component(app, b"root", b"txt_utf8", 4, b"Input")
+        hamesh.hamesh_app_set_focus(app, b"txt_utf8")
+
+        # Multibyte UTF-8 string: German, Japanese, Hebrew, and Emoji
+        utf8_text = "Grüße! こんにちは, שלום 🚀"
+        st = hamesh.hamesh_app_simulate_key(app, f"text:{utf8_text}".encode("utf-8"))
+        assert st == STATUS_OK
+
+        # Event queued
+        assert hamesh.hamesh_app_poll_events(app) == 1
+
+        # 1. Poll with deliberately undersized buffer (4 bytes)
+        small_comp = ctypes.create_string_buffer(4)
+        small_type = ctypes.create_string_buffer(4)
+        small_payload = ctypes.create_string_buffer(4)
+
+        ret = hamesh.hamesh_app_poll_event(
+            app,
+            small_comp, len(small_comp),
+            small_type, len(small_type),
+            small_payload, len(small_payload)
+        )
+        assert ret == -STATUS_BUFFER_TOO_SMALL, f"Expected -9 (BufferTooSmall), got {ret}"
+
+        # CRITICAL ASSERTION: Event MUST NOT have been consumed or dropped!
+        assert hamesh.hamesh_app_poll_events(app) == 1, "Event was dropped or consumed on insufficient buffer!"
+
+        # 2. Poll with adequate buffer (512 bytes)
+        comp_buf = ctypes.create_string_buffer(64)
+        type_buf = ctypes.create_string_buffer(32)
+        payload_buf = ctypes.create_string_buffer(512)
+
+        ret_ok = hamesh.hamesh_app_poll_event(
+            app,
+            comp_buf, len(comp_buf),
+            type_buf, len(type_buf),
+            payload_buf, len(payload_buf)
+        )
+        assert ret_ok == 1, f"Expected 1, got {ret_ok}"
+        assert comp_buf.value.decode("utf-8") == "txt_utf8"
+        assert type_buf.value.decode("utf-8") == "change"
+        assert payload_buf.value.decode("utf-8") == utf8_text
+
+        # Queue now empty
+        assert hamesh.hamesh_app_poll_events(app) == 0
+        print("[TEST PASS] Lossless event polling on BufferTooSmall & multibyte UTF-8 verified")
     finally:
         hamesh.hamesh_app_destroy(app)
 
 def test_callback_unregistration():
-    """Verify safe callback unregistration and zero post-teardown dispatch."""
+    """Verify safe callback unregistration, active bridge sync, and zero post-teardown dispatch."""
     app = hamesh.hamesh_app_create(b"root")
     try:
         hamesh.hamesh_app_add_component(app, b"root", b"unreg_btn", 3, b"Button")
@@ -276,7 +330,28 @@ def test_callback_unregistration():
         assert st == STATUS_OK
         assert calls[0] == 0, "Unregistered callback was invoked!"
         assert hamesh.hamesh_app_poll_events(app) == 1
-        print("[TEST PASS] Callback unregistration verified")
+
+        # Re-register and verify reentrant self-unregistration inside callback
+        def self_unreg_cb(u, c, e, p):
+            calls[0] += 10
+            # Unregister inside the callback without deadlock!
+            hamesh.hamesh_app_set_event_callback(app, None, None)
+
+        self_cb = EVENT_CALLBACK_TYPE(self_unreg_cb)
+        hamesh.hamesh_app_set_event_callback(app, self_cb, None)
+
+        # Flush queued event -> invokes self_unreg_cb -> self-unregisters
+        flushed = hamesh.hamesh_app_poll_events(app)
+        assert flushed == 1
+        assert calls[0] == 10
+
+        # Subsequent click goes to queue without calling self_cb
+        st = hamesh.hamesh_app_simulate_click_component(app, b"unreg_btn", 800, 600)
+        assert st == STATUS_OK
+        assert calls[0] == 10  # Unchanged!
+        assert hamesh.hamesh_app_poll_events(app) == 1
+
+        print("[TEST PASS] Callback unregistration & reentrant active synchronization verified")
     finally:
         hamesh.hamesh_app_destroy(app)
 
@@ -291,5 +366,6 @@ if __name__ == "__main__":
     test_visibility_and_hit_rejection()
     test_graceful_exit_request()
     test_bounded_event_polling()
+    test_lossless_polling_and_multibyte_utf8()
     test_callback_unregistration()
     print("=== All Python C ABI Safety Tests PASSED ===")

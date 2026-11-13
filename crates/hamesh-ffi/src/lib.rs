@@ -14,30 +14,39 @@
 //! - Exactly-once event dispatch: events are dispatched synchronously to the registered callback, or queued for polling only when no callback is registered
 //!
 //! # Lifecycle, Threading, and Pointer Safety Contract
-//! 1. **Callback Ownership & Lifetime**:
-//!    - Foreign callers own the callback function pointer and `user_data` context pointer.
-//!    - The foreign language runtime is strictly responsible for ensuring the callback remains
-//!      valid and memory-backed as long as it is registered.
-//!    - Callers can unregister callbacks at any time by calling `hamesh_app_set_event_callback(app, NULL, NULL)`.
-//!    - `hamesh_app_destroy` explicitly unregisters and zeroes the callback pointer before freeing handle memory,
+//! 1. **Callback Lifetime, Synchronization & Active Bridge**:
+//!    - The public `HameshAppHandle` and any running `FfiBridgeApp` share a synchronized callback slot
+//!      (`Arc<Mutex<CallbackSlot>>`).
+//!    - Registering a callback attaches it immediately to both the public handle and the active window event bridge.
+//!    - Callers can unregister callbacks at any time via `hamesh_app_set_event_callback(app, NULL, NULL)`.
+//!      Unregistering immediately clears the shared slot; subsequent events are safely queued rather than invoking foreign code.
+//!    - Foreign callers own the callback function pointer and `user_data` context pointer, and are responsible
+//!      for keeping them valid while registered.
+//!    - `hamesh_app_destroy` explicitly unregisters and zeroes the callback slot before deallocating handle memory,
 //!      guaranteeing that teardown cannot invoke deallocated foreign callbacks.
+//!    - Reentrant callback execution is safe: foreign callbacks can mutate state (`set_prop`), request shutdown
+//!      (`request_exit`), or unregister themselves during callback execution without deadlock.
 //! 2. **Pointer Validity & Boundaries**:
 //!    - All pointers passed into the C ABI must be valid, aligned pointers previously returned by `hamesh_app_create`
-//!      or valid null-terminated UTF-8 C string buffers.
+//!      or valid null-terminated C string buffers.
 //!    - Null pointers are defensively checked and rejected with `HameshStatus::NullPointer`.
-//!    - Hamesh does NOT claim arbitrary dangling-pointer, use-after-free, or double-free safety against corrupted foreign memory.
+//!    - Hamesh explicitly does NOT claim arbitrary dangling-pointer, use-after-free, concurrent destruction,
+//!      or double-free safety against corrupted foreign memory pointers.
 //! 3. **Thread Affinity & Concurrency**:
 //!    - `hamesh_run` runs the native OS event loop and MUST be invoked from the main application thread.
 //!    - Component mutations (`hamesh_app_add_component`, `hamesh_app_set_prop`, `hamesh_app_set_visible`)
 //!      are thread-safe and can be called from background worker threads; they safely serialize on internal mutexes.
-//!    - Reentrant or concurrent calls to `hamesh_run` using the same handle are unsupported.
-//! 4. **Polling & Callback Event Dispatch Contract**:
+//!    - Concurrent calls to `hamesh_run` using the same handle are unsupported.
+//! 4. **Lossless Polling & Multibyte UTF-8 Contract**:
 //!    - Push Mode: When a callback is registered (`hamesh_app_set_event_callback`), UI events dispatch directly
 //!      to the foreign callback with **zero internal locks held**.
-//!    - Poll Mode: When no callback is registered, events accumulate in a bounded FIFO queue (`event_queue`).
-//!      Events are retrieved one-by-one via `hamesh_app_poll_event` into caller-provided bounded buffers.
-//!    - No silent event loss: `hamesh_app_poll_events` returns pending queue count without dropping events if no callback is registered.
-//!    - No duplicate delivery: Events are either dispatched to the callback or queued for polling, never both.
+//!    - Poll Mode: When no callback is registered, events accumulate in a FIFO event queue (`event_queue`).
+//!    - `hamesh_app_poll_event` inspects the front event and validates output buffer capacities before consuming it.
+//!      If any buffer is too small, it returns `-(HameshStatus::BufferTooSmall as c_int)` (`-9`) and PRESERVES
+//!      the event at the head of the queue for retry with sufficient buffers.
+//!    - Full multibyte UTF-8 strings are copied intact with guaranteed null termination and no partial-codepoint truncation.
+//!    - `hamesh_app_poll_events` queries pending event count non-destructively when no callback is registered.
+//!    - Exactly-once dispatch: Events are either dispatched to the callback or queued for polling, never both.
 
 #![allow(clippy::missing_safety_doc, clippy::identity_op)]
 
@@ -69,6 +78,7 @@ pub enum HameshStatus {
     InvalidRole = 6,
     PanicCaught = 7,
     Error = 8,
+    BufferTooSmall = 9,
 }
 
 /// An event delivered from the UI thread to a foreign language callback or poll queue.
@@ -79,11 +89,57 @@ pub struct QueuedEvent {
     pub payload: String,
 }
 
+/// Foreign-language event callback function pointer type.
+pub type EventCallbackFn = extern "C" fn(*mut c_void, *const c_char, *const c_char, *const c_char);
+
+/// Synchronized callback slot shared between HameshAppHandle and any running FfiBridgeApp.
+#[derive(Debug, Default)]
+pub struct CallbackSlot {
+    pub callback: Option<EventCallbackFn>,
+    pub user_data: *mut c_void,
+}
+
+unsafe impl Send for CallbackSlot {}
+unsafe impl Sync for CallbackSlot {}
+
+/// Shared event dispatch implementation ensuring zero lock holding during callback execution.
+fn dispatch_event_shared(
+    slot: &Arc<Mutex<CallbackSlot>>,
+    queue: &Arc<Mutex<VecDeque<QueuedEvent>>>,
+    comp_id: &str,
+    event_type: &str,
+    payload: &str,
+) {
+    // 1. Read callback and user_data under brief lock, then drop lock immediately
+    let cb_opt = {
+        let guard = slot.lock().ok();
+        guard.and_then(|s| s.callback.map(|cb| (cb, s.user_data)))
+    };
+
+    if let Some((cb, user_data)) = cb_opt {
+        // ZERO internal locks held while calling foreign callback!
+        let id_c = CString::new(comp_id).unwrap_or_default();
+        let type_c = CString::new(event_type).unwrap_or_default();
+        let payload_c = CString::new(payload).unwrap_or_default();
+        cb(
+            user_data,
+            id_c.as_ptr(),
+            type_c.as_ptr(),
+            payload_c.as_ptr(),
+        );
+    } else if let Ok(mut q) = queue.lock() {
+        q.push_back(QueuedEvent {
+            comp_id: comp_id.to_string(),
+            event_type: event_type.to_string(),
+            payload: payload.to_string(),
+        });
+    }
+}
+
 /// Opaque App handle for foreign language callers.
 pub struct HameshAppHandle {
     pub inner: Arc<Mutex<App>>,
-    pub on_event: Option<extern "C" fn(*mut c_void, *const c_char, *const c_char, *const c_char)>,
-    pub user_data: *mut c_void,
+    pub callback_slot: Arc<Mutex<CallbackSlot>>,
     pub event_queue: Arc<Mutex<VecDeque<QueuedEvent>>>,
     pub focused_id: Arc<Mutex<Option<String>>>,
     pub exit_requested: Arc<AtomicBool>,
@@ -94,23 +150,13 @@ unsafe impl Sync for HameshAppHandle {}
 
 impl HameshAppHandle {
     pub fn dispatch_event(&self, comp_id: &str, event_type: &str, payload: &str) {
-        if let Some(cb) = self.on_event {
-            let id_c = CString::new(comp_id).unwrap_or_default();
-            let type_c = CString::new(event_type).unwrap_or_default();
-            let payload_c = CString::new(payload).unwrap_or_default();
-            cb(
-                self.user_data,
-                id_c.as_ptr(),
-                type_c.as_ptr(),
-                payload_c.as_ptr(),
-            );
-        } else if let Ok(mut q) = self.event_queue.lock() {
-            q.push_back(QueuedEvent {
-                comp_id: comp_id.to_string(),
-                event_type: event_type.to_string(),
-                payload: payload.to_string(),
-            });
-        }
+        dispatch_event_shared(
+            &self.callback_slot,
+            &self.event_queue,
+            comp_id,
+            event_type,
+            payload,
+        );
     }
 }
 
@@ -137,8 +183,7 @@ pub unsafe extern "C" fn hamesh_app_create(root_id: *const c_char) -> *mut Hames
         let app = App::new(id_str);
         let handle = Box::new(HameshAppHandle {
             inner: Arc::new(Mutex::new(app)),
-            on_event: None,
-            user_data: std::ptr::null_mut(),
+            callback_slot: Arc::new(Mutex::new(CallbackSlot::default())),
             event_queue: Arc::new(Mutex::new(VecDeque::new())),
             focused_id: Arc::new(Mutex::new(None)),
             exit_requested: Arc::new(AtomicBool::new(false)),
@@ -157,9 +202,11 @@ pub unsafe extern "C" fn hamesh_app_create(root_id: *const c_char) -> *mut Hames
 pub unsafe extern "C" fn hamesh_app_destroy(app: *mut HameshAppHandle) {
     let _ = catch_unwind(|| {
         if !app.is_null() {
-            let mut handle = Box::from_raw(app);
-            handle.on_event = None;
-            handle.user_data = std::ptr::null_mut();
+            let handle = Box::from_raw(app);
+            if let Ok(mut slot) = handle.callback_slot.lock() {
+                slot.callback = None;
+                slot.user_data = std::ptr::null_mut();
+            }
             drop(handle);
         }
     });
@@ -381,21 +428,25 @@ unsafe fn copy_str_to_c_buf(src: &str, dst: *mut c_char, dst_len: usize) {
 #[no_mangle]
 pub unsafe extern "C" fn hamesh_app_set_event_callback(
     app: *mut HameshAppHandle,
-    callback: Option<extern "C" fn(*mut c_void, *const c_char, *const c_char, *const c_char)>,
+    callback: Option<EventCallbackFn>,
     user_data: *mut c_void,
 ) -> HameshStatus {
     let result = catch_unwind(|| {
         if app.is_null() {
             return HameshStatus::NullPointer;
         }
-        let handle = &mut *app;
-        handle.on_event = callback;
-        handle.user_data = if callback.is_some() {
-            user_data
+        let handle = &*app;
+        if let Ok(mut slot) = handle.callback_slot.lock() {
+            slot.callback = callback;
+            slot.user_data = if callback.is_some() {
+                user_data
+            } else {
+                std::ptr::null_mut()
+            };
+            HameshStatus::Ok
         } else {
-            std::ptr::null_mut()
-        };
-        HameshStatus::Ok
+            HameshStatus::Error
+        }
     });
 
     result.unwrap_or(HameshStatus::PanicCaught)
@@ -403,16 +454,23 @@ pub unsafe extern "C" fn hamesh_app_set_event_callback(
 
 /// Retrieve a single queued event from the application event queue into caller-provided bounded buffers.
 ///
+/// Validates output buffer capacities *before* consuming the event from the queue.
+/// If any buffer is too small to hold the full string plus the null terminator,
+/// returns `-(HameshStatus::BufferTooSmall as c_int)` (`-9`) and **preserves the event at the head of the queue**
+/// for retry with larger buffers.
+///
 /// Writes null-terminated UTF-8 strings into the provided buffers:
 /// - `comp_id_buf` / `comp_id_len`: buffer for target component ID.
 /// - `event_type_buf` / `event_type_len`: buffer for event type ("click", "change", "submit").
 /// - `payload_buf` / `payload_len`: buffer for event payload.
 ///
 /// # Returns
-/// - `1`: An event was retrieved and written to the output buffers.
+/// - `1`: An event was retrieved, written completely to the output buffers, and popped from the queue.
 /// - `0`: The event queue was empty (no event available).
 /// - `-1` (`NullPointer`): `app` or any required buffer pointer was null.
-/// - `-8` (`Error`): Buffer capacity was 0.
+/// - `-9` (`BufferTooSmall`): Any buffer capacity was insufficient to hold the complete UTF-8 string
+///   plus null terminator. The event is NOT consumed and remains at the front of the queue.
+/// - `-8` (`Error`): Internal lock or state error.
 /// - `-7` (`PanicCaught`): Internal panic caught safely.
 #[no_mangle]
 pub unsafe extern "C" fn hamesh_app_poll_event(
@@ -433,7 +491,7 @@ pub unsafe extern "C" fn hamesh_app_poll_event(
             return -(HameshStatus::NullPointer as c_int);
         }
         if comp_id_len == 0 || event_type_len == 0 || payload_len == 0 {
-            return -(HameshStatus::Error as c_int);
+            return -(HameshStatus::BufferTooSmall as c_int);
         }
 
         let handle = &*app;
@@ -442,14 +500,31 @@ pub unsafe extern "C" fn hamesh_app_poll_event(
             Err(_) => return -(HameshStatus::Error as c_int),
         };
 
-        if let Some(ev) = queue.pop_front() {
-            copy_str_to_c_buf(&ev.comp_id, comp_id_buf, comp_id_len);
-            copy_str_to_c_buf(&ev.event_type, event_type_buf, event_type_len);
-            copy_str_to_c_buf(&ev.payload, payload_buf, payload_len);
-            1
-        } else {
-            0
+        // 1. Inspect the front event without popping
+        let Some(ev) = queue.front() else {
+            return 0; // Queue empty
+        };
+
+        // 2. Validate capacities before consumption (+1 byte for null terminator).
+        // Measures exact UTF-8 byte lengths.
+        let needed_comp_id = ev.comp_id.len() + 1;
+        let needed_event_type = ev.event_type.len() + 1;
+        let needed_payload = ev.payload.len() + 1;
+
+        if comp_id_len < needed_comp_id
+            || event_type_len < needed_event_type
+            || payload_len < needed_payload
+        {
+            // Event remains safely at the head of queue for retry!
+            return -(HameshStatus::BufferTooSmall as c_int);
         }
+
+        // 3. Capacities are sufficient: pop and copy full valid UTF-8 strings
+        let ev = queue.pop_front().unwrap();
+        copy_str_to_c_buf(&ev.comp_id, comp_id_buf, comp_id_len);
+        copy_str_to_c_buf(&ev.event_type, event_type_buf, event_type_len);
+        copy_str_to_c_buf(&ev.payload, payload_buf, payload_len);
+        1
     });
 
     result.unwrap_or(-(HameshStatus::PanicCaught as c_int))
@@ -469,15 +544,20 @@ pub unsafe extern "C" fn hamesh_app_poll_event(
 pub unsafe extern "C" fn hamesh_app_poll_events(app: *mut HameshAppHandle) -> c_int {
     let result = catch_unwind(|| {
         if app.is_null() {
-            return 0;
+            return -(HameshStatus::NullPointer as c_int);
         }
         let handle = &*app;
-        if let Some(cb) = handle.on_event {
+        let cb_opt = {
+            let guard = handle.callback_slot.lock().ok();
+            guard.and_then(|s| s.callback.map(|cb| (cb, s.user_data)))
+        };
+
+        if let Some((cb, user_data)) = cb_opt {
             // Drain queue into a local Vec so the lock is dropped BEFORE invoking foreign callback
             let events: Vec<QueuedEvent> = {
                 let mut queue = match handle.event_queue.lock() {
                     Ok(q) => q,
-                    Err(_) => return 0,
+                    Err(_) => return -(HameshStatus::Error as c_int),
                 };
                 queue.drain(..).collect()
             };
@@ -488,7 +568,7 @@ pub unsafe extern "C" fn hamesh_app_poll_events(app: *mut HameshAppHandle) -> c_
                 let type_c = CString::new(ev.event_type).unwrap_or_default();
                 let payload_c = CString::new(ev.payload).unwrap_or_default();
                 cb(
-                    handle.user_data,
+                    user_data,
                     id_c.as_ptr(),
                     type_c.as_ptr(),
                     payload_c.as_ptr(),
@@ -498,13 +578,13 @@ pub unsafe extern "C" fn hamesh_app_poll_events(app: *mut HameshAppHandle) -> c_
         } else {
             let queue = match handle.event_queue.lock() {
                 Ok(q) => q,
-                Err(_) => return 0,
+                Err(_) => return -(HameshStatus::Error as c_int),
             };
             queue.len() as c_int
         }
     });
 
-    result.unwrap_or(0)
+    result.unwrap_or(-(HameshStatus::PanicCaught as c_int))
 }
 
 /// Query the layout bounding rect and visibility of a component by ID.
@@ -801,8 +881,7 @@ pub unsafe extern "C" fn hamesh_app_simulate_key(
 /// A Shell bridge proxy that drives an external HameshAppHandle with focus and interactive editing.
 struct FfiBridgeApp {
     handle: Arc<Mutex<App>>,
-    on_event: Option<extern "C" fn(*mut c_void, *const c_char, *const c_char, *const c_char)>,
-    user_data: *mut c_void,
+    callback_slot: Arc<Mutex<CallbackSlot>>,
     event_queue: Arc<Mutex<VecDeque<QueuedEvent>>>,
     focused_id: Arc<Mutex<Option<String>>>,
     exit_requested: Arc<AtomicBool>,
@@ -812,23 +891,13 @@ unsafe impl Send for FfiBridgeApp {}
 
 impl FfiBridgeApp {
     fn dispatch_event(&self, comp_id: &str, event_type: &str, payload: &str) {
-        if let Some(cb) = self.on_event {
-            let id_c = CString::new(comp_id).unwrap_or_default();
-            let type_c = CString::new(event_type).unwrap_or_default();
-            let payload_c = CString::new(payload).unwrap_or_default();
-            cb(
-                self.user_data,
-                id_c.as_ptr(),
-                type_c.as_ptr(),
-                payload_c.as_ptr(),
-            );
-        } else if let Ok(mut q) = self.event_queue.lock() {
-            q.push_back(QueuedEvent {
-                comp_id: comp_id.to_string(),
-                event_type: event_type.to_string(),
-                payload: payload.to_string(),
-            });
-        }
+        dispatch_event_shared(
+            &self.callback_slot,
+            &self.event_queue,
+            comp_id,
+            event_type,
+            payload,
+        );
     }
 }
 
@@ -989,8 +1058,7 @@ pub unsafe extern "C" fn hamesh_run(
         let handle = &*app;
         let bridge = FfiBridgeApp {
             handle: Arc::clone(&handle.inner),
-            on_event: handle.on_event,
-            user_data: handle.user_data,
+            callback_slot: Arc::clone(&handle.callback_slot),
             event_queue: Arc::clone(&handle.event_queue),
             focused_id: Arc::clone(&handle.focused_id),
             exit_requested: Arc::clone(&handle.exit_requested),

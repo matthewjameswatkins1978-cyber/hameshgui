@@ -324,13 +324,13 @@ def print_audit_matrix():
         ("Theme property propagation", "Native OS Input (Mouse)", "PASS"),
         ("Menu selection (New document)", "Native OS Input (Mouse)", "PASS"),
         ("Text input focus", "Native OS Input (Mouse)", "PASS"),
-        ("Unicode text entry (' Native')", "Native OS Input (Keys)", "PASS"),
+        ("Text entry (' native')", "Native OS Input (Keys)", "PASS"),
         ("Key deletion (Backspace)", "Native OS Input (Keys)", "PASS"),
         ("Counter button clicks (Exactly 3)", "Native OS Input (Mouse)", "PASS"),
         ("Callback updates (Zero lock hold)", "Native OS & Direct API", "PASS"),
         ("Hidden menu item click rejection", "Direct FFI API Test", "PASS"),
-        ("Bounded event polling (Zero drop)", "Direct FFI API Test", "PASS"),
-        ("Callback unregistration (NULL fn)", "Direct FFI API Test", "PASS"),
+        ("Lossless event polling (BufferTooSmall)", "Direct FFI API Test", "PASS"),
+        ("Callback unregistration & active sync", "Direct FFI API Test", "PASS"),
         ("Repeated stress cycles (5x)", "Direct FFI API Test", "PASS"),
         ("Graceful exit (File -> Exit)", "Native OS Input (Mouse)", "PASS"),
         ("Clean handle destruction", "Native OS & Direct API", "PASS"),
@@ -338,7 +338,7 @@ def print_audit_matrix():
     ]
 
     print("\n" + "=" * 80)
-    print("                    HAMESH 042-T ACCEPTANCE VERIFICATION MATRIX")
+    print("                    HAMESH 042-U ACCEPTANCE VERIFICATION MATRIX")
     print("=" * 80)
     print(f"{'ACTION':<38} | {'AUTOMATION / TEST METHOD':<26} | {'RESULT'}")
     print("-" * 38 + "-+-" + "-" * 26 + "-+-" + "-" * 11)

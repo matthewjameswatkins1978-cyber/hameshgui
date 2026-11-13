@@ -561,3 +561,184 @@ fn test_bat_19_component_bounds_query() {
         hamesh_app_destroy(app);
     }
 }
+
+#[test]
+fn test_bat_20_callback_unregistration_synchronization_active_bridge() {
+    use std::os::raw::c_char;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    static CALLBACK_CALLS: AtomicUsize = AtomicUsize::new(0);
+
+    extern "C" fn test_callback(
+        _: *mut std::ffi::c_void,
+        _: *const c_char,
+        _: *const c_char,
+        _: *const c_char,
+    ) {
+        CALLBACK_CALLS.fetch_add(1, Ordering::SeqCst);
+    }
+
+    unsafe {
+        CALLBACK_CALLS.store(0, Ordering::SeqCst);
+        let app = hamesh_app_create(b"root\0".as_ptr() as *const _);
+        assert!(!app.is_null());
+
+        let parent = CString::new("root").unwrap();
+        let btn = CString::new("sync_btn").unwrap();
+        hamesh_app_add_component(
+            app,
+            parent.as_ptr(),
+            btn.as_ptr(),
+            3,
+            b"Sync\0".as_ptr() as *const _,
+        );
+
+        // 1. Register callback
+        let st = hamesh_app_set_event_callback(app, Some(test_callback), std::ptr::null_mut());
+        assert_eq!(st, HameshStatus::Ok);
+
+        // Dispatch via simulate_click_component
+        let clk = hamesh_app_simulate_click_component(app, btn.as_ptr(), 800, 600);
+        assert_eq!(clk, HameshStatus::Ok);
+        assert_eq!(CALLBACK_CALLS.load(Ordering::SeqCst), 1);
+
+        // 2. Unregister callback via None / NULL
+        let unreg = hamesh_app_set_event_callback(app, None, std::ptr::null_mut());
+        assert_eq!(unreg, HameshStatus::Ok);
+
+        // Dispatch event -> callback MUST NOT be invoked; event queued instead
+        let clk2 = hamesh_app_simulate_click_component(app, btn.as_ptr(), 800, 600);
+        assert_eq!(clk2, HameshStatus::Ok);
+        assert_eq!(CALLBACK_CALLS.load(Ordering::SeqCst), 1); // Still 1!
+        assert_eq!(hamesh_app_poll_events(app), 1); // Queued!
+
+        // 3. Re-register callback
+        let rereg = hamesh_app_set_event_callback(app, Some(test_callback), std::ptr::null_mut());
+        assert_eq!(rereg, HameshStatus::Ok);
+
+        // Flushing queued events invokes callback with locks dropped
+        let flushed = hamesh_app_poll_events(app);
+        assert_eq!(flushed, 1);
+        assert_eq!(CALLBACK_CALLS.load(Ordering::SeqCst), 2);
+
+        // 4. Test reentrant unregistration inside callback
+        static APP_PTR: std::sync::atomic::AtomicPtr<HameshAppHandle> =
+            std::sync::atomic::AtomicPtr::new(std::ptr::null_mut());
+        APP_PTR.store(app, Ordering::SeqCst);
+
+        extern "C" fn self_unreg_callback(
+            _: *mut std::ffi::c_void,
+            _: *const c_char,
+            _: *const c_char,
+            _: *const c_char,
+        ) {
+            CALLBACK_CALLS.fetch_add(10, Ordering::SeqCst);
+            let ptr = APP_PTR.load(Ordering::SeqCst);
+            if !ptr.is_null() {
+                unsafe {
+                    // Safe reentrant unregistration from within callback (zero deadlocks!)
+                    hamesh_app_set_event_callback(ptr, None, std::ptr::null_mut());
+                }
+            }
+        }
+
+        hamesh_app_set_event_callback(app, Some(self_unreg_callback), std::ptr::null_mut());
+        let clk3 = hamesh_app_simulate_click_component(app, btn.as_ptr(), 800, 600);
+        assert_eq!(clk3, HameshStatus::Ok);
+        assert_eq!(CALLBACK_CALLS.load(Ordering::SeqCst), 12); // +10
+
+        // Callback self-unregistered; next click queues event without calling self_unreg_callback
+        let clk4 = hamesh_app_simulate_click_component(app, btn.as_ptr(), 800, 600);
+        assert_eq!(clk4, HameshStatus::Ok);
+        assert_eq!(CALLBACK_CALLS.load(Ordering::SeqCst), 12); // Unchanged!
+        assert_eq!(hamesh_app_poll_events(app), 1);
+
+        hamesh_app_destroy(app);
+    }
+}
+
+#[test]
+fn test_bat_21_lossless_event_polling_and_multibyte_utf8() {
+    use std::os::raw::c_char;
+
+    unsafe {
+        let app = hamesh_app_create(b"root\0".as_ptr() as *const _);
+        assert!(!app.is_null());
+
+        let parent = CString::new("root").unwrap();
+        let input_id = CString::new("txt_utf8").unwrap();
+        hamesh_app_add_component(
+            app,
+            parent.as_ptr(),
+            input_id.as_ptr(),
+            4,
+            b"Input\0".as_ptr() as *const _,
+        );
+
+        // Focus input
+        hamesh_app_set_focus(app, input_id.as_ptr());
+
+        // Type multibyte UTF-8 string: German, Japanese, Hebrew, and Emoji
+        let text_action = CString::new("text:Grüße! こんにちは, שלום 🚀").unwrap();
+        let st = hamesh_app_simulate_key(app, text_action.as_ptr());
+        assert_eq!(st, HameshStatus::Ok);
+
+        // Verify event is in queue (no callback registered)
+        assert_eq!(hamesh_app_poll_events(app), 1);
+
+        // 1. Attempt polling with deliberately insufficient buffers
+        let mut small_comp_id = [0 as c_char; 4]; // "txt_utf8" is 8 bytes + 1 = 9 needed
+        let mut small_type = [0 as c_char; 2]; // "change" is 6 bytes + 1 = 7 needed
+        let mut small_payload = [0 as c_char; 10]; // payload is > 30 bytes UTF-8
+
+        let err_res = hamesh_app_poll_event(
+            app,
+            small_comp_id.as_mut_ptr(),
+            small_comp_id.len(),
+            small_type.as_mut_ptr(),
+            small_type.len(),
+            small_payload.as_mut_ptr(),
+            small_payload.len(),
+        );
+        // Returns -(BufferTooSmall) = -9
+        assert_eq!(err_res, -(HameshStatus::BufferTooSmall as i32));
+
+        // CRITICAL CHECK: Event MUST NOT have been consumed or dropped!
+        assert_eq!(hamesh_app_poll_events(app), 1);
+
+        // 2. Poll with properly sized buffers to verify lossless retrieval & UTF-8 integrity
+        let mut comp_id_buf = [0 as c_char; 64];
+        let mut type_buf = [0 as c_char; 32];
+        let mut payload_buf = [0 as c_char; 256];
+
+        let ok_res = hamesh_app_poll_event(
+            app,
+            comp_id_buf.as_mut_ptr(),
+            comp_id_buf.len(),
+            type_buf.as_mut_ptr(),
+            type_buf.len(),
+            payload_buf.as_mut_ptr(),
+            payload_buf.len(),
+        );
+        assert_eq!(ok_res, 1);
+
+        let retrieved_comp = std::ffi::CStr::from_ptr(comp_id_buf.as_ptr())
+            .to_str()
+            .unwrap();
+        let retrieved_type = std::ffi::CStr::from_ptr(type_buf.as_ptr())
+            .to_str()
+            .unwrap();
+        let retrieved_payload = std::ffi::CStr::from_ptr(payload_buf.as_ptr())
+            .to_str()
+            .unwrap();
+
+        assert_eq!(retrieved_comp, "txt_utf8");
+        assert_eq!(retrieved_type, "change");
+        assert_eq!(retrieved_payload, "Grüße! こんにちは, שלום 🚀");
+
+        // Queue is now empty
+        assert_eq!(hamesh_app_poll_events(app), 0);
+
+        hamesh_app_destroy(app);
+    }
+}
