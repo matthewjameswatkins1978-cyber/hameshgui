@@ -62,7 +62,7 @@ fn bench_profile_pipeline() {
     }
 
     let (l_p50, l_p95, l_p99) = calc_percentiles(layout_times);
-    let (s_p50, s_p95, s_p99) = calc_percentiles(scene_times);
+    let (s_p50, s_p95, s_p99) = calc_percentiles(scene_times.clone());
     let (r_p50, r_p95, r_p99) = calc_percentiles(render_times);
     let (c_p50, c_p95, c_p99) = calc_percentiles(conv_times);
 

@@ -228,6 +228,10 @@ impl<A: HameshApp> ShellRunner<A> {
         let dims_changed = self.cpu_surface_dims != Some((w, h));
         let scene_changed = self.scene_rev != self.presented_rev;
 
+        if !dims_changed && !scene_changed && !self.cpu_pixels.is_empty() {
+            return;
+        }
+
         if dims_changed || scene_changed || self.cpu_pixels.is_empty() {
             let (layout, scene) = self
                 .app_impl
