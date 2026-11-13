@@ -380,8 +380,20 @@ static FRAME_CACHE: std::sync::OnceLock<FrameCache> = std::sync::OnceLock::new()
 
 fn render_uncached(scene: &Scene, w: u32, h: u32) -> Pixmap {
     let mut pix = Pixmap::new(w, h).expect("pixmap");
-    // Background.
-    pix.fill(Color::from_rgba8(10, 15, 17, 255));
+    // Background clear: matches the root window/panel color if present, or default dark.
+    let bg_color = scene
+        .nodes
+        .first()
+        .filter(|n| n.role.contains("Window") || n.role.contains("Panel"))
+        .map(|n| n.color)
+        .filter(|c| c[3] > 0)
+        .unwrap_or([10, 15, 17, 255]);
+    pix.fill(Color::from_rgba8(
+        bg_color[0],
+        bg_color[1],
+        bg_color[2],
+        bg_color[3],
+    ));
 
     let mut cached_clip: Option<hamesh_layout::Rect> = None;
     let mut cached_mask: Option<tiny_skia::Mask> = None;
