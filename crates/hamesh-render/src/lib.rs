@@ -115,15 +115,42 @@ pub struct Frame {
 /// the scene's resolved origin, verbatim — this function performs no
 /// positioning math of its own (one geometry contract, §H2).
 fn blit_text(pix: &mut Pixmap, node: &hamesh_scene::SceneNode, paint_rect: &hamesh_layout::Rect) {
-    // Bounds the glyph blit may touch: the node rect, further narrowed
-    // by the ancestor clip only when this node actually overflows it
-    // (non-overflowing nodes pay no extra per-pixel work).
     let (clip_x0, clip_y0) = (paint_rect.x, paint_rect.y);
     let (clip_x1, clip_y1) = (paint_rect.x + paint_rect.w, paint_rect.y + paint_rect.h);
+
+    if node.text.is_empty() {
+        if let Some(cx) = node.caret_x {
+            let line_h = hamesh_text::EMPTY_LINE_H;
+            let oy_line = node.rect.y + ((node.rect.h - line_h) / 2.0).max(0.0);
+            let caret_left = (node.rect.x + node.origin[0] + cx).round() as i32;
+            let bar_w = 2;
+            let top = (oy_line).round() as i32;
+            let bottom = (oy_line + line_h).round() as i32;
+            for y in top.max(clip_y0 as i32)..bottom.min(clip_y1 as i32) {
+                for x in caret_left.max(clip_x0 as i32)..(caret_left + bar_w).min(clip_x1 as i32) {
+                    if x >= 0 && (x as u32) < pix.width() && y >= 0 && (y as u32) < pix.height() {
+                        pix.fill_rect(
+                            tiny_skia::Rect::from_xywh(x as f32, y as f32, 1.0, 1.0).unwrap(),
+                            &tiny_skia::Paint {
+                                shader: tiny_skia::Shader::SolidColor(
+                                    tiny_skia::Color::from_rgba8(120, 220, 200, 255),
+                                ),
+                                ..Default::default()
+                            },
+                            tiny_skia::Transform::identity(),
+                            None,
+                        );
+                    }
+                }
+            }
+        }
+        return;
+    }
+
     let avail_w = (node.rect.w - 2.0 * hamesh_text::TEXT_INSET_X).max(8.0);
     // Same wrap rule as scene build: single-line nodes lay out
     // unwrapped so paint can never re-wrap what layout kept whole.
-    let wrap_w = if node.text.is_empty() || node.lines <= 1 {
+    let wrap_w = if node.lines <= 1 {
         f32::INFINITY
     } else {
         avail_w

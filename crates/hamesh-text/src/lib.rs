@@ -111,13 +111,17 @@ pub fn font_generation() -> u64 {
 /// (`assets/fonts` at the workspace root). Tests and apps resolve
 /// it from here so every crate shares one path.
 pub fn bundled_fonts_dir() -> std::path::PathBuf {
-    let manifest_path =
-        std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../assets/fonts");
-    if manifest_path.exists() {
-        manifest_path
-    } else {
-        std::path::PathBuf::from("assets/fonts")
-    }
+    static DIR: std::sync::OnceLock<std::path::PathBuf> = std::sync::OnceLock::new();
+    DIR.get_or_init(|| {
+        let manifest_path =
+            std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../assets/fonts");
+        if manifest_path.exists() {
+            manifest_path
+        } else {
+            std::path::PathBuf::from("assets/fonts")
+        }
+    })
+    .clone()
 }
 
 /// Register additional fonts (e.g. [`bundled_fonts_dir`]) with this
@@ -215,9 +219,14 @@ pub fn ellipsize(text: &str, max_advance: f32, font_size: f32, spec: &FontSpec) 
 /// consumers. The `Layout` owns its font data (Arc-backed), so no
 /// `FontContext` needs to outlive it — verified by the compiler.
 #[derive(Clone)]
-pub struct TextLayout {
+struct TextLayoutInner {
     layout: parley::Layout<peniko::Brush>,
     vars: Vec<([u8; 4], f32)>,
+}
+
+#[derive(Clone)]
+pub struct TextLayout {
+    inner: std::sync::Arc<TextLayoutInner>,
 }
 
 /// One run's positioned data, fully owned for consumer convenience.
@@ -392,7 +401,9 @@ impl TextLayout {
         line_height: Option<f32>,
         spec: &FontSpec,
     ) -> Self {
-        register_fonts_from_dir(&bundled_fonts_dir());
+        if !FONTS_LOADED.get() {
+            register_fonts_from_dir(&bundled_fonts_dir());
+        }
         let cur_gen = font_generation();
         let fp = spec.fingerprint();
         let max_w_bits = max_width.to_bits();
@@ -480,23 +491,25 @@ impl TextLayout {
                 let mut layout = builder.build(text);
                 layout.break_all_lines(Some(max_width));
                 Self {
-                    layout,
-                    vars: spec.vars.clone(),
+                    inner: std::sync::Arc::new(TextLayoutInner {
+                        layout,
+                        vars: spec.vars.clone(),
+                    }),
                 }
             })
         })
     }
 
     pub fn width(&self) -> f32 {
-        self.layout.width()
+        self.inner.layout.width()
     }
 
     pub fn height(&self) -> f32 {
-        self.layout.height()
+        self.inner.layout.height()
     }
 
     pub fn line_count(&self) -> usize {
-        let n = self.layout.lines().len();
+        let n = self.inner.layout.lines().len();
         n
     }
 
@@ -504,20 +517,24 @@ impl TextLayout {
     /// out at least one line. The Eye uses it for cross-node
     /// baseline alignment checks (the CorelDRAW-style invisible lines).
     pub fn first_baseline(&self) -> Option<f32> {
-        self.layout.lines().next().map(|l| l.metrics().baseline)
+        self.inner
+            .layout
+            .lines()
+            .next()
+            .map(|l| l.metrics().baseline)
     }
 
     /// Dominant paragraph direction from parley's own BiDi analysis
     /// (BaseDirection::Auto infers it). Start/End resolve against it.
     pub fn is_rtl(&self) -> bool {
-        self.layout.is_rtl()
+        self.inner.layout.is_rtl()
     }
 
     /// Owned per-run positioned glyphs. Coordinates are layout-absolute
     /// (see decision 009): add the node's origin to place them.
     pub fn runs(&self) -> Vec<TextRun> {
         let mut out = Vec::new();
-        for line in self.layout.lines() {
+        for line in self.inner.layout.lines() {
             for item in line.items() {
                 let parley::PositionedLayoutItem::GlyphRun(gr) = item else {
                     continue;
@@ -526,7 +543,7 @@ impl TextLayout {
                 out.push(TextRun {
                     font: run.font().clone(),
                     size: run.font_size(),
-                    vars: self.vars.clone(),
+                    vars: self.inner.vars.clone(),
                     glyphs: gr.positioned_glyphs().map(|g| (g.id, g.x, g.y)).collect(),
                 });
             }
@@ -860,7 +877,9 @@ mod tests {
         // The outline-union fast path must stay honest against the
         // raster ground truth it replaced: same text, same placement
         // mapping, within antialiasing tolerance.
-        register_fonts_from_dir(&bundled_fonts_dir());
+        if !FONTS_LOADED.get() {
+            register_fonts_from_dir(&bundled_fonts_dir());
+        }
         for text in ["Connected", "Inspected", "Hamburg — pig"] {
             let layout = TextLayout::new_varied(text, 400.0, 13.0, None, &FontSpec::default());
             let glyphs = glue::rasterize_layout(&layout);
@@ -904,7 +923,9 @@ mod tests {
         // + pixel-walk path this replaced took ~19s on 16KB; the
         // outline-union path must stay three orders of magnitude under
         // that (generous bound: debug builds, loaded machines).
-        register_fonts_from_dir(&bundled_fonts_dir());
+        if !FONTS_LOADED.get() {
+            register_fonts_from_dir(&bundled_fonts_dir());
+        }
         let unit = "Bridges are among humanity's oldest and most eloquent structures. ";
         let text: String = unit.repeat(300);
         assert!(text.len() > 16000);
@@ -997,7 +1018,9 @@ mod tests {
         // in the vendored Instrument Sans (variable) at two widths.
         // Advances MUST differ if family + axes work end to end.
         // Registered first, so this holds on every machine.
-        register_fonts_from_dir(&bundled_fonts_dir());
+        if !FONTS_LOADED.get() {
+            register_fonts_from_dir(&bundled_fonts_dir());
+        }
         let probe = |wdth: f32| -> f32 {
             TextLayout::new_varied(
                 "Hamburg",
@@ -1030,7 +1053,9 @@ mod tests {
         // coords, or default-instance outlines crowd into condensed
         // advances. Ink spans must track their own advance, not the
         // other instance's. Vendored faces are registered first.
-        register_fonts_from_dir(&bundled_fonts_dir());
+        if !FONTS_LOADED.get() {
+            register_fonts_from_dir(&bundled_fonts_dir());
+        }
         let spec = |wdth: Option<f32>| FontSpec {
             family: Some("Instrument Sans".to_string()),
             vars: wdth.map(|w| vec![(*b"wdth", w)]).unwrap_or_default(),
@@ -1122,7 +1147,9 @@ mod tests {
 
     #[test]
     fn installed_families_cover_bundled_fonts_without_duplicates() {
-        register_fonts_from_dir(&bundled_fonts_dir());
+        if !FONTS_LOADED.get() {
+            register_fonts_from_dir(&bundled_fonts_dir());
+        }
         let first = installed_family_names();
         assert!(
             first.contains(&"Newsreader".to_string()),
@@ -1159,7 +1186,9 @@ mod tests {
         // `font_style: italic` must match the italic file through
         // font matching — not synthesize, not ignore. Upright and
         // italic Newsreader shape differently (different outlines).
-        register_fonts_from_dir(&bundled_fonts_dir());
+        if !FONTS_LOADED.get() {
+            register_fonts_from_dir(&bundled_fonts_dir());
+        }
         let lay = |style: Option<parley::style::FontStyle>| {
             TextLayout::new_varied(
                 "Hamburg",
@@ -1192,7 +1221,9 @@ mod tests {
         // sufficient — prove the shaped run's font bytes ARE the
         // italic file (ruling out fallback and synthesis alike).
         // Skips only where the vendored faces are absent.
-        register_fonts_from_dir(&bundled_fonts_dir());
+        if !FONTS_LOADED.get() {
+            register_fonts_from_dir(&bundled_fonts_dir());
+        }
         if !font_family_available("Newsreader") {
             eprintln!("SKIP: vendored Newsreader absent");
             return;
@@ -1237,7 +1268,9 @@ mod tests {
         // Tracking is extra px per glyph (parley letter-spacing
         // adds after each glyph, trailing included): the line grows
         // by glyph_count * tracking. Negative narrows.
-        register_fonts_from_dir(&bundled_fonts_dir());
+        if !FONTS_LOADED.get() {
+            register_fonts_from_dir(&bundled_fonts_dir());
+        }
         let lay = |tracking: f32| {
             TextLayout::new_varied(
                 "Hamburg",

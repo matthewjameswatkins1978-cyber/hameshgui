@@ -211,73 +211,107 @@ pub fn build(app: &App, layout: &LayoutOutput, scene_revision: u64) -> Scene {
                 .as_deref()
                 .map(hamesh_text::font_family_available)
                 .unwrap_or(true);
-            let avail_w = (l.rect.w - 2.0 * hamesh_text::TEXT_INSET_X).max(8.0);
-            // Wrap rule shared with both renderers: wrap iff the final
-            // width wraps. Single-line nodes lay out unwrapped so paint
-            // can never re-wrap what layout kept whole.
-            let avail_lines = hamesh_text::TextLayout::new_varied(
-                &text,
-                avail_w,
-                font_size,
-                line_height,
-                &font_spec,
-            )
-            .line_count();
-            let wrap_w = if text.is_empty() || avail_lines <= 1 {
-                f32::INFINITY
+            let (lines, advance, halign_name, tx, oy_final, ink, trim, metrics, baseline) = if text
+                .is_empty()
+            {
+                let halign = hamesh_text::parse_halign(c.props.get("halign").map(|s| s.as_str()));
+                let halign_name = match halign {
+                    hamesh_text::HAlign::Center => "center",
+                    hamesh_text::HAlign::End => "end",
+                    hamesh_text::HAlign::Start => "start",
+                };
+                let oy = hamesh_text::run_oy(l.rect.h, true, 0.0);
+                let tx = hamesh_text::align_origin_x(halign, pad, l.rect.w, 0.0);
+                (0usize, 0.0f32, halign_name, tx, oy, None, None, None, None)
             } else {
-                avail_w
-            };
-            let lay = hamesh_text::TextLayout::new_varied(
-                &text,
-                wrap_w,
-                font_size,
-                line_height,
-                &font_spec,
-            );
-            let oy = hamesh_text::run_oy(l.rect.h, text.is_empty(), lay.height());
-            let trim_info =
-                hamesh_text::trim_box(&text, wrap_w, font_size, line_height, &font_spec);
-            let advance = trim_info.as_ref().map(|t| t.advance).unwrap_or(lay.width());
-            let halign = if avail_lines <= 1 {
-                hamesh_text::parse_halign(c.props.get("halign").map(|s| s.as_str()))
-            } else {
-                hamesh_text::HAlign::Start
-            };
-            // Logical direction: parley shapes BiDi itself; Start/End
-            // follow the paragraph's dominant direction (RTL flips
-            // them). Center is direction-independent. Reported halign
-            // stays as declared (intent); the origin is the physical
-            // result.
-            let eff_align = match (halign, lay.is_rtl()) {
-                (hamesh_text::HAlign::Start, true) => hamesh_text::HAlign::End,
-                (hamesh_text::HAlign::End, true) => hamesh_text::HAlign::Start,
-                (h, _) => h,
-            };
-            let tx = hamesh_text::align_origin_x(eff_align, pad, l.rect.w, advance);
-            // Optical vertical shift from the final trim (None-safe).
-            let ty = match &trim_info {
-                Some(t) => {
-                    let (y0, y1) = (t.top + oy, t.bottom + oy);
-                    oy + (l.rect.h / 2.0 - (y0 + y1) / 2.0)
-                }
-                None => oy,
-            };
-            let shift = ty - oy;
-            let ink = hamesh_text::ink_box(&text, wrap_w, font_size, line_height, &font_spec)
-                .map(|b| [b.x0 + tx, b.y0 + oy + shift, b.x1 + tx, b.y1 + oy + shift]);
-            let (trim, metrics, baseline) = match &trim_info {
-                Some(t) => (
-                    Some([
-                        tx,
-                        t.top + oy + shift,
-                        tx + t.advance,
-                        t.bottom + oy + shift,
-                    ]),
-                    Some([t.ascent, t.descent, t.cap, t.line_height]),
-                    Some(t.baseline + oy + shift),
-                ),
-                None => (None, None, None),
+                let avail_w = (l.rect.w - 2.0 * hamesh_text::TEXT_INSET_X).max(8.0);
+                // Single-line nodes lay out unwrapped so paint can never re-wrap
+                // what layout kept whole.
+                let lay_avail = hamesh_text::TextLayout::new_varied(
+                    &text,
+                    avail_w,
+                    font_size,
+                    line_height,
+                    &font_spec,
+                );
+                let avail_lines = lay_avail.line_count();
+                let (lay, wrap_w) = if avail_lines <= 1 {
+                    (lay_avail, f32::INFINITY)
+                } else {
+                    (lay_avail, avail_w)
+                };
+                let oy = hamesh_text::run_oy(l.rect.h, false, lay.height());
+                let trim_info = if avail_lines == 1 && !text.trim().is_empty() {
+                    lay.first_baseline().map(|bl| {
+                        let lh = lay.height().max(1.0);
+                        let asc = bl.max(1.0);
+                        let dsc = (lh - bl).max(0.0);
+                        let cap = hamesh_text::cap_height_ref(font_size, &font_spec);
+                        hamesh_text::FontTrim {
+                            top: bl - cap,
+                            bottom: bl,
+                            baseline: bl,
+                            cap,
+                            ascent: asc,
+                            descent: dsc,
+                            line_height: lh,
+                            advance: lay.width(),
+                        }
+                    })
+                } else {
+                    None
+                };
+                let advance = trim_info.as_ref().map(|t| t.advance).unwrap_or(lay.width());
+                let halign = if avail_lines <= 1 {
+                    hamesh_text::parse_halign(c.props.get("halign").map(|s| s.as_str()))
+                } else {
+                    hamesh_text::HAlign::Start
+                };
+                let eff_align = match (halign, lay.is_rtl()) {
+                    (hamesh_text::HAlign::Start, true) => hamesh_text::HAlign::End,
+                    (hamesh_text::HAlign::End, true) => hamesh_text::HAlign::Start,
+                    (h, _) => h,
+                };
+                let tx = hamesh_text::align_origin_x(eff_align, pad, l.rect.w, advance);
+                let ty = match &trim_info {
+                    Some(t) => {
+                        let (y0, y1) = (t.top + oy, t.bottom + oy);
+                        oy + (l.rect.h / 2.0 - (y0 + y1) / 2.0)
+                    }
+                    None => oy,
+                };
+                let shift = ty - oy;
+                let ink = hamesh_text::ink_box(&text, wrap_w, font_size, line_height, &font_spec)
+                    .map(|b| [b.x0 + tx, b.y0 + oy + shift, b.x1 + tx, b.y1 + oy + shift]);
+                let (trim, metrics, baseline) = match &trim_info {
+                    Some(t) => (
+                        Some([
+                            tx,
+                            t.top + oy + shift,
+                            tx + t.advance,
+                            t.bottom + oy + shift,
+                        ]),
+                        Some([t.ascent, t.descent, t.cap, t.line_height]),
+                        Some(t.baseline + oy + shift),
+                    ),
+                    None => (None, None, None),
+                };
+                let halign_name = match halign {
+                    hamesh_text::HAlign::Center => "center",
+                    hamesh_text::HAlign::End => "end",
+                    hamesh_text::HAlign::Start => "start",
+                };
+                (
+                    lay.line_count(),
+                    advance,
+                    halign_name,
+                    tx,
+                    oy + shift,
+                    ink,
+                    trim,
+                    metrics,
+                    baseline,
+                )
             };
             // Content box (node-local): what padding declared.
             let content = [
@@ -286,11 +320,6 @@ pub fn build(app: &App, layout: &LayoutOutput, scene_revision: u64) -> Scene {
                 (l.rect.w - pad).max(pad),
                 (l.rect.h - pad).max(pad),
             ];
-            let halign_name = match halign {
-                hamesh_text::HAlign::Center => "center",
-                hamesh_text::HAlign::End => "end",
-                hamesh_text::HAlign::Start => "start",
-            };
             Some(SceneNode {
                 id: c.id.0.clone(),
                 role: role.clone(),
@@ -319,7 +348,7 @@ pub fn build(app: &App, layout: &LayoutOutput, scene_revision: u64) -> Scene {
                 icon: c.props.get("icon").cloned(),
                 font_size,
                 line_height,
-                lines: lay.line_count(),
+                lines,
                 text_rgba: c
                     .props
                     .get("text_token")
@@ -331,7 +360,7 @@ pub fn build(app: &App, layout: &LayoutOutput, scene_revision: u64) -> Scene {
                 trim,
                 metrics,
                 baseline,
-                origin: [tx, oy + shift],
+                origin: [tx, oy_final],
                 content,
                 halign: halign_name.to_string(),
                 advance,
