@@ -274,11 +274,15 @@ impl WorkbenchApp {
         self.world = world;
         let tag = format!("{} [{}]", world.label(), world.name());
         self.status_bar.set_profile_tag(tag);
-        self.status_bar.set_message(format!(
-            "Switched to visual world: {} — {}",
-            world.label(),
-            world.description()
-        ));
+        let summary = match world {
+            VisualWorld::ClassicDesktop => "Dense utilitarian workstation layout",
+            VisualWorld::ModernStudio => "Contemporary dark creative suite",
+            VisualWorld::RetroComputing => "High-contrast phosphor CRT terminal",
+            VisualWorld::TechnicalWorkstation => "Precision telemetry & instrument grid",
+            VisualWorld::EditorialPaper => "Warm bookish literary environment",
+        };
+        self.status_bar
+            .set_message(format!("Active World: {} — {}", world.label(), summary));
     }
 
     pub fn execute_command(&mut self, cmd: &str, ctx: &mut ShellContext) {

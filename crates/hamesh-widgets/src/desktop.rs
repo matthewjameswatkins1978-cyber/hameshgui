@@ -835,12 +835,19 @@ impl StatusBarControl {
         );
 
         let msg_id = format!("{}_msg", self.id);
+        let msg_text = if self.message.chars().count() > 65 {
+            let truncated: String = self.message.chars().take(62).collect();
+            format!("{}...", truncated)
+        } else {
+            self.message.clone()
+        };
+
         app.add(
             &self.id,
             Component::new(&msg_id, Role::Text, "Status Message")
                 .with_prop("flex_grow", "1")
                 .with_prop("color", "text_dim")
-                .with_prop("text", &self.message),
+                .with_prop("text", &msg_text),
         );
 
         if let Some(telem) = &self.telemetry {
