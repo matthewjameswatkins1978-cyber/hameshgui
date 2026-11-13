@@ -14,16 +14,21 @@
 //! - Exactly-once event dispatch: events are dispatched synchronously to the registered callback, or queued for polling only when no callback is registered
 //!
 //! # Lifecycle, Threading, and Pointer Safety Contract
-//! 1. **Callback Lifetime, Synchronization & Active Bridge**:
+//! 1. **Callback Lifetime, Synchronization, Detachment & Quiescence**:
 //!    - The public `HameshAppHandle` and any running `FfiBridgeApp` share a synchronized callback slot
-//!      (`Arc<Mutex<CallbackSlot>>`).
+//!      (`Arc<CallbackSlot>`).
 //!    - Registering a callback attaches it immediately to both the public handle and the active window event bridge.
-//!    - Callers can unregister callbacks at any time via `hamesh_app_set_event_callback(app, NULL, NULL)`.
-//!      Unregistering immediately clears the shared slot; subsequent events are safely queued rather than invoking foreign code.
+//!    - **Detachment vs. Quiescence**:
+//!      - Calling `hamesh_app_set_event_callback(app, NULL, NULL)` immediately **detaches** the callback.
+//!        No *new* event dispatches will invoke the foreign callback, and subsequent events divert safely
+//!        to the poll queue.
+//!      - In-flight invocations that were already dispatched prior to detachment run concurrently to completion.
+//!      - Callers can invoke `hamesh_app_await_quiescence(app, timeout_ms)` to wait until all in-flight dispatches
+//!        have completed before deallocating `user_data` or foreign resources.
 //!    - Foreign callers own the callback function pointer and `user_data` context pointer, and are responsible
-//!      for keeping them valid while registered.
-//!    - `hamesh_app_destroy` explicitly unregisters and zeroes the callback slot before deallocating handle memory,
-//!      guaranteeing that teardown cannot invoke deallocated foreign callbacks.
+//!      for keeping them valid while registered and until any in-flight invocations have quiesced.
+//!    - `hamesh_app_destroy` explicitly detaches the callback and enforces a bounded quiescence barrier
+//!      before deallocating handle memory, preventing teardown from racing with in-flight foreign dispatches.
 //!    - Reentrant callback execution is safe: foreign callbacks can mutate state (`set_prop`), request shutdown
 //!      (`request_exit`), or unregister themselves during callback execution without deadlock.
 //! 2. **Pointer Validity & Boundaries**:
@@ -92,32 +97,68 @@ pub struct QueuedEvent {
 /// Foreign-language event callback function pointer type.
 pub type EventCallbackFn = extern "C" fn(*mut c_void, *const c_char, *const c_char, *const c_char);
 
-/// Synchronized callback slot shared between HameshAppHandle and any running FfiBridgeApp.
+/// Internal state of the callback slot tracking registered callback, user data, and active in-flight invocations.
 #[derive(Debug, Default)]
-pub struct CallbackSlot {
+pub struct CallbackState {
     pub callback: Option<EventCallbackFn>,
     pub user_data: *mut c_void,
+    pub in_flight: usize,
+}
+
+unsafe impl Send for CallbackState {}
+unsafe impl Sync for CallbackState {}
+
+/// Synchronized callback slot shared between HameshAppHandle and any running FfiBridgeApp.
+/// Distinguishes callback detachment from completed quiescence.
+#[derive(Debug, Default)]
+pub struct CallbackSlot {
+    pub state: Mutex<CallbackState>,
+    pub quiesced: std::sync::Condvar,
 }
 
 unsafe impl Send for CallbackSlot {}
 unsafe impl Sync for CallbackSlot {}
 
-/// Shared event dispatch implementation ensuring zero lock holding during callback execution.
+/// RAII guard ensuring in_flight counter is decremented and quiescence notified even during panics.
+struct InFlightGuard<'a>(&'a CallbackSlot);
+
+impl<'a> Drop for InFlightGuard<'a> {
+    fn drop(&mut self) {
+        if let Ok(mut s) = self.0.state.lock() {
+            s.in_flight = s.in_flight.saturating_sub(1);
+            if s.in_flight == 0 {
+                self.0.quiesced.notify_all();
+            }
+        }
+    }
+}
+
+/// Shared event dispatch implementation ensuring zero lock holding during callback execution
+/// and accurate tracking of in-flight dispatches.
 fn dispatch_event_shared(
-    slot: &Arc<Mutex<CallbackSlot>>,
+    slot: &Arc<CallbackSlot>,
     queue: &Arc<Mutex<VecDeque<QueuedEvent>>>,
     comp_id: &str,
     event_type: &str,
     payload: &str,
 ) {
-    // 1. Read callback and user_data under brief lock, then drop lock immediately
+    // 1. Check if callback exists and increment in_flight under brief lock, then drop lock immediately
     let cb_opt = {
-        let guard = slot.lock().ok();
-        guard.and_then(|s| s.callback.map(|cb| (cb, s.user_data)))
+        let guard = slot.state.lock().ok();
+        guard.and_then(|mut s| {
+            if let Some(cb) = s.callback {
+                s.in_flight += 1;
+                Some((cb, s.user_data))
+            } else {
+                None
+            }
+        })
     };
 
     if let Some((cb, user_data)) = cb_opt {
         // ZERO internal locks held while calling foreign callback!
+        // RAII guard guarantees in_flight decrement and quiescence notification on return or panic
+        let _guard = InFlightGuard(slot.as_ref());
         let id_c = CString::new(comp_id).unwrap_or_default();
         let type_c = CString::new(event_type).unwrap_or_default();
         let payload_c = CString::new(payload).unwrap_or_default();
@@ -139,7 +180,7 @@ fn dispatch_event_shared(
 /// Opaque App handle for foreign language callers.
 pub struct HameshAppHandle {
     pub inner: Arc<Mutex<App>>,
-    pub callback_slot: Arc<Mutex<CallbackSlot>>,
+    pub callback_slot: Arc<CallbackSlot>,
     pub event_queue: Arc<Mutex<VecDeque<QueuedEvent>>>,
     pub focused_id: Arc<Mutex<Option<String>>>,
     pub exit_requested: Arc<AtomicBool>,
@@ -183,7 +224,7 @@ pub unsafe extern "C" fn hamesh_app_create(root_id: *const c_char) -> *mut Hames
         let app = App::new(id_str);
         let handle = Box::new(HameshAppHandle {
             inner: Arc::new(Mutex::new(app)),
-            callback_slot: Arc::new(Mutex::new(CallbackSlot::default())),
+            callback_slot: Arc::new(CallbackSlot::default()),
             event_queue: Arc::new(Mutex::new(VecDeque::new())),
             focused_id: Arc::new(Mutex::new(None)),
             exit_requested: Arc::new(AtomicBool::new(false)),
@@ -196,16 +237,32 @@ pub unsafe extern "C" fn hamesh_app_create(root_id: *const c_char) -> *mut Hames
 
 /// Destroy an App instance and release all associated memory.
 ///
-/// Unregisters and zeroes any active event callbacks before deallocation,
-/// ensuring that shutdown does not invoke deallocated foreign memory.
+/// Precondition: Foreign callers MUST NOT invoke `hamesh_app_destroy` concurrently with an active
+/// `hamesh_run` window loop or active FFI mutations on other threads.
+///
+/// Shutdown sequence:
+/// 1. Detaches the event callback immediately so that no new dispatches can initiate.
+/// 2. Enforces a bounded quiescence barrier (up to 1,000 ms) waiting for any currently in-flight
+///    callback dispatches to finish before deallocating the underlying handle.
 #[no_mangle]
 pub unsafe extern "C" fn hamesh_app_destroy(app: *mut HameshAppHandle) {
     let _ = catch_unwind(|| {
         if !app.is_null() {
             let handle = Box::from_raw(app);
-            if let Ok(mut slot) = handle.callback_slot.lock() {
-                slot.callback = None;
-                slot.user_data = std::ptr::null_mut();
+            // 1. Detach callback immediately so no new dispatches can begin
+            if let Ok(mut s) = handle.callback_slot.state.lock() {
+                s.callback = None;
+                s.user_data = std::ptr::null_mut();
+            }
+            // 2. Await quiescence of any in-flight dispatches (bounded up to 1,000 ms)
+            if let Ok(guard) = handle.callback_slot.state.lock() {
+                if guard.in_flight > 0 {
+                    let _ = handle.callback_slot.quiesced.wait_timeout_while(
+                        guard,
+                        std::time::Duration::from_millis(1000),
+                        |s| s.in_flight > 0,
+                    );
+                }
             }
             drop(handle);
         }
@@ -420,11 +477,14 @@ unsafe fn copy_str_to_c_buf(src: &str, dst: *mut c_char, dst_len: usize) {
 ///
 /// Signature: `callback(user_data, comp_id, event_type, payload)`
 ///
-/// Contract: Events are dispatched synchronously and exactly once to this callback
-/// after internal application locks have been released, guaranteeing safe reentrancy
-/// (`set_prop`, `set_visible`, `request_exit`).
-///
-/// Passing `None` / NULL safely unregisters the callback and clears `user_data`.
+/// Contract:
+/// - Unregistering (`callback = None`) immediately **detaches** the callback. No *new* event dispatches
+///   will invoke this callback, and subsequent events divert safely to the poll queue.
+/// - In-flight invocations that started before unregistration continue executing concurrently.
+/// - To verify or await full quiescence before deallocating `user_data` or foreign memory, callers
+///   can invoke `hamesh_app_await_quiescence(app, timeout_ms)`.
+/// - Reentrant unregistration (calling `set_event_callback(app, None, NULL)` from within the callback
+///   itself) is fully supported and non-blocking (guaranteed deadlock-free).
 #[no_mangle]
 pub unsafe extern "C" fn hamesh_app_set_event_callback(
     app: *mut HameshAppHandle,
@@ -436,9 +496,9 @@ pub unsafe extern "C" fn hamesh_app_set_event_callback(
             return HameshStatus::NullPointer;
         }
         let handle = &*app;
-        if let Ok(mut slot) = handle.callback_slot.lock() {
-            slot.callback = callback;
-            slot.user_data = if callback.is_some() {
+        if let Ok(mut s) = handle.callback_slot.state.lock() {
+            s.callback = callback;
+            s.user_data = if callback.is_some() {
                 user_data
             } else {
                 std::ptr::null_mut()
@@ -450,6 +510,64 @@ pub unsafe extern "C" fn hamesh_app_set_event_callback(
     });
 
     result.unwrap_or(HameshStatus::PanicCaught)
+}
+
+/// Wait for all in-flight callback dispatches to complete (quiescence barrier).
+///
+/// Distinguishes callback detachment from completed callback quiescence:
+/// After unregistering a callback via `hamesh_app_set_event_callback(app, None, NULL)`,
+/// foreign callers should call this function before deallocating `user_data` or foreign resources.
+///
+/// Parameters:
+/// - `timeout_ms == 0`: non-blocking status check. Returns 1 if all dispatches have quiesced (`in_flight == 0`),
+///   or 0 if dispatches are currently in flight.
+/// - `timeout_ms > 0`: blocks the calling thread until `in_flight == 0` or until `timeout_ms` elapses.
+///
+/// Returns:
+/// - `1`: All in-flight callback invocations have quiesced.
+/// - `0`: Timed out while one or more callback invocations are still in flight.
+/// - `-1`: Error (`app` is null or internal lock error).
+#[no_mangle]
+pub unsafe extern "C" fn hamesh_app_await_quiescence(
+    app: *mut HameshAppHandle,
+    timeout_ms: u32,
+) -> c_int {
+    let result = catch_unwind(|| {
+        if app.is_null() {
+            return -1;
+        }
+        let handle = &*app;
+        let slot = &handle.callback_slot;
+        let state = match slot.state.lock() {
+            Ok(s) => s,
+            Err(_) => return -1,
+        };
+
+        if state.in_flight == 0 {
+            return 1;
+        }
+
+        if timeout_ms == 0 {
+            return 0; // Not quiesced yet, but non-blocking check
+        }
+
+        let dur = std::time::Duration::from_millis(timeout_ms as u64);
+        let (guard, _) = match slot
+            .quiesced
+            .wait_timeout_while(state, dur, |s| s.in_flight > 0)
+        {
+            Ok(pair) => pair,
+            Err(_) => return -1,
+        };
+
+        if guard.in_flight == 0 {
+            1
+        } else {
+            0
+        }
+    });
+
+    result.unwrap_or(-1)
 }
 
 /// Retrieve a single queued event from the application event queue into caller-provided bounded buffers.
@@ -548,11 +666,19 @@ pub unsafe extern "C" fn hamesh_app_poll_events(app: *mut HameshAppHandle) -> c_
         }
         let handle = &*app;
         let cb_opt = {
-            let guard = handle.callback_slot.lock().ok();
-            guard.and_then(|s| s.callback.map(|cb| (cb, s.user_data)))
+            let guard = handle.callback_slot.state.lock().ok();
+            guard.and_then(|mut s| {
+                if let Some(cb) = s.callback {
+                    s.in_flight += 1;
+                    Some((cb, s.user_data))
+                } else {
+                    None
+                }
+            })
         };
 
         if let Some((cb, user_data)) = cb_opt {
+            let _guard = InFlightGuard(handle.callback_slot.as_ref());
             // Drain queue into a local Vec so the lock is dropped BEFORE invoking foreign callback
             let events: Vec<QueuedEvent> = {
                 let mut queue = match handle.event_queue.lock() {
@@ -881,7 +1007,7 @@ pub unsafe extern "C" fn hamesh_app_simulate_key(
 /// A Shell bridge proxy that drives an external HameshAppHandle with focus and interactive editing.
 struct FfiBridgeApp {
     handle: Arc<Mutex<App>>,
-    callback_slot: Arc<Mutex<CallbackSlot>>,
+    callback_slot: Arc<CallbackSlot>,
     event_queue: Arc<Mutex<VecDeque<QueuedEvent>>>,
     focused_id: Arc<Mutex<Option<String>>>,
     exit_requested: Arc<AtomicBool>,

@@ -102,6 +102,8 @@ def test_invalid_role():
 EVENT_CALLBACK_TYPE = ctypes.CFUNCTYPE(None, ctypes.c_void_p, ctypes.c_char_p, ctypes.c_char_p, ctypes.c_char_p)
 hamesh.hamesh_app_set_event_callback.argtypes = [ctypes.c_void_p, ctypes.c_void_p, ctypes.c_void_p]
 hamesh.hamesh_app_set_event_callback.restype = ctypes.c_int
+hamesh.hamesh_app_await_quiescence.argtypes = [ctypes.c_void_p, ctypes.c_uint32]
+hamesh.hamesh_app_await_quiescence.restype = ctypes.c_int
 hamesh.hamesh_app_set_visible.argtypes = [ctypes.c_void_p, ctypes.c_char_p, ctypes.c_int]
 hamesh.hamesh_app_set_visible.restype = ctypes.c_int
 hamesh.hamesh_app_set_focus.argtypes = [ctypes.c_void_p, ctypes.c_char_p]
@@ -355,6 +357,62 @@ def test_callback_unregistration():
     finally:
         hamesh.hamesh_app_destroy(app)
 
+def test_callback_quiescence_and_races():
+    """Verify detachment vs. quiescence barrier: unregistration does not block,
+    in-flight dispatches run to completion, and await_quiescence guarantees all active
+    dispatches have finished before foreign memory teardown."""
+    import time
+    import threading
+
+    app = hamesh.hamesh_app_create(b"root")
+    try:
+        hamesh.hamesh_app_add_component(app, b"root", b"q_btn", 3, b"Button")
+
+        # Initial state: no callbacks active -> quiesced
+        assert hamesh.hamesh_app_await_quiescence(app, 0) == 1
+
+        in_flight_observed = [False]
+        callback_completed = [False]
+        start_event = threading.Event()
+
+        def slow_callback(u, c, e, p):
+            in_flight_observed[0] = True
+            start_event.set()
+            time.sleep(0.1) # Simulate in-flight foreign execution
+            callback_completed[0] = True
+
+        cb = EVENT_CALLBACK_TYPE(slow_callback)
+        st = hamesh.hamesh_app_set_event_callback(app, cb, None)
+        assert st == STATUS_OK
+
+        # Spawn thread to trigger the slow callback
+        dispatch_thread = threading.Thread(
+            target=lambda: hamesh.hamesh_app_simulate_click_component(app, b"q_btn", 800, 600)
+        )
+        dispatch_thread.start()
+
+        # Wait until slow_callback is running
+        assert start_event.wait(timeout=2.0)
+
+        # Detach callback immediately from another thread
+        st = hamesh.hamesh_app_set_event_callback(app, None, None)
+        assert st == STATUS_OK
+
+        # Detachment is immediate: subsequent click diverts to queue
+        st2 = hamesh.hamesh_app_simulate_click_component(app, b"q_btn", 800, 600)
+        assert st2 == STATUS_OK
+        assert hamesh.hamesh_app_poll_events(app) == 1
+
+        # Await quiescence barrier: blocks until slow_callback finishes
+        quiesced = hamesh.hamesh_app_await_quiescence(app, 2000)
+        assert quiesced == 1
+        assert callback_completed[0] is True
+
+        dispatch_thread.join(timeout=1.0)
+        print("[TEST PASS] Callback detachment vs quiescence barrier verified")
+    finally:
+        hamesh.hamesh_app_destroy(app)
+
 if __name__ == "__main__":
     print("=== Running Python C ABI Safety Battery ===")
     test_abi_version()
@@ -368,4 +426,5 @@ if __name__ == "__main__":
     test_bounded_event_polling()
     test_lossless_polling_and_multibyte_utf8()
     test_callback_unregistration()
+    test_callback_quiescence_and_races()
     print("=== All Python C ABI Safety Tests PASSED ===")

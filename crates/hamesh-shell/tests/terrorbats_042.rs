@@ -742,3 +742,94 @@ fn test_bat_21_lossless_event_polling_and_multibyte_utf8() {
         hamesh_app_destroy(app);
     }
 }
+
+#[test]
+fn test_bat_22_callback_lifetime_quiescence_and_races() {
+    use std::os::raw::c_char;
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::Arc;
+    use std::thread;
+    use std::time::Duration;
+
+    unsafe {
+        let app = hamesh_app_create(b"root\0".as_ptr() as *const _);
+        assert!(!app.is_null());
+
+        let parent = CString::new("root").unwrap();
+        let btn = CString::new("btn_quiesce").unwrap();
+        hamesh_app_add_component(
+            app,
+            parent.as_ptr(),
+            btn.as_ptr(),
+            3,
+            b"Button\0".as_ptr() as *const _,
+        );
+
+        // Initially no callbacks -> quiesced
+        assert_eq!(hamesh_app_await_quiescence(app, 0), 1);
+
+        struct TestCtx {
+            started: AtomicBool,
+            finished: AtomicBool,
+        }
+        let ctx = Arc::new(TestCtx {
+            started: AtomicBool::new(false),
+            finished: AtomicBool::new(false),
+        });
+
+        extern "C" fn slow_cb(
+            user_data: *mut std::ffi::c_void,
+            _: *const c_char,
+            _: *const c_char,
+            _: *const c_char,
+        ) {
+            let ctx = unsafe { &*(user_data as *const TestCtx) };
+            ctx.started.store(true, Ordering::SeqCst);
+            thread::sleep(Duration::from_millis(50));
+            ctx.finished.store(true, Ordering::SeqCst);
+        }
+
+        hamesh_app_set_event_callback(
+            app,
+            Some(slow_cb),
+            Arc::as_ptr(&ctx) as *mut std::ffi::c_void,
+        );
+
+        // Spawn background thread to simulate asynchronous UI event dispatch
+        let app_usize = app as usize;
+
+        let t = thread::spawn(move || {
+            let app_ptr = app_usize as *mut HameshAppHandle;
+            let btn_name = CString::new("btn_quiesce").unwrap();
+            hamesh_app_simulate_click_component(app_ptr, btn_name.as_ptr(), 800, 600);
+        });
+
+        // Spin until callback has started
+        let start = std::time::Instant::now();
+        while !ctx.started.load(Ordering::SeqCst) {
+            if start.elapsed() > Duration::from_secs(2) {
+                panic!("Timed out waiting for slow_cb to start");
+            }
+            thread::yield_now();
+        }
+
+        // 1. Detach callback immediately from main thread while slow_cb is in-flight
+        let st_det = hamesh_app_set_event_callback(app, None, std::ptr::null_mut());
+        assert_eq!(st_det, HameshStatus::Ok);
+
+        // 2. Subsequent events divert to queue immediately without calling slow_cb again
+        let clk2 = hamesh_app_simulate_click_component(app, btn.as_ptr(), 800, 600);
+        assert_eq!(clk2, HameshStatus::Ok);
+        assert_eq!(hamesh_app_poll_events(app), 1);
+
+        // 3. Quiescence barrier: wait for slow_cb to finish
+        let q_res = hamesh_app_await_quiescence(app, 2000);
+        assert_eq!(q_res, 1);
+        assert!(ctx.finished.load(Ordering::SeqCst));
+
+        t.join().unwrap();
+
+        // 4. Clean shutdown: bounded barrier in destroy does not hang
+        hamesh_app_destroy(app);
+    }
+}

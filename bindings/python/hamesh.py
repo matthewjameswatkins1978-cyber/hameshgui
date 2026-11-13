@@ -71,6 +71,9 @@ EVENT_CALLBACK_TYPE = CFUNCTYPE(None, c_void_p, c_char_p, c_char_p, c_char_p)
 hamesh.hamesh_app_set_event_callback.argtypes = [c_void_p, c_void_p, c_void_p]
 hamesh.hamesh_app_set_event_callback.restype = c_int
 
+hamesh.hamesh_app_await_quiescence.argtypes = [c_void_p, c_uint32]
+hamesh.hamesh_app_await_quiescence.restype = c_int
+
 hamesh.hamesh_app_poll_event.argtypes = [
     c_void_p,
     c_char_p, ctypes.c_size_t,
@@ -407,9 +410,15 @@ class HameshInteractiveApp:
         )
         return status
 
+    def await_quiescence(self, timeout_ms=1000):
+        if self.app_handle:
+            return hamesh.hamesh_app_await_quiescence(self.app_handle, timeout_ms)
+        return -1
+
     def destroy(self):
         if self.app_handle:
             hamesh.hamesh_app_set_event_callback(self.app_handle, None, None)
+            hamesh.hamesh_app_await_quiescence(self.app_handle, 1000)
             hamesh.hamesh_app_destroy(self.app_handle)
             self.app_handle = None
             self.callback_ref = None
