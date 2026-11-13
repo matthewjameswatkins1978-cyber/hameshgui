@@ -1,0 +1,24 @@
+[package]
+name = "hamesh-shell"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Reusable native application lifecycle, window management, and event dispatch for Hamesh GUI"
+
+[dependencies]
+hamesh-core = { path = "../hamesh-core" }
+hamesh-layout = { path = "../hamesh-layout" }
+hamesh-scene = { path = "../hamesh-scene" }
+hamesh-render = { path = "../hamesh-render" }
+hamesh-text = { path = "../hamesh-text" }
+hamesh-inspect = { path = "../hamesh-inspect" }
+hamesh-automation = { path = "../hamesh-automation" }
+hamesh-diag = { path = "../hamesh-diag" }
+serde = { workspace = true }
+serde_json = { workspace = true }
+winit = "0.30"
+softbuffer = "0.4"
+tiny-skia = "0.11"
+
+[dev-dependencies]
+hamesh-ffi = { path = "../hamesh-ffi" }

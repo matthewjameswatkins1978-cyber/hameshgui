@@ -1,0 +1,1000 @@
+//! Adversarial Terror Bats Suite for Hamesh 042:
+//! - Rapid resize and window movement simulation
+//! - Dynamic visual profile switching without state corruption
+//! - Cross-language C ABI memory safety, mutation, and revision tracking
+//! - Menu dropdown toggle and keyboard navigation stability
+
+#![allow(clippy::manual_c_str_literals)]
+
+use hamesh_core::{App, Component, Role};
+use hamesh_ffi::*;
+use hamesh_layout::compute;
+use hamesh_scene::build;
+use std::ffi::CString;
+use std::os::raw::c_char;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
+use std::thread;
+use std::time::Duration;
+
+#[test]
+fn test_bat_10_ffi_opaque_handle_lifecycle_and_mutation() {
+    unsafe {
+        let app = hamesh_app_create(b"root\0".as_ptr() as *const _);
+        assert!(!app.is_null());
+        assert_eq!(hamesh_app_get_revision(app), 1);
+
+        let parent = CString::new("root").unwrap();
+        let comp_id = CString::new("label_test").unwrap();
+        let name = CString::new("Test Label").unwrap();
+
+        let status = hamesh_app_add_component(
+            app,
+            parent.as_ptr(),
+            comp_id.as_ptr(),
+            5, // Role::Text
+            name.as_ptr(),
+        );
+        assert_eq!(status, HameshStatus::Ok);
+        assert!(hamesh_app_get_revision(app) > 1);
+
+        let prop_k = CString::new("text").unwrap();
+        let prop_v = CString::new("Hello from C ABI").unwrap();
+        let status = hamesh_app_set_prop(app, comp_id.as_ptr(), prop_k.as_ptr(), prop_v.as_ptr());
+        assert_eq!(status, HameshStatus::Ok);
+
+        // Verify component presence and layout
+        let handle = &*app;
+        let guard = handle.inner.lock().unwrap();
+        let comp = guard.get("label_test").expect("component exists");
+        assert_eq!(
+            comp.props.get("text").map(|s| s.as_str()),
+            Some("Hello from C ABI")
+        );
+        drop(guard);
+
+        hamesh_app_destroy(app);
+    }
+}
+
+#[test]
+fn test_bat_11_rapid_resize_and_dimension_churn() {
+    let mut app = App::new("root");
+    app.add(
+        "root",
+        Component::new("panel", Role::Panel, "Main Panel")
+            .with_prop("layout", "column")
+            .with_prop("w", "100%")
+            .with_prop("h", "100%"),
+    );
+
+    // Rapid-fire dimension shifts across 100 iterations simulating live OS resize drag
+    for i in 1..=100 {
+        let w = 400.0 + (i as f32) * 5.0;
+        let h = 300.0 + ((i % 20) as f32) * 10.0;
+        let layout = compute(&app, w, h);
+        let scene = build(&app, &layout, i);
+        assert_eq!(scene.viewport_w, w);
+        assert_eq!(scene.viewport_h, h);
+        assert!(!scene.nodes.is_empty());
+    }
+}
+
+#[test]
+fn test_bat_12_profile_switching_without_state_loss() {
+    let mut app = App::new("root");
+    app.add(
+        "root",
+        Component::new("user_input", Role::TextInput, "Field")
+            .with_prop("text", "Persisted Value 42"),
+    );
+
+    let rev_before = app.revision;
+
+    // Simulate Profile Switch: Classic Desktop -> Modern Studio
+    if let Some(comp) = app.get_mut("user_input") {
+        comp.props
+            .insert("font".to_string(), "Segoe UI".to_string());
+        comp.props.insert("radius".to_string(), "0".to_string());
+        app.revision += 1;
+    }
+
+    assert_eq!(
+        app.get("user_input")
+            .unwrap()
+            .props
+            .get("text")
+            .map(|s| s.as_str()),
+        Some("Persisted Value 42")
+    );
+
+    // Switch to Modern Studio
+    if let Some(comp) = app.get_mut("user_input") {
+        comp.props
+            .insert("font".to_string(), "Instrument Sans".to_string());
+        comp.props.insert("radius".to_string(), "6".to_string());
+        app.revision += 1;
+    }
+
+    assert_eq!(
+        app.get("user_input")
+            .unwrap()
+            .props
+            .get("text")
+            .map(|s| s.as_str()),
+        Some("Persisted Value 42")
+    );
+    assert!(app.revision > rev_before + 1);
+}
+
+#[test]
+fn test_bat_13_c_abi_safety_and_error_codes() {
+    unsafe {
+        // 1. ABI Version
+        assert_eq!(hamesh_abi_version(), 0x000402);
+
+        // 2. Null pointer resilience
+        assert_eq!(
+            hamesh_app_add_component(
+                std::ptr::null_mut(),
+                b"root\0".as_ptr() as *const _,
+                b"id\0".as_ptr() as *const _,
+                0,
+                b"Name\0".as_ptr() as *const _
+            ),
+            HameshStatus::NullPointer
+        );
+
+        let app = hamesh_app_create(b"root\0".as_ptr() as *const _);
+        assert!(!app.is_null());
+
+        // 3. Invalid role code (e.g. 99)
+        let s = hamesh_app_add_component(
+            app,
+            b"root\0".as_ptr() as *const _,
+            b"child1\0".as_ptr() as *const _,
+            99,
+            b"InvalidRole\0".as_ptr() as *const _,
+        );
+        assert_eq!(s, HameshStatus::InvalidRole);
+
+        // 4. Missing parent
+        let s = hamesh_app_add_component(
+            app,
+            b"ghost_parent\0".as_ptr() as *const _,
+            b"child2\0".as_ptr() as *const _,
+            1, // Button
+            b"ValidButton\0".as_ptr() as *const _,
+        );
+        assert_eq!(s, HameshStatus::ParentNotFound);
+
+        // 5. Normal add
+        let s = hamesh_app_add_component(
+            app,
+            b"root\0".as_ptr() as *const _,
+            b"child_ok\0".as_ptr() as *const _,
+            1, // Button
+            b"ValidButton\0".as_ptr() as *const _,
+        );
+        assert_eq!(s, HameshStatus::Ok);
+
+        // 6. Duplicate ID check (prevents panic!)
+        let s_dup = hamesh_app_add_component(
+            app,
+            b"root\0".as_ptr() as *const _,
+            b"child_ok\0".as_ptr() as *const _,
+            1,
+            b"DuplicateButton\0".as_ptr() as *const _,
+        );
+        assert_eq!(s_dup, HameshStatus::DuplicateId);
+
+        hamesh_app_destroy(app);
+    }
+}
+
+#[test]
+fn test_bat_14_event_polling_and_callback_isolation() {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::Mutex;
+
+    unsafe {
+        let app = hamesh_app_create(b"root\0".as_ptr() as *const _);
+        assert!(!app.is_null());
+
+        // Register callback
+        static CALLED: AtomicBool = AtomicBool::new(false);
+        static LAST_COMP: Mutex<String> = Mutex::new(String::new());
+        static LAST_TYPE: Mutex<String> = Mutex::new(String::new());
+
+        extern "C" fn on_event(
+            _user_data: *mut std::ffi::c_void,
+            comp_id: *const std::ffi::c_char,
+            event_type: *const std::ffi::c_char,
+            _payload: *const std::ffi::c_char,
+        ) {
+            unsafe {
+                CALLED.store(true, Ordering::SeqCst);
+                *LAST_COMP.lock().unwrap() = std::ffi::CStr::from_ptr(comp_id)
+                    .to_string_lossy()
+                    .to_string();
+                *LAST_TYPE.lock().unwrap() = std::ffi::CStr::from_ptr(event_type)
+                    .to_string_lossy()
+                    .to_string();
+            }
+        }
+
+        let s = hamesh_app_set_event_callback(app, Some(on_event), std::ptr::null_mut());
+        assert_eq!(s, HameshStatus::Ok);
+
+        // Queue event directly via handle
+        {
+            let handle = &*app;
+            let mut queue = handle.event_queue.lock().unwrap();
+            queue.push_back(hamesh_ffi::QueuedEvent {
+                comp_id: "child_ok".to_string(),
+                event_type: "click".to_string(),
+                payload: "{\"test\": true}".to_string(),
+            });
+        }
+
+        // Poll events - should invoke callback synchronously
+        let polled = hamesh_app_poll_events(app);
+        assert_eq!(polled, 1);
+        assert!(CALLED.load(Ordering::SeqCst));
+        assert_eq!(*LAST_COMP.lock().unwrap(), "child_ok");
+        assert_eq!(*LAST_TYPE.lock().unwrap(), "click");
+
+        hamesh_app_destroy(app);
+    }
+}
+
+#[test]
+fn test_bat_15_deadlock_free_callback_reentrancy() {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    unsafe {
+        let app = hamesh_app_create(b"root\0".as_ptr() as *const _);
+        assert!(!app.is_null());
+
+        let parent = CString::new("root").unwrap();
+        let input_id = CString::new("input_field").unwrap();
+        let echo_id = CString::new("echo_field").unwrap();
+
+        hamesh_app_add_component(
+            app,
+            parent.as_ptr(),
+            input_id.as_ptr(),
+            4,
+            b"Input\0".as_ptr() as *const _,
+        );
+        hamesh_app_add_component(
+            app,
+            parent.as_ptr(),
+            echo_id.as_ptr(),
+            5,
+            b"Echo\0".as_ptr() as *const _,
+        );
+
+        static REENTRANT_CALLS: AtomicUsize = AtomicUsize::new(0);
+        static mut APP_PTR: *mut HameshAppHandle = std::ptr::null_mut();
+        APP_PTR = app;
+        REENTRANT_CALLS.store(0, Ordering::SeqCst);
+
+        extern "C" fn on_change(
+            _user_data: *mut std::ffi::c_void,
+            comp_id: *const std::ffi::c_char,
+            event_type: *const std::ffi::c_char,
+            payload: *const std::ffi::c_char,
+        ) {
+            unsafe {
+                let cid = std::ffi::CStr::from_ptr(comp_id).to_str().unwrap();
+                let etype = std::ffi::CStr::from_ptr(event_type).to_str().unwrap();
+                if cid == "input_field" && etype == "change" {
+                    let pl = std::ffi::CStr::from_ptr(payload).to_str().unwrap();
+                    let echo_k = CString::new("text").unwrap();
+                    let echo_v = CString::new(format!("Echo: {pl}")).unwrap();
+                    let echo_id = CString::new("echo_field").unwrap();
+
+                    // Reentrantly call set_prop while inside the callback!
+                    // This MUST NOT deadlock!
+                    let st = hamesh_app_set_prop(
+                        APP_PTR,
+                        echo_id.as_ptr(),
+                        echo_k.as_ptr(),
+                        echo_v.as_ptr(),
+                    );
+                    assert_eq!(st, HameshStatus::Ok);
+                    REENTRANT_CALLS.fetch_add(1, Ordering::SeqCst);
+                }
+            }
+        }
+
+        hamesh_app_set_event_callback(app, Some(on_change), std::ptr::null_mut());
+        hamesh_app_set_focus(app, input_id.as_ptr());
+
+        // Simulate typing into input field
+        let key_cmd = CString::new("text:Hello Hamesh").unwrap();
+        let st = hamesh_app_simulate_key(app, key_cmd.as_ptr());
+        assert_eq!(st, HameshStatus::Ok);
+        assert_eq!(REENTRANT_CALLS.load(Ordering::SeqCst), 1);
+
+        // Verify echo_field was updated by the reentrant call
+        let handle = &*app;
+        let guard = handle.inner.lock().unwrap();
+        let echo_comp = guard.get("echo_field").unwrap();
+        assert_eq!(
+            echo_comp.props.get("text").map(|s| s.as_str()),
+            Some("Echo: Hello Hamesh")
+        );
+        drop(guard);
+
+        hamesh_app_destroy(app);
+    }
+}
+
+#[test]
+fn test_bat_16_exactly_once_event_dispatch() {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    unsafe {
+        let app = hamesh_app_create(b"root\0".as_ptr() as *const _);
+        assert!(!app.is_null());
+
+        let parent = CString::new("root").unwrap();
+        let btn_id = CString::new("test_btn").unwrap();
+        hamesh_app_add_component(
+            app,
+            parent.as_ptr(),
+            btn_id.as_ptr(),
+            3,
+            b"Button\0".as_ptr() as *const _,
+        );
+
+        static EVENT_COUNT: AtomicUsize = AtomicUsize::new(0);
+        EVENT_COUNT.store(0, Ordering::SeqCst);
+
+        extern "C" fn on_click(
+            _user_data: *mut std::ffi::c_void,
+            _comp_id: *const std::ffi::c_char,
+            _event_type: *const std::ffi::c_char,
+            _payload: *const std::ffi::c_char,
+        ) {
+            EVENT_COUNT.fetch_add(1, Ordering::SeqCst);
+        }
+
+        hamesh_app_set_event_callback(app, Some(on_click), std::ptr::null_mut());
+
+        // Simulate 3 clicks
+        for _ in 0..3 {
+            let st = hamesh_app_simulate_click_component(app, btn_id.as_ptr(), 800, 600);
+            assert_eq!(st, HameshStatus::Ok);
+        }
+
+        // Must be exactly 3 events - zero duplicate queueing
+        assert_eq!(EVENT_COUNT.load(Ordering::SeqCst), 3);
+
+        // Polling queue must be empty because callback handled every event synchronously
+        let polled = hamesh_app_poll_events(app);
+        assert_eq!(polled, 0);
+        assert_eq!(EVENT_COUNT.load(Ordering::SeqCst), 3);
+
+        hamesh_app_destroy(app);
+    }
+}
+
+#[test]
+fn test_bat_17_visibility_and_hidden_click_rejection() {
+    unsafe {
+        let app = hamesh_app_create(b"root\0".as_ptr() as *const _);
+        assert!(!app.is_null());
+
+        let parent = CString::new("root").unwrap();
+        let panel_id = CString::new("dropdown_panel").unwrap();
+        let item_id = CString::new("dropdown_item").unwrap();
+
+        hamesh_app_add_component(
+            app,
+            parent.as_ptr(),
+            panel_id.as_ptr(),
+            1,
+            b"Panel\0".as_ptr() as *const _,
+        );
+        hamesh_app_add_component(
+            app,
+            panel_id.as_ptr(),
+            item_id.as_ptr(),
+            3,
+            b"Item\0".as_ptr() as *const _,
+        );
+
+        // Hide panel
+        let st = hamesh_app_set_visible(app, panel_id.as_ptr(), 0);
+        assert_eq!(st, HameshStatus::Ok);
+
+        // Clicking hidden item MUST be rejected by scene hit test
+        let click_st = hamesh_app_simulate_click_component(app, item_id.as_ptr(), 800, 600);
+        assert_eq!(click_st, HameshStatus::NotFound);
+
+        // Show panel
+        let st = hamesh_app_set_visible(app, panel_id.as_ptr(), 1);
+        assert_eq!(st, HameshStatus::Ok);
+
+        // Now clicking succeeds
+        let click_st = hamesh_app_simulate_click_component(app, item_id.as_ptr(), 800, 600);
+        assert_eq!(click_st, HameshStatus::Ok);
+
+        hamesh_app_destroy(app);
+    }
+}
+
+#[test]
+fn test_bat_18_bounded_event_polling_and_callback_unregistration() {
+    use std::os::raw::c_char;
+
+    unsafe {
+        let app = hamesh_app_create(b"root\0".as_ptr() as *const _);
+        assert!(!app.is_null());
+
+        let parent = CString::new("root").unwrap();
+        let btn_id = CString::new("poll_btn").unwrap();
+        hamesh_app_add_component(
+            app,
+            parent.as_ptr(),
+            btn_id.as_ptr(),
+            3,
+            b"PollButton\0".as_ptr() as *const _,
+        );
+
+        // 1. Without callback: events accumulate in queue
+        let st = hamesh_app_simulate_click_component(app, btn_id.as_ptr(), 800, 600);
+        assert_eq!(st, HameshStatus::Ok);
+
+        // hamesh_app_poll_events reports count without dropping events
+        let pending = hamesh_app_poll_events(app);
+        assert_eq!(pending, 1);
+
+        // 2. Poll event into bounded buffers
+        let mut comp_id_buf = [0 as c_char; 64];
+        let mut type_buf = [0 as c_char; 32];
+        let mut payload_buf = [0 as c_char; 128];
+
+        let res = hamesh_app_poll_event(
+            app,
+            comp_id_buf.as_mut_ptr(),
+            comp_id_buf.len(),
+            type_buf.as_mut_ptr(),
+            type_buf.len(),
+            payload_buf.as_mut_ptr(),
+            payload_buf.len(),
+        );
+        assert_eq!(res, 1);
+
+        let retrieved_comp = std::ffi::CStr::from_ptr(comp_id_buf.as_ptr())
+            .to_str()
+            .unwrap();
+        let retrieved_type = std::ffi::CStr::from_ptr(type_buf.as_ptr())
+            .to_str()
+            .unwrap();
+        assert_eq!(retrieved_comp, "poll_btn");
+        assert_eq!(retrieved_type, "click");
+
+        // Queue now empty
+        let empty_res = hamesh_app_poll_event(
+            app,
+            comp_id_buf.as_mut_ptr(),
+            comp_id_buf.len(),
+            type_buf.as_mut_ptr(),
+            type_buf.len(),
+            payload_buf.as_mut_ptr(),
+            payload_buf.len(),
+        );
+        assert_eq!(empty_res, 0);
+
+        // 3. Register and unregister callback
+        extern "C" fn dummy_cb(
+            _: *mut std::ffi::c_void,
+            _: *const c_char,
+            _: *const c_char,
+            _: *const c_char,
+        ) {
+        }
+        let reg_st = hamesh_app_set_event_callback(app, Some(dummy_cb), std::ptr::null_mut());
+        assert_eq!(reg_st, HameshStatus::Ok);
+
+        // Unregister callback
+        let unreg_st = hamesh_app_set_event_callback(app, None, std::ptr::null_mut());
+        assert_eq!(unreg_st, HameshStatus::Ok);
+
+        // Subsequent event queues without invoking unreferenced callback
+        let st2 = hamesh_app_simulate_click_component(app, btn_id.as_ptr(), 800, 600);
+        assert_eq!(st2, HameshStatus::Ok);
+        assert_eq!(hamesh_app_poll_events(app), 1);
+
+        hamesh_app_destroy(app);
+    }
+}
+
+#[test]
+fn test_bat_19_component_bounds_query() {
+    unsafe {
+        let app = hamesh_app_create(b"root\0".as_ptr() as *const _);
+        assert!(!app.is_null());
+
+        let parent = CString::new("root").unwrap();
+        let btn_id = CString::new("query_btn").unwrap();
+        hamesh_app_add_component(
+            app,
+            parent.as_ptr(),
+            btn_id.as_ptr(),
+            3,
+            b"QueryButton\0".as_ptr() as *const _,
+        );
+
+        let mut x = 0.0f32;
+        let mut y = 0.0f32;
+        let mut w = 0.0f32;
+        let mut h = 0.0f32;
+
+        let st = hamesh_app_get_component_bounds(
+            app,
+            btn_id.as_ptr(),
+            800,
+            600,
+            &mut x,
+            &mut y,
+            &mut w,
+            &mut h,
+        );
+        assert_eq!(st, HameshStatus::Ok);
+        assert!(w > 0.0);
+        assert!(h > 0.0);
+
+        // Querying non-existent component returns NotFound
+        let bad_id = CString::new("non_existent").unwrap();
+        let st_bad = hamesh_app_get_component_bounds(
+            app,
+            bad_id.as_ptr(),
+            800,
+            600,
+            &mut x,
+            &mut y,
+            &mut w,
+            &mut h,
+        );
+        assert_eq!(st_bad, HameshStatus::NotFound);
+
+        hamesh_app_destroy(app);
+    }
+}
+
+#[test]
+fn test_bat_20_callback_unregistration_synchronization_active_bridge() {
+    use std::os::raw::c_char;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    static CALLBACK_CALLS: AtomicUsize = AtomicUsize::new(0);
+
+    extern "C" fn test_callback(
+        _: *mut std::ffi::c_void,
+        _: *const c_char,
+        _: *const c_char,
+        _: *const c_char,
+    ) {
+        CALLBACK_CALLS.fetch_add(1, Ordering::SeqCst);
+    }
+
+    unsafe {
+        CALLBACK_CALLS.store(0, Ordering::SeqCst);
+        let app = hamesh_app_create(b"root\0".as_ptr() as *const _);
+        assert!(!app.is_null());
+
+        let parent = CString::new("root").unwrap();
+        let btn = CString::new("sync_btn").unwrap();
+        hamesh_app_add_component(
+            app,
+            parent.as_ptr(),
+            btn.as_ptr(),
+            3,
+            b"Sync\0".as_ptr() as *const _,
+        );
+
+        // 1. Register callback
+        let st = hamesh_app_set_event_callback(app, Some(test_callback), std::ptr::null_mut());
+        assert_eq!(st, HameshStatus::Ok);
+
+        // Dispatch via simulate_click_component
+        let clk = hamesh_app_simulate_click_component(app, btn.as_ptr(), 800, 600);
+        assert_eq!(clk, HameshStatus::Ok);
+        assert_eq!(CALLBACK_CALLS.load(Ordering::SeqCst), 1);
+
+        // 2. Unregister callback via None / NULL
+        let unreg = hamesh_app_set_event_callback(app, None, std::ptr::null_mut());
+        assert_eq!(unreg, HameshStatus::Ok);
+
+        // Dispatch event -> callback MUST NOT be invoked; event queued instead
+        let clk2 = hamesh_app_simulate_click_component(app, btn.as_ptr(), 800, 600);
+        assert_eq!(clk2, HameshStatus::Ok);
+        assert_eq!(CALLBACK_CALLS.load(Ordering::SeqCst), 1); // Still 1!
+        assert_eq!(hamesh_app_poll_events(app), 1); // Queued!
+
+        // 3. Re-register callback
+        let rereg = hamesh_app_set_event_callback(app, Some(test_callback), std::ptr::null_mut());
+        assert_eq!(rereg, HameshStatus::Ok);
+
+        // Flushing queued events invokes callback with locks dropped
+        let flushed = hamesh_app_poll_events(app);
+        assert_eq!(flushed, 1);
+        assert_eq!(CALLBACK_CALLS.load(Ordering::SeqCst), 2);
+
+        // 4. Test reentrant unregistration inside callback
+        static APP_PTR: std::sync::atomic::AtomicPtr<HameshAppHandle> =
+            std::sync::atomic::AtomicPtr::new(std::ptr::null_mut());
+        APP_PTR.store(app, Ordering::SeqCst);
+
+        extern "C" fn self_unreg_callback(
+            _: *mut std::ffi::c_void,
+            _: *const c_char,
+            _: *const c_char,
+            _: *const c_char,
+        ) {
+            CALLBACK_CALLS.fetch_add(10, Ordering::SeqCst);
+            let ptr = APP_PTR.load(Ordering::SeqCst);
+            if !ptr.is_null() {
+                unsafe {
+                    // Safe reentrant unregistration from within callback (zero deadlocks!)
+                    hamesh_app_set_event_callback(ptr, None, std::ptr::null_mut());
+                }
+            }
+        }
+
+        hamesh_app_set_event_callback(app, Some(self_unreg_callback), std::ptr::null_mut());
+        let clk3 = hamesh_app_simulate_click_component(app, btn.as_ptr(), 800, 600);
+        assert_eq!(clk3, HameshStatus::Ok);
+        assert_eq!(CALLBACK_CALLS.load(Ordering::SeqCst), 12); // +10
+
+        // Callback self-unregistered; next click queues event without calling self_unreg_callback
+        let clk4 = hamesh_app_simulate_click_component(app, btn.as_ptr(), 800, 600);
+        assert_eq!(clk4, HameshStatus::Ok);
+        assert_eq!(CALLBACK_CALLS.load(Ordering::SeqCst), 12); // Unchanged!
+        assert_eq!(hamesh_app_poll_events(app), 1);
+
+        hamesh_app_destroy(app);
+    }
+}
+
+#[test]
+fn test_bat_21_lossless_event_polling_and_multibyte_utf8() {
+    use std::os::raw::c_char;
+
+    unsafe {
+        let app = hamesh_app_create(b"root\0".as_ptr() as *const _);
+        assert!(!app.is_null());
+
+        let parent = CString::new("root").unwrap();
+        let input_id = CString::new("txt_utf8").unwrap();
+        hamesh_app_add_component(
+            app,
+            parent.as_ptr(),
+            input_id.as_ptr(),
+            4,
+            b"Input\0".as_ptr() as *const _,
+        );
+
+        // Focus input
+        hamesh_app_set_focus(app, input_id.as_ptr());
+
+        // Type multibyte UTF-8 string: German, Japanese, Hebrew, and Emoji
+        let text_action = CString::new("text:Grüße! こんにちは, שלום 🚀").unwrap();
+        let st = hamesh_app_simulate_key(app, text_action.as_ptr());
+        assert_eq!(st, HameshStatus::Ok);
+
+        // Verify event is in queue (no callback registered)
+        assert_eq!(hamesh_app_poll_events(app), 1);
+
+        // 1. Attempt polling with deliberately insufficient buffers
+        let mut small_comp_id = [0 as c_char; 4]; // "txt_utf8" is 8 bytes + 1 = 9 needed
+        let mut small_type = [0 as c_char; 2]; // "change" is 6 bytes + 1 = 7 needed
+        let mut small_payload = [0 as c_char; 10]; // payload is > 30 bytes UTF-8
+
+        let err_res = hamesh_app_poll_event(
+            app,
+            small_comp_id.as_mut_ptr(),
+            small_comp_id.len(),
+            small_type.as_mut_ptr(),
+            small_type.len(),
+            small_payload.as_mut_ptr(),
+            small_payload.len(),
+        );
+        // Returns -(BufferTooSmall) = -9
+        assert_eq!(err_res, -(HameshStatus::BufferTooSmall as i32));
+
+        // CRITICAL CHECK: Event MUST NOT have been consumed or dropped!
+        assert_eq!(hamesh_app_poll_events(app), 1);
+
+        // 2. Poll with properly sized buffers to verify lossless retrieval & UTF-8 integrity
+        let mut comp_id_buf = [0 as c_char; 64];
+        let mut type_buf = [0 as c_char; 32];
+        let mut payload_buf = [0 as c_char; 256];
+
+        let ok_res = hamesh_app_poll_event(
+            app,
+            comp_id_buf.as_mut_ptr(),
+            comp_id_buf.len(),
+            type_buf.as_mut_ptr(),
+            type_buf.len(),
+            payload_buf.as_mut_ptr(),
+            payload_buf.len(),
+        );
+        assert_eq!(ok_res, 1);
+
+        let retrieved_comp = std::ffi::CStr::from_ptr(comp_id_buf.as_ptr())
+            .to_str()
+            .unwrap();
+        let retrieved_type = std::ffi::CStr::from_ptr(type_buf.as_ptr())
+            .to_str()
+            .unwrap();
+        let retrieved_payload = std::ffi::CStr::from_ptr(payload_buf.as_ptr())
+            .to_str()
+            .unwrap();
+
+        assert_eq!(retrieved_comp, "txt_utf8");
+        assert_eq!(retrieved_type, "change");
+        assert_eq!(retrieved_payload, "Grüße! こんにちは, שלום 🚀");
+
+        // Queue is now empty
+        assert_eq!(hamesh_app_poll_events(app), 0);
+
+        hamesh_app_destroy(app);
+    }
+}
+
+#[test]
+fn test_bat_22_callback_lifetime_quiescence_and_races() {
+    use std::os::raw::c_char;
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::Arc;
+    use std::thread;
+    use std::time::Duration;
+
+    unsafe {
+        let app = hamesh_app_create(b"root\0".as_ptr() as *const _);
+        assert!(!app.is_null());
+
+        let parent = CString::new("root").unwrap();
+        let btn = CString::new("btn_quiesce").unwrap();
+        hamesh_app_add_component(
+            app,
+            parent.as_ptr(),
+            btn.as_ptr(),
+            3,
+            b"Button\0".as_ptr() as *const _,
+        );
+
+        // Initially no callbacks -> quiesced
+        assert_eq!(hamesh_app_await_quiescence(app, 0), 1);
+
+        struct TestCtx {
+            started: AtomicBool,
+            finished: AtomicBool,
+        }
+        let ctx = Arc::new(TestCtx {
+            started: AtomicBool::new(false),
+            finished: AtomicBool::new(false),
+        });
+
+        extern "C" fn slow_cb(
+            user_data: *mut std::ffi::c_void,
+            _: *const c_char,
+            _: *const c_char,
+            _: *const c_char,
+        ) {
+            let ctx = unsafe { &*(user_data as *const TestCtx) };
+            ctx.started.store(true, Ordering::SeqCst);
+            thread::sleep(Duration::from_millis(50));
+            ctx.finished.store(true, Ordering::SeqCst);
+        }
+
+        hamesh_app_set_event_callback(
+            app,
+            Some(slow_cb),
+            Arc::as_ptr(&ctx) as *mut std::ffi::c_void,
+        );
+
+        // Spawn background thread to simulate asynchronous UI event dispatch
+        let app_usize = app as usize;
+
+        let t = thread::spawn(move || {
+            let app_ptr = app_usize as *mut HameshAppHandle;
+            let btn_name = CString::new("btn_quiesce").unwrap();
+            hamesh_app_simulate_click_component(app_ptr, btn_name.as_ptr(), 800, 600);
+        });
+
+        // Spin until callback has started
+        let start = std::time::Instant::now();
+        while !ctx.started.load(Ordering::SeqCst) {
+            if start.elapsed() > Duration::from_secs(2) {
+                panic!("Timed out waiting for slow_cb to start");
+            }
+            thread::yield_now();
+        }
+
+        // 1. Detach callback immediately from main thread while slow_cb is in-flight
+        let st_det = hamesh_app_set_event_callback(app, None, std::ptr::null_mut());
+        assert_eq!(st_det, HameshStatus::Ok);
+
+        // 2. Subsequent events divert to queue immediately without calling slow_cb again
+        let clk2 = hamesh_app_simulate_click_component(app, btn.as_ptr(), 800, 600);
+        assert_eq!(clk2, HameshStatus::Ok);
+        assert_eq!(hamesh_app_poll_events(app), 1);
+
+        // 3. Quiescence barrier: wait for slow_cb to finish
+        let q_res = hamesh_app_await_quiescence(app, 2000);
+        assert_eq!(q_res, 1);
+        assert!(ctx.finished.load(Ordering::SeqCst));
+
+        t.join().unwrap();
+
+        // 4. Clean shutdown: bounded barrier in destroy does not hang
+        hamesh_app_destroy(app);
+    }
+}
+
+#[test]
+fn test_bat_23_checked_destruction_refuses_active_in_flight() {
+    // BAT-23: hamesh_app_destroy_checked returns Busy and preserves handle when in-flight > 0
+    let root = CString::new("root_23").unwrap();
+    let app = unsafe { hamesh_app_create(root.as_ptr()) };
+    assert!(!app.is_null());
+
+    let parent = CString::new("root_23").unwrap();
+    let btn = CString::new("btn_destroy_test").unwrap();
+    unsafe {
+        hamesh_app_add_component(
+            app,
+            parent.as_ptr(),
+            btn.as_ptr(),
+            3,
+            b"Button\0".as_ptr() as *const _,
+        );
+    }
+
+    struct TestCtx {
+        started: AtomicBool,
+        finished: AtomicBool,
+    }
+    let ctx = Arc::new(TestCtx {
+        started: AtomicBool::new(false),
+        finished: AtomicBool::new(false),
+    });
+
+    extern "C" fn long_running_cb(
+        user_data: *mut std::ffi::c_void,
+        _: *const c_char,
+        _: *const c_char,
+        _: *const c_char,
+    ) {
+        let ctx = unsafe { &*(user_data as *const TestCtx) };
+        ctx.started.store(true, Ordering::SeqCst);
+        // Long running callback (>1000 ms)
+        thread::sleep(Duration::from_millis(1100));
+        ctx.finished.store(true, Ordering::SeqCst);
+    }
+
+    unsafe {
+        hamesh_app_set_event_callback(
+            app,
+            Some(long_running_cb),
+            Arc::as_ptr(&ctx) as *mut std::ffi::c_void,
+        );
+    }
+
+    let app_usize = app as usize;
+    let t = thread::spawn(move || {
+        let app_ptr = app_usize as *mut HameshAppHandle;
+        let btn_name = CString::new("btn_destroy_test").unwrap();
+        unsafe {
+            hamesh_app_simulate_click_component(app_ptr, btn_name.as_ptr(), 800, 600);
+        }
+    });
+
+    // Spin until callback is actively running
+    let start = std::time::Instant::now();
+    while !ctx.started.load(Ordering::SeqCst) {
+        if start.elapsed() > Duration::from_secs(2) {
+            panic!("Timed out waiting for long_running_cb to start");
+        }
+        thread::yield_now();
+    }
+
+    // 1. Attempt destruction while callback is actively in-flight with short timeout (100 ms).
+    // Must refuse destruction and return HameshStatus::Busy.
+    let busy_res = unsafe { hamesh_app_destroy_checked(app, 100) };
+    assert_eq!(busy_res, HameshStatus::Busy);
+    assert!(!ctx.finished.load(Ordering::SeqCst));
+
+    // 2. Retry destruction with sufficient timeout (2000 ms) to allow completion.
+    // Once quiescence is reached, destruction succeeds and frees the handle.
+    let ok_res = unsafe { hamesh_app_destroy_checked(app, 2000) };
+    assert_eq!(ok_res, HameshStatus::Ok);
+    assert!(ctx.finished.load(Ordering::SeqCst));
+
+    t.join().unwrap();
+}
+
+#[test]
+fn test_bat_24_unregistration_and_unbounded_destroy_with_long_running_cb() {
+    // BAT-24: Unregistration during active long-running callback (>1000 ms)
+    // followed by hamesh_app_destroy waits safely until quiescence before freeing handle.
+    let root = CString::new("root_24").unwrap();
+    let app = unsafe { hamesh_app_create(root.as_ptr()) };
+    assert!(!app.is_null());
+
+    let parent = CString::new("root_24").unwrap();
+    let btn = CString::new("btn_unreg_test").unwrap();
+    unsafe {
+        hamesh_app_add_component(
+            app,
+            parent.as_ptr(),
+            btn.as_ptr(),
+            3,
+            b"Button\0".as_ptr() as *const _,
+        );
+    }
+
+    struct TestCtx {
+        started: AtomicBool,
+        finished: AtomicBool,
+    }
+    let ctx = Arc::new(TestCtx {
+        started: AtomicBool::new(false),
+        finished: AtomicBool::new(false),
+    });
+
+    extern "C" fn long_running_cb2(
+        user_data: *mut std::ffi::c_void,
+        _: *const c_char,
+        _: *const c_char,
+        _: *const c_char,
+    ) {
+        let ctx = unsafe { &*(user_data as *const TestCtx) };
+        ctx.started.store(true, Ordering::SeqCst);
+        thread::sleep(Duration::from_millis(1100));
+        ctx.finished.store(true, Ordering::SeqCst);
+    }
+
+    unsafe {
+        hamesh_app_set_event_callback(
+            app,
+            Some(long_running_cb2),
+            Arc::as_ptr(&ctx) as *mut std::ffi::c_void,
+        );
+    }
+
+    let app_usize = app as usize;
+    let t = thread::spawn(move || {
+        let app_ptr = app_usize as *mut HameshAppHandle;
+        let btn_name = CString::new("btn_unreg_test").unwrap();
+        unsafe {
+            hamesh_app_simulate_click_component(app_ptr, btn_name.as_ptr(), 800, 600);
+        }
+    });
+
+    // Wait until running
+    let start = std::time::Instant::now();
+    while !ctx.started.load(Ordering::SeqCst) {
+        if start.elapsed() > Duration::from_secs(2) {
+            panic!("Timed out waiting for long_running_cb2 to start");
+        }
+        thread::yield_now();
+    }
+
+    // Detach callback during active execution
+    let st = unsafe { hamesh_app_set_event_callback(app, None, std::ptr::null_mut()) };
+    assert_eq!(st, HameshStatus::Ok);
+
+    // hamesh_app_destroy must await complete quiescence of the 1100ms callback
+    unsafe { hamesh_app_destroy(app) };
+    assert!(ctx.finished.load(Ordering::SeqCst));
+
+    t.join().unwrap();
+}

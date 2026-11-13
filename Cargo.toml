@@ -15,6 +15,8 @@ members = [
   "crates/hamesh-pi",
   "crates/hamesh-widgets",
   "crates/hamesh-window",
+  "crates/hamesh-shell",
+  "crates/hamesh-ffi",
   "apps/demo",
   "apps/hamesh-cli",
   "apps/hamesh-faults",
@@ -28,6 +30,7 @@ members = [
   "crates/hamesh-editor",
   "apps/hamesh-mcp",
   "apps/hamesh-mcp-drill",
+  "apps/hamesh-workbench",
 ]
 resolver = "2"
 
