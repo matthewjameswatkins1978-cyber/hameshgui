@@ -94,22 +94,27 @@ fn test_bat_40_rapid_resize_oscillation_stress() {
     println!(
         "[BAT-40] Rapid resize: layout p50={l_p50:.2}us, p95={l_p95:.2}us (cold={cold_layout:.2}us) | scene p50={s_p50:.2}us, p95={s_p95:.2}us (cold={cold_scene:.2}us) across {iters} frames."
     );
-    assert!(
-        l_p50 < 300.0,
-        "Layout median under rapid resize must remain sub-300us, got {l_p50}us"
-    );
-    assert!(
-        l_p95 < 600.0,
-        "Layout p95 under rapid resize must remain sub-600us, got {l_p95}us"
-    );
-    assert!(
-        s_p50 < 400.0,
-        "Scene build median under rapid resize must remain sub-400us, got {s_p50}us"
-    );
-    assert!(
-        s_p95 < 800.0,
-        "Scene build p95 under rapid resize must remain sub-800us, got {s_p95}us"
-    );
+    if !cfg!(debug_assertions) {
+        assert!(
+            l_p50 < 300.0,
+            "Layout median under rapid resize must remain sub-300us, got {l_p50}us"
+        );
+        assert!(
+            l_p95 < 600.0,
+            "Layout p95 under rapid resize must remain sub-600us, got {l_p95}us"
+        );
+        assert!(
+            s_p50 < 400.0,
+            "Scene build median under rapid resize must remain sub-400us, got {s_p50}us"
+        );
+        assert!(
+            s_p95 < 800.0,
+            "Scene build p95 under rapid resize must remain sub-800us, got {s_p95}us"
+        );
+    } else {
+        assert!(l_p50 < 5000.0, "Debug layout median sanity check");
+        assert!(s_p50 < 5000.0, "Debug scene median sanity check");
+    }
 }
 
 /// BAT-41: High-frequency visual world churn.
@@ -176,10 +181,14 @@ fn test_bat_41_high_frequency_visual_world_churn() {
     let p50 = scene_times_us[iters / 2];
     let p95 = scene_times_us[(iters as f64 * 0.95) as usize];
     println!("[BAT-41] Theme churn (100 switches): p50={p50:.2}us, p95={p95:.2}us");
-    assert!(
-        p50 < 500.0,
-        "Theme switch scene build median must be sub-500us, got {p50}us"
-    );
+    if !cfg!(debug_assertions) {
+        assert!(
+            p50 < 500.0,
+            "Theme switch scene build median must be sub-500us, got {p50}us"
+        );
+    } else {
+        assert!(p50 < 5000.0, "Debug theme switch median sanity check");
+    }
 }
 
 /// BAT-42: Continuous typing and text editing throughput.
@@ -236,10 +245,14 @@ fn test_bat_42_continuous_typing_throughput() {
     let p50 = scene_times_us[iters / 2];
     let p95 = scene_times_us[(iters as f64 * 0.95) as usize];
     println!("[BAT-42] Continuous typing (200 keystrokes): p50={p50:.2}us, p95={p95:.2}us");
-    assert!(
-        p50 < 300.0,
-        "Keystroke scene build median must be sub-300us, got {p50}us"
-    );
+    if !cfg!(debug_assertions) {
+        assert!(
+            p50 < 300.0,
+            "Keystroke scene build median must be sub-300us, got {p50}us"
+        );
+    } else {
+        assert!(p50 < 5000.0, "Debug typing median sanity check");
+    }
 }
 
 /// BAT-43: Long virtualized list velocity and scroll churn.
@@ -302,10 +315,14 @@ fn test_bat_43_virtualized_list_scroll_velocity() {
 
     let avg_us = total_scene_us / iters as f64;
     println!("[BAT-43] Virtualized scroll velocity: avg scene build = {avg_us:.2}us across {iters} frames.");
-    assert!(
-        avg_us < 350.0,
-        "Virtualized scroll scene build average must be sub-350us, got {avg_us}us"
-    );
+    if !cfg!(debug_assertions) {
+        assert!(
+            avg_us < 350.0,
+            "Virtualized scroll scene build average must be sub-350us, got {avg_us}us"
+        );
+    } else {
+        assert!(avg_us < 10000.0, "Debug scroll average sanity check");
+    }
 }
 
 /// BAT-44: High-frequency rendering and visual regression stability.
